@@ -1,0 +1,37 @@
+{
+    "server": {
+        "host": "127.0.0.1",
+        "port": 1194,
+        "proto": "udp",
+        "keepalive": [
+            10,
+            60
+        ]
+    },
+    "crypto": {
+        "ca_cert": "test_data/certs/ca.crt",
+        "client_cert": "test_data/certs/client.crt",
+        "client_key": "test_data/certs/client.key",
+        "tls_crypt_key": "test_data/certs/tls-crypt.key",
+        "cipher": "CHACHA20-POLY1305",
+        "auth": "SHA256"
+    },
+    "tun": {
+        "dev_name": ""
+    },
+    "reconnect": {
+        "delay_seconds": 5,
+        "max_attempts": 10
+    },
+    "performance": {
+        "enable_dco": false,
+        "socket_recv_buffer": 4194304,
+        "socket_send_buffer": 4194304,
+        "batch_size": 4096,
+        "process_quanta": 0,
+        "cpu_affinity": -1
+    },
+    "logging": {
+        "verbosity": 6
+    }
+}

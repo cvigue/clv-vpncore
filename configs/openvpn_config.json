@@ -1,0 +1,50 @@
+{
+    "server": {
+        "host": "0.0.0.0",
+        "port": 1194,
+        "proto": "udp",
+        "dev": "tun",
+        "dev_node": "/dev/net/tun"
+    },
+    "crypto": {
+        "ca_cert": "test_data/certs/ca.crt",
+        "server_cert": "test_data/certs/server.crt",
+        "server_key": "test_data/certs/server.key",
+        "dh_params": "test_data/certs/dh.pem",
+        "cipher": "AES-256-GCM",
+        "auth": "SHA256",
+        "tls_cipher": "TLS-ECDHE-RSA-WITH-AES-256-GCM-SHA384",
+        "keysize": 256,
+        "tls_crypt_key": "test_data/certs/tls-crypt.key"
+    },
+    "network": {
+        "server_network": "10.8.0.0/24",
+        "server_bridge": "10.8.0.1",
+        "client_dns": [
+            "8.8.8.8",
+            "8.8.4.4"
+        ],
+        "routes": [
+            "192.168.1.0/24"
+        ],
+        "push_routes": true
+    },
+    "auth": {
+        "client_cert_required": true,
+        "username_password": false,
+        "crl_verify": false
+    },
+    "performance": {
+        "max_clients": 100,
+        "keepalive": [
+            10,
+            120
+        ],
+        "ping_timer_remote": 60,
+        "renegotiate_seconds": 3600
+    },
+    "logging": {
+        "verbosity": 3,
+        "log_file": "/var/log/clvlib-openvpn.log"
+    }
+}

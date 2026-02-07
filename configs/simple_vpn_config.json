@@ -1,0 +1,8 @@
+{
+    "server": {
+        "$ref": "server_config.json"
+    },
+    "client": {
+        "$ref": "client_config.json"
+    }
+}

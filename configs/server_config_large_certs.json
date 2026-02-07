@@ -1,0 +1,53 @@
+{
+    "server": {
+        "host": "0.0.0.0",
+        "port": 1194,
+        "proto": "udp",
+        "dev": "tun",
+        "dev_node": "/dev/net/tun"
+    },
+    "crypto": {
+        "ca_cert": "test_data/certs/ca_large.crt",
+        "server_cert": "test_data/certs/server_large.crt",
+        "server_key": "test_data/certs/server_large.key",
+        "dh_params": "test_data/certs/dh2048.pem",
+        "cipher": "CHACHA20-POLY1305",
+        "auth": "SHA256",
+        "tls_cipher": "TLS-DHE-RSA-WITH-AES-256-GCM-SHA384",
+        "keysize": 256,
+        "tls_crypt_key": "test_data/certs/tls-crypt.key"
+    },
+    "network": {
+        "server_subnet": "10.8.0.0",
+        "server_subnet_mask": "255.255.255.0",
+        "push_route": [
+            "10.8.0.0 255.255.255.0"
+        ],
+        "push_dhcp": {
+            "dns": [
+                "8.8.8.8",
+                "8.8.4.4"
+            ],
+            "domain": "test.local"
+        }
+    },
+    "options": {
+        "keepalive_interval": 10,
+        "keepalive_timeout": 120,
+        "reneg_sec": 3600,
+        "ping_timer_rem": true,
+        "persist_key": true,
+        "persist_tun": true,
+        "comp_lzo": false,
+        "verb": 3
+    },
+    "management": {
+        "enabled": false,
+        "socket": "/tmp/openvpn-mgmt.sock"
+    },
+    "client_config_dir": "",
+    "status_file": "/tmp/openvpn-status.log",
+    "log_file": "",
+    "max_clients": 10,
+    "duplicate_cn": false
+}

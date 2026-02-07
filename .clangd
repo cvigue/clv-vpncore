@@ -1,0 +1,34 @@
+CompileFlags:
+  Add:
+    - "-std=c++23"
+    - "-I/home/charlie/code/clv/clv-vpncore/src"
+    - "-I/home/charlie/code/clv/clv-vpncore/clv-base/NetCore/src"
+    - "-I/home/charlie/code/clv/clv-vpncore/clv-base/Core/src"
+    - "-I/home/charlie/code/clv/clv-vpncore/clv-base/SslHelp/src"
+    - "-I/home/charlie/code/clv/clv-vpncore/clv-base/extern/asio/asio/include"
+    - "-I/home/charlie/code/clv/clv-vpncore/clv-base/extern/spdlog/include"
+    - "-I/home/charlie/code/clv/clv-vpncore/clv-base/extern/nghttp3/lib"
+    - "-I/home/charlie/code/clv/clv-vpncore/clv-base/extern/json/include"
+    - "-I/home/charlie/code/clv/clv-vpncore/clv-base/extern/googletest/googletest/include"
+    - "-isystem/home/charlie/code/clv/clv-vpncore/build/quictls/include"
+    - "-DCLVLIB_HAS_QUIC_TLS=1"
+    - "-Wno-deprecated-builtins"
+  Remove:
+    - "-fsanitize=address"
+    - "-fno-omit-frame-pointer"
+  CompilationDatabase: build/
+
+Diagnostics:
+  UnusedIncludes: Strict
+  MissingIncludes: Strict
+  Suppress:
+    - "extern/*"
+    - "nghttp3*"
+    - "spdlog*"
+  Includes:
+    IgnoreHeader:
+      - "spdlog/.*"
+      - "asio/.*"
+
+Index:
+  Background: Skip
