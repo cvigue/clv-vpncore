@@ -3,6 +3,15 @@ project(clv-vpncore VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Probe whether the system kernel headers already define the OVPN IFLA enums
+# (upstreamed in Linux 6.12).  A version-number check would miss backports;
+# actually trying to compile is the only reliable test.
+include(CheckCXXSourceCompiles)
+check_cxx_source_compiles("
+    #include <linux/if_link.h>
+    int main() { int x = IFLA_OVPN_MODE; (void)x; return 0; }
+" KERNEL_HEADERS_HAVE_OVPN_IFLA)
+
 # C++23 Standard
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -63,6 +72,10 @@ target_link_libraries(clv_vpncore
         clv::sslhelp
         clv::core
 )
+
+if(KERNEL_HEADERS_HAVE_OVPN_IFLA)
+    target_compile_definitions(clv_vpncore PRIVATE KERNEL_HEADERS_HAVE_OVPN_IFLA=1)
+endif()
 
 # Apply ASAN flags if enabled
 apply_asan_flags(clv_vpncore)

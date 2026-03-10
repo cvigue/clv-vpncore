@@ -149,16 +149,18 @@ enum ovpn_del_peer_reason
     OVPN_DEL_PEER_REASON_TRANSPORT_DISCONNECT,
 };
 
-// Device mode (passed via IFLA_INFO_DATA at device creation)
-#ifndef IFLA_OVPN_MODE
+// Device mode (passed via IFLA_INFO_DATA at device creation).
+// These were upstreamed into <linux/if_link.h> in kernel 6.12; only define
+// them locally when the build-time probe (CMakeLists.txt) determined they are
+// absent from the system headers.  A version-number check would break on
+// distros that backport the definitions, hence the probe approach.
+#ifndef KERNEL_HEADERS_HAVE_OVPN_IFLA
 enum
 {
     IFLA_OVPN_UNSPEC = 0,
     IFLA_OVPN_MODE,
 };
-#endif
 
-#ifndef OVPN_MODE_P2P
 enum ovpn_mode
 {
     OVPN_MODE_P2P = 0,
