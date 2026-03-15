@@ -131,7 +131,7 @@ VpnServer::VpnServer(asio::io_context &io_context, const OpenVpnConfig &config)
                                *logger_manager_.GetLogger(logging::Subsystem::dataio),
                                running_)
               : DataPathEngine(std::in_place_type<UserspaceDataChannel>, io_context_,
-                               tun_device_, routing_table_, routing_table_v6_, session_manager_, *logger_manager_.GetLogger(logging::Subsystem::dataio), stats_,
+                               routing_table_, routing_table_v6_, session_manager_, *logger_manager_.GetLogger(logging::Subsystem::dataio), stats_,
                                stats_observer_,
                                EffectiveBatchSize(config.performance.batch_size),
                                static_cast<std::size_t>(std::max(0, config.performance.process_quanta)),
@@ -329,7 +329,7 @@ void VpnServer::Start()
     // Log TUN device info only if using userspace mode
     if (data_channel_strategy_.RequiresTunDevice())
     {
-        logger_->info("TUN device: {}", tun_device_->GetName());
+        logger_->info("TUN device: {}", data_channel_strategy_.tun_device()->GetName());
     }
 
     logger_->info("Waiting for client connections...");
@@ -373,17 +373,15 @@ void VpnServer::Stop()
     ip_forward_guard_.reset();
 
     // Close TUN device
-    if (tun_device_)
-    {
-        tun_device_->Close();
-    }
+    data_channel_strategy_.CloseTunDevice();
 
     logger_->info("VPN server stopped");
 }
 
 void VpnServer::InitializeTunDevice()
 {
-    tun_device_ = std::make_unique<tun::TunDevice>(io_context_);
+    data_channel_strategy_.CreateTunDevice(io_context_);
+    auto *tun = data_channel_strategy_.tun_device();
 
     // Create TUN device with name from config (or let kernel assign)
     std::string dev_name = config_.server.dev;
@@ -392,7 +390,7 @@ void VpnServer::InitializeTunDevice()
         dev_name = ""; // Let kernel assign tun0, tun1, etc.
     }
 
-    std::string actual_name = tun_device_->Create(dev_name);
+    std::string actual_name = tun->Create(dev_name);
     logger_->info("Created TUN device: {}", actual_name);
 
     // Parse server network (e.g., "10.8.0.0/24") and derive server IP
@@ -404,18 +402,18 @@ void VpnServer::InitializeTunDevice()
     }
     std::uint8_t prefix_len = parsed->second;
 
-    tun_device_->SetAddress(server_ip, prefix_len);
+    tun->SetAddress(server_ip, prefix_len);
     logger_->info("Set TUN address: {}/{}", server_ip, static_cast<int>(prefix_len));
 
-    tun_device_->SetMtu(config_.network.tun_mtu);
+    tun->SetMtu(config_.network.tun_mtu);
 
     if (config_.network.tun_txqueuelen > 0)
     {
-        tun_device_->SetTxQueueLen(config_.network.tun_txqueuelen);
+        tun->SetTxQueueLen(config_.network.tun_txqueuelen);
         logger_->info("Set TUN txqueuelen: {}", config_.network.tun_txqueuelen);
     }
 
-    tun_device_->BringUp();
+    tun->BringUp();
     logger_->info("TUN device is up");
 
     // Add IPv6 address to TUN if configured
@@ -429,7 +427,7 @@ void VpnServer::InitializeTunDevice()
             ipv6::Ipv6Address server_v6 = net_v6;
             server_v6[15] += 1;
             std::string server_v6_str = ipv6::Ipv6ToString(server_v6);
-            tun_device_->AddIpv6Address(server_v6_str, prefix_v6);
+            tun->AddIpv6Address(server_v6_str, prefix_v6);
             logger_->info("Set TUN IPv6 address: {}/{}", server_v6_str, prefix_v6);
         }
     }
@@ -442,8 +440,9 @@ asio::awaitable<void> VpnServer::UdpReceiveLoop()
 
     // Determine TUN fd for synchronous batch writes (userspace mode only)
     int tunFd = -1;
-    if (data_channel_strategy_.RequiresTunDevice() && tun_device_ && tun_device_->IsOpen())
-        tunFd = tun_device_->NativeHandle();
+    auto *tun = data_channel_strategy_.tun_device();
+    if (data_channel_strategy_.RequiresTunDevice() && tun && tun->IsOpen())
+        tunFd = tun->NativeHandle();
 
     // ---- Data fast-path callback ----
     auto onData = [&](transport::IncomingSlot &slot) -> std::span<std::uint8_t>
@@ -481,7 +480,7 @@ asio::awaitable<void> VpnServer::UdpReceiveLoop()
         inbound_arena_,
         stats_,
         stats_observer_,
-        tun_device_.get(),
+        data_channel_strategy_.tun_device(),
         io_context_,
         logger_,
         [&]

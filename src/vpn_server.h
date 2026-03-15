@@ -297,7 +297,6 @@ class VpnServer
     OpenVpnConfig config_;                                     ///< Server configuration
     logging::SubsystemLoggerManager logger_manager_;           ///< Subsystem logger management
     transport::ServerListener listener_;                       ///< Network listener (UDP or TCP)
-    std::unique_ptr<tun::TunDevice> tun_device_;               ///< TUN device for IP packet forwarding
     SessionManager session_manager_;                           ///< Multi-client session management
     RoutingTableIpv4 routing_table_;                           ///< IPv4 routing table for client sessions
     RoutingTableIpv6 routing_table_v6_;                        ///< IPv6 routing table for client sessions

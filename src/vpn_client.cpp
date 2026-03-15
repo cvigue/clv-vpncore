@@ -2375,17 +2375,27 @@ asio::awaitable<void> VpnClient::DcoKeepaliveMonitor()
         // Wrap the fd in asio for async read
         asio::posix::stream_descriptor stream(io_context_, mcast_nl.RawFd());
 
+        // Capture the family ID locally so the loop body never touches
+        // data_channel_strategy_ (which may be reset by Disconnect()).
+        const auto genl_family_id = Dco().genl_family_id_;
+
         std::array<char, 4096> buf;
         while (running_)
         {
             auto bytes = co_await stream.async_read_some(
                 asio::buffer(buf), asio::use_awaitable);
 
+            // Re-check after suspend — Disconnect() may have run while we
+            // were waiting, and the notification we just received could be
+            // from our own device teardown rather than a real peer death.
+            if (!running_)
+                break;
+
             if (bytes < sizeof(struct nlmsghdr))
                 continue;
 
             auto *nlh = reinterpret_cast<struct nlmsghdr *>(buf.data());
-            if (nlh->nlmsg_type != Dco().genl_family_id_)
+            if (nlh->nlmsg_type != genl_family_id)
                 continue;
 
             auto *genlh = (struct genlmsghdr *)NLMSG_DATA(nlh);

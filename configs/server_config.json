@@ -47,10 +47,10 @@
     },
     "performance": {
         "max_clients": 100,
-        "enable_dco": true,
+        "enable_dco": false,
         "ping_timer_remote": 60,
         "renegotiate_seconds": 3600,
-        "stats_interval_seconds": 30,
+        "stats_interval_seconds": 120,
         "socket_recv_buffer": 4194304,
         "socket_send_buffer": 4194304,
         "batch_size": 4096,
