@@ -60,7 +60,7 @@ class VpnServer
      * @param io_context ASIO I/O context
      * @param config Server configuration
      */
-    VpnServer(asio::io_context &io_context, const OpenVpnConfig &config);
+    VpnServer(asio::io_context &io_context, const VpnConfig &config);
 
     /**
      * @brief Destructor - cleanup resources
@@ -294,7 +294,7 @@ class VpnServer
 
   private:                                                     // Data members
     asio::io_context &io_context_;                             ///< ASIO I/O context
-    OpenVpnConfig config_;                                     ///< Server configuration
+    VpnConfig config_;                                         ///< Server configuration
     logging::SubsystemLoggerManager logger_manager_;           ///< Subsystem logger management
     transport::ServerListener listener_;                       ///< Network listener (UDP or TCP)
     SessionManager session_manager_;                           ///< Multi-client session management
@@ -310,8 +310,6 @@ class VpnServer
     std::size_t currentBatchSize_ = 0;                             ///< Current recvmmsg batch depth
     std::size_t processQuanta_ = transport::kDefaultProcessQuanta; ///< Max packets per event-loop yield
 
-    std::unique_ptr<AdaptiveAffinityController> adaptive_affinity_; ///< Adaptive CPU affinity (only in adaptive mode)
-
     // Data channel strategy (userspace vs DCO)
     DataPathEngine data_channel_strategy_;
 
@@ -326,6 +324,10 @@ class VpnServer
     std::optional<ScopedIpv6Forward> ip6_forward_guard_;    ///< IPv6 forwarding
 
     bool running_ = false; ///< Server running flag
+
+    // Timers for periodic coroutines (members so Stop() can cancel them)
+    asio::steady_timer cleanup_timer_; ///< Timer for SessionCleanupLoop
+    asio::steady_timer stats_timer_;   ///< Timer for StatsLoop
 };
 
 } // namespace clv::vpn

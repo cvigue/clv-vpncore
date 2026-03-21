@@ -177,6 +177,9 @@ class DataPathEngine
     /** @brief Run keepalive monitor coroutine (polymorphic) */
     asio::awaitable<void> RunKeepaliveMonitor(DeadPeerCallback on_dead_peer);
 
+    /** @brief Cancel the keepalive monitor's blocking I/O so it can exit */
+    void StopKeepaliveMonitor();
+
     /**
      * @brief Snapshot aggregate data-path stats (polymorphic).
      *
@@ -269,6 +272,13 @@ inline asio::awaitable<void> DataPathEngine::RunKeepaliveMonitor(DeadPeerCallbac
     return std::visit([cb = std::move(on_dead_peer)](auto &s) mutable
     { return s.RunKeepaliveMonitor(std::move(cb)); },
                       impl_);
+}
+
+inline void DataPathEngine::StopKeepaliveMonitor()
+{
+    std::visit([](auto &s)
+    { s.StopKeepaliveMonitor(); },
+               impl_);
 }
 
 inline DataPathStats DataPathEngine::SnapshotStats() const

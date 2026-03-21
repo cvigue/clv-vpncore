@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 #include <filesystem>
+#include <optional>
 
 #include <nlohmann/json.hpp>
 #include "nlohmann/json_fwd.hpp"
@@ -23,178 +24,164 @@ class logger;
 namespace clv::vpn {
 
 /**
-    @brief OpenVPN server configuration structure
-    @details Contains all configuration options for an OpenVPN server instance.
-    Supports modern OpenVPN features while excluding deprecated legacy options.
+    @brief Unified VPN configuration
+    @details Single configuration type for both server and client roles.
+    Shared settings (performance, logging) live at the top level.
+    Role-specific settings (including crypto) live in optional ServerConfig / ClientConfig sections.
 */
-struct OpenVpnConfig
+struct VpnConfig
 {
-    // Server settings
-    struct ServerSettings
+    // ---- Server role (present only when running as server) ----
+    struct ServerConfig
     {
+        // Listen settings
         std::string host = "0.0.0.0";
         uint16_t port = 1194;
         std::string proto = "udp";                 // "udp" or "tcp"
         std::string dev = "tun";                   // "tun" or "tap"
         std::string dev_node = "/dev/net/tun";     // Linux TUN/TAP device
-        std::pair<int, int> keepalive = {10, 120}; ///< {ping_interval_seconds, ping_restart_timeout_seconds}
-    } server;
+        std::pair<int, int> keepalive = {10, 120}; ///< {ping_interval, ping_restart_timeout}
 
-    // Crypto settings
-    struct CryptoSettings
-    {
-        std::filesystem::path ca_cert;
-        std::filesystem::path server_cert;
-        std::filesystem::path server_key;
-        std::filesystem::path dh_params;
+        // Crypto
         std::string cipher = "AES-256-GCM";
         std::string auth = "SHA256";
         std::string tls_cipher = "TLS-ECDHE-RSA-WITH-AES-256-GCM-SHA384";
         size_t keysize = 256;
-        std::filesystem::path tls_crypt_key; ///< Optional TLS-Crypt key file
-    } crypto;
+        std::filesystem::path ca_cert;
+        std::filesystem::path tls_crypt_key;
 
-    // Network settings
-    struct NetworkSettings
-    {
-        std::string server_network = "10.8.0.0/24";
-        std::string server_network_v6; ///< IPv6 pool CIDR (e.g. "fd00::/112"), empty = disabled
-        std::string server_bridge = "10.8.0.1";
+        // Server identity certificates
+        std::filesystem::path cert;
+        std::filesystem::path key;
+        std::filesystem::path dh_params;
+
+        // Network topology
+        std::string network = "10.8.0.0/24"; ///< IPv4 pool CIDR
+        std::string network_v6;              ///< IPv6 pool CIDR (empty = disabled)
+        std::string bridge_ip = "10.8.0.1";  ///< Server IP on VPN bridge
         std::vector<std::string> client_dns = {"8.8.8.8", "8.8.4.4"};
         std::vector<std::string> routes;
-        std::vector<std::string> routes_v6; ///< IPv6 routes to push (e.g. "fd01::/64")
+        std::vector<std::string> routes_v6;
         bool push_routes = true;
-        int tun_mtu = 1500;     ///< TUN device MTU (default 1500)
-        int tun_txqueuelen = 0; ///< TUN TX queue length (0 = OS default, typically 500)
-    } network;
+        int tun_mtu = 1500;     ///< TUN device MTU
+        int tun_txqueuelen = 0; ///< TUN TX queue length (0 = OS default)
 
-    // Authentication settings
-    struct AuthSettings
-    {
+        // Authentication
         bool client_cert_required = true;
         bool username_password = false;
         bool crl_verify = false;
         std::filesystem::path crl_file;
-    } auth;
 
-    // Performance settings
-    struct PerformanceSettings
-    {
+        // Server-specific tuning
         size_t max_clients = 100;
         int ping_timer_remote = 60;
         int renegotiate_seconds = 3600;
-        bool enable_dco = true;         // Use Data Channel Offload (kernel mode) if available
+        int lame_duck_seconds = 0; ///< Lame duck key TTL after renegotiation (0 = no expiry)
+    };
+    std::optional<ServerConfig> server;
+
+    // ---- Client role (present only when running as client) ----
+    struct ClientConfig
+    {
+        // Server to connect to
+        std::string server_host;
+        uint16_t server_port = 1194;
+        std::string protocol = "udp"; ///< "udp", "udp6", or "tcp"
+
+        // Crypto
+        std::string cipher = "AES-256-GCM";
+        std::string auth = "SHA256";
+        std::filesystem::path ca_cert;
+        std::string ca_cert_pem; ///< Inline PEM alternative
+        std::filesystem::path tls_crypt_key;
+        std::string tls_crypt_key_pem; ///< Inline PEM alternative
+
+        // Client identity certificates
+        std::filesystem::path cert;
+        std::string cert_pem; ///< Inline PEM alternative
+        std::filesystem::path key;
+        std::string key_pem; ///< Inline PEM alternative
+
+        // TUN device
+        std::string dev_name; ///< TUN device name (empty = auto)
+
+        // Reconnection
+        int reconnect_delay_seconds = 5;
+        int max_reconnect_attempts = 10;
+
+        // Keepalive
+        int keepalive_interval = 10; ///< Send PING every N seconds (0 = disabled)
+        int keepalive_timeout = 60;  ///< Peer considered dead after N seconds
+    };
+    std::optional<ClientConfig> client;
+
+    // ---- Process-global settings ----
+    struct ProcessConfig
+    {
+        int cpu_affinity = -1; ///< CPU pinning: -1=off, -2=auto, >=0=core
+    } process;
+
+    // ---- Shared performance settings ----
+    struct PerformanceConfig
+    {
+        bool enable_dco = true;         ///< Use Data Channel Offload if available
         int stats_interval_seconds = 0; ///< Data path stats logging interval (0 = disabled)
         int socket_recv_buffer = 0;     ///< SO_RCVBUF size in bytes (0 = OS default)
         int socket_send_buffer = 0;     ///< SO_SNDBUF size in bytes (0 = OS default)
-        int batch_size = 0;             ///< recvmmsg/sendmmsg/TUN batch depth (0 = default 4096)
-        int process_quanta = 0;         ///< Max packets processed between event-loop yields (0 = no chunking)
-        int lame_duck_seconds = 0;      ///< Lame duck key TTL after renegotiation (0 = no expiry, lives until next rekey)
-        int cpu_affinity = -1;          ///< CPU pinning: -1=off, -2=auto, -3=adaptive, >=0=explicit core
-
-        // Adaptive affinity tunables (only used when cpu_affinity == -3)
-        int adaptive_probe_interval = 10;            ///< Stats windows between probes
-        int adaptive_probe_duration = 2;             ///< Stats windows to stay unpinned during probe
-        int adaptive_baseline_windows = 5;           ///< Windows to seed the initial EMA
-        double adaptive_ema_alpha = 0.3;             ///< EMA smoothing factor
-        double adaptive_throughput_threshold = 0.75; ///< Probe if throughput < this × EMA
-        double adaptive_window_seconds = 5.0;        ///< Sampling window duration (seconds)
+        int batch_size = 0;             ///< recvmmsg/sendmmsg/TUN batch depth (0 = default)
+        int process_quanta = 0;         ///< Max packets per event-loop yield (0 = no chunking)
     } performance;
 
-    // Logging settings
-    struct LoggingSettings
+    // ---- Shared logging settings ----
+    struct LoggingConfig
     {
         std::string verbosity = "info"; ///< spdlog level name or numeric (0=trace..6=off)
-        /// Per-subsystem level overrides.  Key = subsystem name
-        /// ("keepalive","sessions","control","dataio","routing","general"),
-        /// value = spdlog level name or numeric string.
+        /// Per-subsystem level overrides. Key = subsystem name, value = spdlog level.
         std::unordered_map<std::string, std::string> subsystem_levels;
     } logging;
+
+    // ---- Convenience queries ----
+    bool HasServerRole() const
+    {
+        return server.has_value();
+    }
+    bool HasClientRole() const
+    {
+        return client.has_value();
+    }
 };
+
+// Backward-compat alias (transitional — prefer VpnConfig directly)
+using OpenVpnConfig = VpnConfig;
 
 /**
-    @brief OpenVPN configuration parser
-    @details Parses JSON configuration files into OpenVpnConfig structures.
+    @brief VPN configuration parser
+    @details Parses JSON configuration files into VpnConfig structures.
     Validates configuration and provides sensible defaults.
 */
-class OpenVpnConfigParser
+class VpnConfigParser
 {
   public:
-    /**
-        @brief Parse OpenVPN configuration from JSON file
-        @param filepath Path to the JSON configuration file
-        @return OpenVpnConfig Parsed configuration
-        @throws std::runtime_error if file cannot be read or parsed
-    */
-    static OpenVpnConfig ParseFile(const std::filesystem::path &filepath);
+    static VpnConfig ParseFile(const std::filesystem::path &filepath);
+    static VpnConfig ParseString(const std::string &jsonString);
+    static VpnConfig ParseJson(const nlohmann::json &json);
 
-    /**
-        @brief Parse OpenVPN configuration from JSON string
-        @param jsonString JSON string containing configuration
-        @return OpenVpnConfig Parsed configuration
-        @throws std::runtime_error if JSON is malformed
-    */
-    static OpenVpnConfig ParseString(const std::string &jsonString);
+    /// Validate server-role config for required fields and consistency.
+    static void ValidateServer(const VpnConfig &config, std::shared_ptr<spdlog::logger> logger = nullptr);
 
-    /**
-        @brief Parse OpenVPN configuration from JSON object
-        @param json JSON object containing configuration
-        @return OpenVpnConfig Parsed configuration
-        @throws std::runtime_error if JSON is malformed
-    */
-    static OpenVpnConfig ParseJson(const nlohmann::json &json);
-
-    /**
-        @brief Validate configuration for required fields and consistency
-        @param config Configuration to validate
-        @param logger Optional logger for warnings
-        @throws std::runtime_error if configuration is invalid
-    */
-    static void Validate(const OpenVpnConfig &config, std::shared_ptr<spdlog::logger> logger = nullptr);
+    /// Validate client-role config for required fields.
+    static void ValidateClient(const VpnConfig &config, std::shared_ptr<spdlog::logger> logger = nullptr);
 
   private:
-    /**
-        @brief Parse server settings from JSON
-        @param json JSON object containing server configuration
-        @return ServerSettings Parsed server settings
-    */
-    static OpenVpnConfig::ServerSettings ParseServerSettings(const nlohmann::json &json);
-
-    /**
-        @brief Parse crypto settings from JSON
-        @param json JSON object containing crypto configuration
-        @return CryptoSettings Parsed crypto settings
-    */
-    static OpenVpnConfig::CryptoSettings ParseCryptoSettings(const nlohmann::json &json);
-
-    /**
-        @brief Parse network settings from JSON
-        @param json JSON object containing network configuration
-        @return NetworkSettings Parsed network settings
-    */
-    static OpenVpnConfig::NetworkSettings ParseNetworkSettings(const nlohmann::json &json);
-
-    /**
-        @brief Parse auth settings from JSON
-        @param json JSON object containing auth configuration
-        @return AuthSettings Parsed auth settings
-    */
-    static OpenVpnConfig::AuthSettings ParseAuthSettings(const nlohmann::json &json);
-
-    /**
-        @brief Parse performance settings from JSON
-        @param json JSON object containing performance configuration
-        @return PerformanceSettings Parsed performance settings
-    */
-    static OpenVpnConfig::PerformanceSettings ParsePerformanceSettings(const nlohmann::json &json);
-
-    /**
-        @brief Parse logging settings from JSON
-        @param json JSON object containing logging configuration
-        @return LoggingSettings Parsed logging settings
-    */
-    static OpenVpnConfig::LoggingSettings ParseLoggingSettings(const nlohmann::json &json);
+    static VpnConfig::ServerConfig ParseServerConfig(const nlohmann::json &json);
+    static VpnConfig::ClientConfig ParseClientConfig(const nlohmann::json &json);
+    static VpnConfig::ProcessConfig ParseProcessConfig(const nlohmann::json &json);
+    static VpnConfig::PerformanceConfig ParsePerformanceConfig(const nlohmann::json &json);
+    static VpnConfig::LoggingConfig ParseLoggingConfig(const nlohmann::json &json);
 };
+
+// Backward-compat alias
+using OpenVpnConfigParser = VpnConfigParser;
 
 } // namespace clv::vpn
 

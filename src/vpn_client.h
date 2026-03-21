@@ -42,94 +42,25 @@ namespace clv::vpn {
 class SslHandshakeContext;
 
 /**
- * @brief Client-specific configuration
+ * @brief Convenience loader — produces a VpnConfig with client role populated.
  *
- * Extends OpenVpnConfig with client-specific settings like
- * server address and reconnection parameters.
+ * Static methods load from JSON, .ovpn, or auto-detect format.
+ * The returned VpnConfig always has client populated; crypto, performance,
+ * and logging are filled from the same source file.
  */
 struct VpnClientConfig
 {
-    // Server connection
-    std::string server_host;       ///< Server hostname or IP
-    std::uint16_t server_port = 0; ///< Server port (default 0, must be set before use)
-    std::string protocol = "udp";  ///< "udp" or "udp6"
+    /// Parse client configuration from a JSON object.
+    static VpnConfig ParseJson(const nlohmann::json &json);
 
-    // TLS-Crypt key (mandatory for our server)
-    std::string tls_crypt_key_file; ///< Path to tls-crypt.key
-    std::string tls_crypt_key_pem;  ///< Inline tls-crypt key content (takes priority when non-empty)
+    /// Load configuration from JSON file.
+    static VpnConfig LoadFromFile(const std::string &path);
 
-    // Certificates
-    std::string ca_cert_file;     ///< CA certificate path
-    std::string client_cert_file; ///< Client certificate path
-    std::string client_key_file;  ///< Client private key path
+    /// Load configuration from .ovpn file.
+    static VpnConfig LoadFromOvpnFile(const std::string &path);
 
-    // Inline PEM alternatives (take priority when non-empty, used by .ovpn loader)
-    std::string ca_cert_pem;     ///< Inline CA certificate PEM
-    std::string client_cert_pem; ///< Inline client certificate PEM
-    std::string client_key_pem;  ///< Inline client private key PEM
-
-    // Crypto preferences
-    std::string cipher; ///< Preferred cipher (e.g., "AES-256-GCM")
-    std::string auth;   ///< HMAC algorithm (e.g., "SHA256")
-
-    // TUN device
-    std::string dev_name; ///< TUN device name (empty for auto)
-
-    // Reconnection
-    int reconnect_delay_seconds = 5;
-    int max_reconnect_attempts = 10;
-
-    // Keepalive
-    int keepalive_interval = 10; ///< Send PING every N seconds (0 = disabled)
-    int keepalive_timeout = 60;  ///< Peer considered dead after N seconds
-
-    // Performance
-    struct Performance
-    {
-        bool enable_dco = false;        ///< Enable DCO (Data Channel Offload) if available
-        int socket_recv_buffer = 0;     ///< SO_RCVBUF size (0 = OS default)
-        int socket_send_buffer = 0;     ///< SO_SNDBUF size (0 = OS default)
-        int batch_size = 0;             ///< recvmmsg/sendmmsg batch depth (0 = default 4096)
-        int process_quanta = 0;         ///< Packets per event-loop yield (0 = no chunking)
-        int cpu_affinity = -1;          ///< CPU core to pin to (-1 = off, -2 = auto)
-        int stats_interval_seconds = 0; ///< Periodic stats log interval (0 = disabled)
-    } performance;
-
-    // Logging
-    int verbosity = 3;
-
-    /**
-     * @brief Parse configuration from a JSON object
-     * @param json Parsed JSON object
-     * @return Parsed configuration
-     */
-    static VpnClientConfig ParseJson(const nlohmann::json &json);
-
-    /**
-     * @brief Load configuration from JSON file
-     * @param path Path to JSON config file
-     * @return Parsed configuration
-     * @throws std::runtime_error on parse failure
-     */
-    static VpnClientConfig LoadFromFile(const std::string &path);
-
-    /**
-     * @brief Load configuration from .ovpn file
-     * @param path Path to OpenVPN .ovpn config file
-     * @return Parsed configuration with inline certs/keys
-     * @throws std::runtime_error on parse failure
-     */
-    static VpnClientConfig LoadFromOvpnFile(const std::string &path);
-
-    /**
-     * @brief Auto-detect format and load configuration
-     * @param path Path to config file (.json or .ovpn)
-     * @return Parsed configuration
-     * @throws std::runtime_error on parse failure
-     * @details Files ending in .ovpn are parsed as OpenVPN format;
-     *          everything else is parsed as JSON.
-     */
-    static VpnClientConfig Load(const std::string &path);
+    /// Auto-detect format (.ovpn vs JSON) and load.
+    static VpnConfig Load(const std::string &path);
 };
 
 /**
@@ -192,7 +123,7 @@ class VpnClient
      * @param io_context ASIO I/O context
      * @param config Client configuration
      */
-    VpnClient(asio::io_context &io_context, const VpnClientConfig &config);
+    VpnClient(asio::io_context &io_context, const VpnConfig &config);
 
     /**
      * @brief Destructor - cleanup resources
@@ -279,7 +210,7 @@ class VpnClient
     /**
      * @brief Get configuration
      */
-    const VpnClientConfig &GetConfig() const
+    const VpnConfig &GetConfig() const
     {
         return config_;
     }
@@ -532,7 +463,7 @@ class VpnClient
   private:
     // Configuration
     asio::io_context &io_context_;
-    VpnClientConfig config_;
+    VpnConfig config_;
 
     // Logger MUST be declared before any member that uses it
     std::shared_ptr<spdlog::logger> logger_;
@@ -602,10 +533,12 @@ class VpnClient
     std::size_t currentBatchSize_ = 0; ///< Runtime batch depth
     std::size_t processQuanta_ = 0;    ///< Packets per event-loop yield
 
-    /// Timers used by StatsLoop and KeepaliveLoop.  Stored as members so
-    /// Disconnect() can cancel them, matching the server's shutdown pattern.
+    /// Timers used by StatsLoop, KeepaliveLoop and the handshake retransmit
+    /// loop.  Stored as members so Disconnect() can cancel them, matching the
+    /// server's shutdown pattern.
     asio::steady_timer stats_timer_{io_context_};
     asio::steady_timer keepalive_timer_{io_context_};
+    asio::steady_timer handshake_timer_{io_context_};
 
   private: // ---- Data Channel Strategy (variant dispatch) ----
     /**

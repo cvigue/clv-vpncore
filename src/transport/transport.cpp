@@ -3,6 +3,7 @@
 #include "transport.h"
 
 #include "openvpn/protocol_constants.h"
+#include "socket_utils.h"
 
 #include <array>
 #include <asio/buffer.hpp>
@@ -14,6 +15,7 @@
 #include <memory>
 #include <span>
 #include <stdexcept>
+#include <unistd.h>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -97,6 +99,24 @@ asio::awaitable<std::vector<std::uint8_t>> UdpTransport::Receive()
 PeerEndpoint UdpTransport::GetPeer() const
 {
     return FromAsioEndpoint(remoteEndpoint_);
+}
+
+void UdpTransport::ApplySocketBuffers(int recv_buf, int send_buf, spdlog::logger &logger)
+{
+    int fd = socket_->native_handle();
+    clv::vpn::ApplySocketBuffer(fd, SO_RCVBUFFORCE, SO_RCVBUF, recv_buf, "SO_RCVBUF", logger);
+    clv::vpn::ApplySocketBuffer(fd, SO_SNDBUFFORCE, SO_SNDBUF, send_buf, "SO_SNDBUF", logger);
+}
+
+std::pair<int, int> UdpTransport::GetSocketBufferSizes() const
+{
+    int fd = socket_->native_handle();
+    int rcv = 0, snd = 0;
+    socklen_t len = sizeof(int);
+    getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcv, &len);
+    len = sizeof(int);
+    getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &snd, &len);
+    return {rcv, snd};
 }
 
 // ---------------------------------------------------------------------------

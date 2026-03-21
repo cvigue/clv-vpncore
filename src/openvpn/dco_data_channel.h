@@ -14,7 +14,9 @@
 #include <asio/awaitable.hpp>
 #include <asio/io_context.hpp>
 #include <asio/ip/udp.hpp>
+#include <asio/posix/stream_descriptor.hpp>
 #include <spdlog/logger.h>
+#include <optional>
 #include <not_null.h>
 
 #include <cstdint>
@@ -210,6 +212,14 @@ class DcoDataChannel
     asio::awaitable<void> RunKeepaliveMonitor(DeadPeerCallback on_dead_peer);
 
     /**
+     * @brief Cancel the keepalive monitor's blocking netlink read.
+     *
+     * Closes the async stream_descriptor so the RunKeepaliveMonitor coroutine
+     * wakes with operation_aborted and exits cleanly.
+     */
+    void StopKeepaliveMonitor();
+
+    /**
      * @brief Check if this strategy requires TUN device
      *
      * DCO manages its own network device in kernel space.
@@ -315,6 +325,7 @@ class DcoDataChannel
     std::unordered_set<uint32_t> created_peers_;                       ///< Track created peer IDs
     std::unordered_map<uint32_t, uint8_t> peer_primary_key_;           ///< Track current primary key_id per peer
     std::unordered_map<uint32_t, openvpn::SessionId> peer_to_session_; ///< Reverse map: peer_id → SessionId
+    std::optional<asio::posix::stream_descriptor> nl_stream_;          ///< Netlink multicast stream (for cancellation)
 };
 
 } // namespace clv::vpn

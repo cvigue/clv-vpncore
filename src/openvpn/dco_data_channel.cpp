@@ -594,14 +594,14 @@ asio::awaitable<void> DcoDataChannel::RunKeepaliveMonitor(DeadPeerCallback on_de
         co_return;
     }
 
-    asio::posix::stream_descriptor nl_stream(io_context_, dup_fd);
+    nl_stream_.emplace(io_context_, dup_fd);
 
     std::array<uint8_t, 4096> buf;
 
     while (running_)
     {
         std::error_code ec;
-        auto bytes = co_await nl_stream.async_read_some(
+        auto bytes = co_await nl_stream_->async_read_some(
             asio::buffer(buf), asio::redirect_error(asio::use_awaitable, ec));
 
         if (ec)
@@ -716,6 +716,13 @@ asio::awaitable<void> DcoDataChannel::RunKeepaliveMonitor(DeadPeerCallback on_de
     }
 
     logger_->info("DCO keepalive monitor stopped");
+    nl_stream_.reset();
+}
+
+void DcoDataChannel::StopKeepaliveMonitor()
+{
+    if (nl_stream_)
+        nl_stream_->close();
 }
 
 // ---------------------------------------------------------------------------

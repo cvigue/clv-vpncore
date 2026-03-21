@@ -67,10 +67,10 @@ This creates `ca_large.crt`, `server_large.crt`, `client_large.crt` with 4096-bi
 **To test:**
 ```bash
 # Server (in one terminal, run from project root):
-sudo ./build/demos/simple_vpn_server configs/server_config_large_certs.json
+sudo ./build/demos/simple_vpn configs/server_config_large_certs.json
 
 # Client (in another terminal, run from project root):
-sudo ./build/demos/simple_vpn_client configs/client_config_large_certs.json
+sudo ./build/demos/simple_vpn configs/client_config_large_certs.json
 ```
 
 **Expected observations:**

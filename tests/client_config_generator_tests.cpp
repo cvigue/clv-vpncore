@@ -30,22 +30,23 @@ class ClientConfigGeneratorTest : public ::testing::Test
         CreateTestFile(test_dir / "ta.key", TLS_AUTH_KEY_CONTENT);
 
         // Setup basic server config
-        server_config.server.host = "vpn.example.com";
-        server_config.server.port = 1194;
-        server_config.server.proto = "udp";
-        server_config.server.dev = "tun";
+        server_config.server.emplace();
+        server_config.server->host = "vpn.example.com";
+        server_config.server->port = 1194;
+        server_config.server->proto = "udp";
+        server_config.server->dev = "tun";
 
-        server_config.crypto.ca_cert = test_dir / "ca.crt";
-        server_config.crypto.server_cert = test_dir / "server.crt";
-        server_config.crypto.server_key = test_dir / "server.key";
-        server_config.crypto.cipher = "AES-256-GCM";
-        server_config.crypto.auth = "SHA256";
-        server_config.crypto.tls_cipher = "TLS-ECDHE-RSA-WITH-AES-256-GCM-SHA384";
+        server_config.server->ca_cert = test_dir / "ca.crt";
+        server_config.server->cert = test_dir / "server.crt";
+        server_config.server->key = test_dir / "server.key";
+        server_config.server->cipher = "AES-256-GCM";
+        server_config.server->auth = "SHA256";
+        server_config.server->tls_cipher = "TLS-ECDHE-RSA-WITH-AES-256-GCM-SHA384";
 
-        server_config.network.server_network = "10.8.0.0/24";
-        server_config.network.client_dns = {"8.8.8.8", "8.8.4.4"};
-        server_config.network.routes = {"192.168.1.0 255.255.255.0"};
-        server_config.network.push_routes = true;
+        server_config.server->network = "10.8.0.0/24";
+        server_config.server->client_dns = {"8.8.8.8", "8.8.4.4"};
+        server_config.server->routes = {"192.168.1.0 255.255.255.0"};
+        server_config.server->push_routes = true;
     }
 
     void TearDown() override
@@ -248,7 +249,7 @@ TEST_F(ClientConfigGeneratorTest, CustomRemoteHost)
 
 TEST_F(ClientConfigGeneratorTest, TcpProtocol)
 {
-    server_config.server.proto = "tcp";
+    server_config.server->proto = "tcp";
 
     ClientOptions opts;
     opts.client_name = "tcp_test";
@@ -322,7 +323,7 @@ TEST_F(ClientConfigGeneratorTest, ValidateFilesSuccess)
 
 TEST_F(ClientConfigGeneratorTest, ValidateFilesMissingCa)
 {
-    server_config.crypto.ca_cert = test_dir / "nonexistent.crt";
+    server_config.server->ca_cert = test_dir / "nonexistent.crt";
 
     ClientOptions opts;
     opts.client_cert = test_dir / "client.crt";
@@ -435,7 +436,7 @@ TEST_F(ClientConfigGeneratorTest, NoCertificatesProvided)
 
 TEST_F(ClientConfigGeneratorTest, MultipleRoutes)
 {
-    server_config.network.routes = {
+    server_config.server->routes = {
         "192.168.1.0 255.255.255.0",
         "192.168.2.0 255.255.255.0",
         "10.0.0.0 255.0.0.0"};

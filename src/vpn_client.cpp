@@ -7,8 +7,8 @@
 #include "dco_netlink_ops.h"
 #include "dco_utils.h"
 #include "iface_utils.h"
+#include "openvpn/vpn_config.h"
 #include "route_utils.h"
-#include "socket_utils.h"
 #include "udp_receive_loop.h"
 #include "nlohmann/json_fwd.hpp"
 #include "openvpn/config_exchange.h"
@@ -37,6 +37,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <tun/tun_device.h>
+#include <tuple>
 #include <util/netlink_helper.h>
 #include <scope_guard.h>
 
@@ -54,7 +55,6 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <filesystem>
-#include <fstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -88,174 +88,78 @@
 namespace clv::vpn {
 
 // ============================================================================
-// VpnClientConfig Implementation
+// VpnClientConfig Convenience Loaders
 // ============================================================================
 
-VpnClientConfig VpnClientConfig::ParseJson(const nlohmann::json &json)
+VpnConfig VpnClientConfig::ParseJson(const nlohmann::json &json)
 {
-    VpnClientConfig config;
-
-    // Server connection
-    if (json.contains("server"))
-    {
-        auto &server = json["server"];
-        config.server_host = server.value("host", "");
-        config.server_port = static_cast<std::uint16_t>(server.value("port", 1194));
-        config.protocol = server.value("proto", "udp");
-
-        if (server.contains("keepalive") && server["keepalive"].is_array() && server["keepalive"].size() >= 2)
-        {
-            config.keepalive_interval = server["keepalive"][0].get<int>();
-            config.keepalive_timeout = server["keepalive"][1].get<int>();
-        }
-    }
-
-    // Crypto settings
-    if (json.contains("crypto"))
-    {
-        auto &crypto = json["crypto"];
-        config.ca_cert_file = crypto.value("ca_cert", "");
-        config.client_cert_file = crypto.value("client_cert", "");
-        config.client_key_file = crypto.value("client_key", "");
-        config.tls_crypt_key_file = crypto.value("tls_crypt_key", "");
-        config.cipher = crypto.value("cipher", "AES-256-GCM");
-        config.auth = crypto.value("auth", "SHA256");
-    }
-
-    // TUN device
-    if (json.contains("tun"))
-    {
-        auto &tun = json["tun"];
-        config.dev_name = tun.value("dev_name", "");
-    }
-
-    // Reconnection settings
-    if (json.contains("reconnect"))
-    {
-        auto &reconnect = json["reconnect"];
-        config.reconnect_delay_seconds = reconnect.value("delay_seconds", 5);
-        config.max_reconnect_attempts = reconnect.value("max_attempts", 10);
-    }
-
-    // Performance settings
-    if (json.contains("performance"))
-    {
-        auto &perf = json["performance"];
-        config.performance.enable_dco = perf.value("enable_dco", false);
-        config.performance.socket_recv_buffer = perf.value("socket_recv_buffer", 0);
-        config.performance.socket_send_buffer = perf.value("socket_send_buffer", 0);
-        config.performance.batch_size = perf.value("batch_size", 0);
-        config.performance.process_quanta = perf.value("process_quanta", 0);
-        config.performance.cpu_affinity = perf.value("cpu_affinity", -1);
-        config.performance.stats_interval_seconds = perf.value("stats_interval_seconds", 0);
-    }
-
-    // Logging
-    if (json.contains("logging"))
-    {
-        auto &logging = json["logging"];
-        config.verbosity = logging.value("verbosity", 3);
-    }
-
-    return config;
+    return VpnConfigParser::ParseJson(json);
 }
 
-VpnClientConfig VpnClientConfig::LoadFromFile(const std::string &path)
+VpnConfig VpnClientConfig::LoadFromFile(const std::string &path)
 {
-    if (!std::filesystem::exists(path))
-    {
-        throw std::runtime_error("VpnClientConfig: Config file not found: " + path);
-    }
-
-    std::ifstream file(path);
-    if (!file.is_open())
-    {
-        throw std::runtime_error("VpnClientConfig: Cannot open config file: " + path);
-    }
-
-    nlohmann::json json;
-    try
-    {
-        file >> json;
-    }
-    catch (const nlohmann::json::parse_error &e)
-    {
-        throw std::runtime_error("VpnClientConfig: JSON parse error in " + path + ": " + e.what());
-    }
-
-    return ParseJson(json);
+    return VpnConfigParser::ParseFile(path);
 }
 
-VpnClientConfig VpnClientConfig::LoadFromOvpnFile(const std::string &path)
+VpnConfig VpnClientConfig::LoadFromOvpnFile(const std::string &path)
 {
     auto ovpn = OvpnConfigParser::ParseFile(path);
     OvpnConfigParser::Validate(ovpn);
 
-    VpnClientConfig config;
+    VpnConfig config;
 
-    // Server connection
-    config.server_host = ovpn.remote.host;
-    config.server_port = ovpn.remote.port;
-    config.protocol = ovpn.remote.proto;
+    // Client role
+    VpnConfig::ClientConfig cli;
+    cli.server_host = ovpn.remote.host;
+    cli.server_port = ovpn.remote.port;
+    cli.protocol = ovpn.remote.proto;
+    cli.keepalive_interval = ovpn.keepalive_interval;
+    cli.keepalive_timeout = ovpn.keepalive_timeout;
+    cli.dev_name = ""; // auto
+    cli.reconnect_delay_seconds = ovpn.connect_retry_delay;
+    cli.max_reconnect_attempts = ovpn.connect_retry_max;
 
-    // Keepalive
-    config.keepalive_interval = ovpn.keepalive_interval;
-    config.keepalive_timeout = ovpn.keepalive_timeout;
-
-    // Crypto
-    config.cipher = ovpn.cipher;
-    config.auth = ovpn.auth;
-
-    // TUN device
-    config.dev_name = ""; // auto
-
-    // Reconnection
-    config.reconnect_delay_seconds = ovpn.connect_retry_delay;
-    config.max_reconnect_attempts = ovpn.connect_retry_max;
-
-    // Certificates — inline PEM from the .ovpn
-    if (std::holds_alternative<std::string>(ovpn.ca_cert))
-        config.ca_cert_pem = std::get<std::string>(ovpn.ca_cert);
+    // Client identity — inline PEM from the .ovpn
     if (std::holds_alternative<std::string>(ovpn.client_cert))
-        config.client_cert_pem = std::get<std::string>(ovpn.client_cert);
+        cli.cert_pem = std::get<std::string>(ovpn.client_cert);
     if (std::holds_alternative<std::string>(ovpn.client_key))
-        config.client_key_pem = std::get<std::string>(ovpn.client_key);
+        cli.key_pem = std::get<std::string>(ovpn.client_key);
 
-    // TLS-Crypt key — inline from <tls-crypt> block
+    config.client = std::move(cli);
+
+    // Client crypto from .ovpn
+    config.client->cipher = ovpn.cipher;
+    config.client->auth = ovpn.auth;
+
+    if (std::holds_alternative<std::string>(ovpn.ca_cert))
+        config.client->ca_cert_pem = std::get<std::string>(ovpn.ca_cert);
+
     if (std::holds_alternative<std::string>(ovpn.tls_crypt))
-        config.tls_crypt_key_pem = std::get<std::string>(ovpn.tls_crypt);
-    // Fallback: tls-auth (some configs use tls-auth where we need tls-crypt)
+        config.client->tls_crypt_key_pem = std::get<std::string>(ovpn.tls_crypt);
     else if (std::holds_alternative<std::string>(ovpn.tls_auth))
-        config.tls_crypt_key_pem = std::get<std::string>(ovpn.tls_auth);
+        config.client->tls_crypt_key_pem = std::get<std::string>(ovpn.tls_auth);
 
-    // Logging
-    config.verbosity = ovpn.verbosity;
-
-    // Socket buffer sizes — honour .ovpn sndbuf/rcvbuf, default 4 MB
+    // Performance
     constexpr int kDefaultSocketBuf = 4 * 1024 * 1024;
     config.performance.socket_send_buffer = ovpn.sndbuf > 0 ? ovpn.sndbuf : kDefaultSocketBuf;
     config.performance.socket_recv_buffer = ovpn.rcvbuf > 0 ? ovpn.rcvbuf : kDefaultSocketBuf;
-
-    // DCO: enabled by default (OpenVPN 2.6+ behaviour), disable-dco opts out
     config.performance.enable_dco = !ovpn.disable_dco;
 
-    // Non-standard: process-quanta override from .ovpn
     if (ovpn.process_quanta >= 0)
         config.performance.process_quanta = ovpn.process_quanta;
-
-    // Non-standard: stats-interval override from .ovpn
     if (ovpn.stats_interval >= 0)
         config.performance.stats_interval_seconds = ovpn.stats_interval;
+
+    // Logging
+    config.logging.verbosity = std::to_string(ovpn.verbosity);
 
     return config;
 }
 
-VpnClientConfig VpnClientConfig::Load(const std::string &path)
+VpnConfig VpnClientConfig::Load(const std::string &path)
 {
-    // Auto-detect format by file extension
     std::filesystem::path p(path);
-    auto ext = p.extension().string(); // SSO, and not the hot path
-    // Normalize to lowercase
+    auto ext = p.extension().string();
     std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 
     if (ext == ".ovpn")
@@ -303,7 +207,7 @@ std::size_t VpnClient::EffectiveBatchSize() const
                     transport::kMaxBatchSize);
 }
 
-VpnClient::VpnClient(asio::io_context &io_context, const VpnClientConfig &config)
+VpnClient::VpnClient(asio::io_context &io_context, const VpnConfig &config)
     : io_context_(io_context),
       config_(config),
       logger_(spdlog::stdout_color_mt("vpn_client")),
@@ -316,10 +220,23 @@ VpnClient::VpnClient(asio::io_context &io_context, const VpnClientConfig &config
                           ? 1 // DCO: no userspace TUN path
                           : EffectiveBatchSize())
 {
-    // Verbosity: 0=off, 1=critical, 2=error, 3=warn, 4=info, 5=debug, 6=trace
-    auto level = static_cast<spdlog::level::level_enum>(
-        std::max(0, static_cast<int>(spdlog::level::off) - config_.verbosity));
-    logger_->set_level(level);
+    // Set log level from config (verbosity is a string: level name or numeric)
+    auto log_level = spdlog::level::from_str(config_.logging.verbosity);
+    // If from_str returns "off" for an unrecognised string, try numeric parse
+    if (log_level == spdlog::level::off && config_.logging.verbosity != "off")
+    {
+        try
+        {
+            int v = std::stoi(config_.logging.verbosity);
+            // Map 0=off, 1=critical, 2=error, ... 6=trace (OpenVPN-style)
+            log_level = static_cast<spdlog::level::level_enum>(
+                std::max(0, static_cast<int>(spdlog::level::off) - v));
+        }
+        catch (...)
+        {
+        } // leave as "off" on parse failure
+    }
+    logger_->set_level(log_level);
 
     currentBatchSize_ = inbound_arena_.BatchSize();
     processQuanta_ = static_cast<std::size_t>(std::max(0, config.performance.process_quanta));
@@ -347,7 +264,7 @@ void VpnClient::Connect()
         return;
     }
 
-    logger_->info("Connecting to {}:{}", config_.server_host, config_.server_port);
+    logger_->info("Connecting to {}:{}", config_.client->server_host, config_.client->server_port);
     SetState(VpnClientState::Connecting);
 
     // Create transport via connector (resolves address and opens socket)
@@ -355,13 +272,13 @@ void VpnClient::Connect()
     // ovpn-dco kernel module can attach correctly (it cannot handle
     // v4-mapped IPv6 addresses on AF_INET6 sockets).
     const bool dco_mode = config_.performance.enable_dco
-                          && config_.protocol != "tcp"
+                          && config_.client->protocol != "tcp"
                           && dco::IsAvailable();
-    transport::ClientConnector connector = (config_.protocol == "tcp")
+    transport::ClientConnector connector = (config_.client->protocol == "tcp")
                                                ? transport::ClientConnector(transport::TcpConnector(io_context_))
                                                : transport::ClientConnector(transport::UdpConnector(io_context_));
 
-    auto transport = connector.Connect(config_.server_host, config_.server_port, dco_mode);
+    auto transport = connector.Connect(config_.client->server_host, config_.client->server_port, dco_mode);
     auto peer = transport.GetPeer();
     logger_->info("Connected to server via {}: {}:{}",
                   transport.IsTcp() ? "TCP" : "UDP",
@@ -370,20 +287,18 @@ void VpnClient::Connect()
     transport_.emplace(std::move(transport));
 
     // Apply socket buffer sizes for UDP
-    if (config_.protocol != "tcp" && transport_->IsUdp())
+    if (auto *udp = std::get_if<transport::UdpTransport>(&*transport_))
     {
-        auto &udpT = std::get<transport::UdpTransport>(*transport_);
-        int fd = udpT.RawSocket().native_handle();
-
-        ApplySocketBuffer(fd, SO_RCVBUFFORCE, SO_RCVBUF, config_.performance.socket_recv_buffer, "SO_RCVBUF", *logger_);
-        ApplySocketBuffer(fd, SO_SNDBUFFORCE, SO_SNDBUF, config_.performance.socket_send_buffer, "SO_SNDBUF", *logger_);
+        udp->ApplySocketBuffers(config_.performance.socket_recv_buffer,
+                                config_.performance.socket_send_buffer,
+                                *logger_);
     }
 
     // Pin CPU if configured
-    SetThreadAffinity(config_.performance.cpu_affinity, *logger_);
+    SetThreadAffinity(config_.process.cpu_affinity, *logger_);
 
     // Initialize data channel strategy
-    if (config_.performance.enable_dco && config_.protocol != "tcp" && dco::IsAvailable())
+    if (config_.performance.enable_dco && config_.client->protocol != "tcp" && dco::IsAvailable())
     {
         try
         {
@@ -410,9 +325,9 @@ void VpnClient::Connect()
     logger_->debug("Generated session ID: {:016x}", local_session_id_);
 
     // Load TLS-Crypt key (inline PEM takes priority over file path)
-    if (!config_.tls_crypt_key_pem.empty())
+    if (!config_.client->tls_crypt_key_pem.empty())
     {
-        auto tls_crypt_opt = openvpn::TlsCrypt::FromKeyString(config_.tls_crypt_key_pem, *logger_);
+        auto tls_crypt_opt = openvpn::TlsCrypt::FromKeyString(config_.client->tls_crypt_key_pem, *logger_);
         if (!tls_crypt_opt)
         {
             logger_->error("Failed to load inline TLS-Crypt key");
@@ -422,28 +337,28 @@ void VpnClient::Connect()
         tls_crypt_.emplace(std::move(*tls_crypt_opt));
         logger_->debug("Loaded TLS-Crypt key from inline content");
     }
-    else if (!config_.tls_crypt_key_file.empty())
+    else if (!config_.client->tls_crypt_key.empty())
     {
-        auto tls_crypt_opt = openvpn::TlsCrypt::FromKeyFile(config_.tls_crypt_key_file, *logger_);
+        auto tls_crypt_opt = openvpn::TlsCrypt::FromKeyFile(config_.client->tls_crypt_key.string(), *logger_);
         if (!tls_crypt_opt)
         {
-            logger_->error("Failed to load TLS-Crypt key from: {}", config_.tls_crypt_key_file);
+            logger_->error("Failed to load TLS-Crypt key from: {}", config_.client->tls_crypt_key.string());
             SetState(VpnClientState::Error);
             return;
         }
         tls_crypt_.emplace(std::move(*tls_crypt_opt));
-        logger_->debug("Loaded TLS-Crypt key from: {}", config_.tls_crypt_key_file);
+        logger_->debug("Loaded TLS-Crypt key from: {}", config_.client->tls_crypt_key.string());
     }
 
     // Initialize ControlChannel with client TLS certificates
     // Inline PEM fields take priority over file paths
     openvpn::TlsCertConfig cert_config{
-        .ca_cert = config_.ca_cert_file,
-        .local_cert = config_.client_cert_file,
-        .local_key = config_.client_key_file,
-        .ca_cert_pem = config_.ca_cert_pem,
-        .local_cert_pem = config_.client_cert_pem,
-        .local_key_pem = config_.client_key_pem};
+        .ca_cert = config_.client->ca_cert.string(),
+        .local_cert = config_.client->cert.string(),
+        .local_key = config_.client->key.string(),
+        .ca_cert_pem = config_.client->ca_cert_pem,
+        .local_cert_pem = config_.client->cert_pem,
+        .local_key_pem = config_.client->key_pem};
 
     // Initialize as client (is_server = false)
     openvpn::SessionId session_id{local_session_id_};
@@ -476,6 +391,28 @@ void VpnClient::Disconnect()
 
     logger_->info("Disconnecting...");
     running_ = false;
+
+    // Cancel the handshake retransmit timer so operator|| in ConnectionLoop
+    // can complete immediately instead of waiting for the 2s expiry.
+    handshake_timer_.cancel();
+
+    // Close the underlying socket to cancel pending async operations (e.g.
+    // async_receive_from in ConnectionLoop).  Must happen before reset()
+    // because the socket is shared_ptr — reset alone may not close it if
+    // the coroutine frame still holds an internal reference.
+    if (transport_)
+    {
+        if (auto *udp = std::get_if<transport::UdpTransport>(&*transport_))
+        {
+            asio::error_code ec;
+            [[maybe_unused]] auto _1 = udp->RawSocket().close(ec);
+            logger_->debug("Closed UDP socket: {}", ec ? ec.message() : "ok");
+        }
+        else if (auto *tcp = std::get_if<transport::TcpTransport>(&*transport_))
+        {
+            tcp->Close();
+        }
+    }
 
     // Close transport
     transport_.reset();
@@ -623,9 +560,8 @@ asio::awaitable<void> VpnClient::ConnectionLoop()
 
                 auto timer_wait = [&]() -> asio::awaitable<void>
                 {
-                    asio::steady_timer t(io_context_);
-                    t.expires_after(kHandshakeRetransmitInterval);
-                    co_await t.async_wait(asio::use_awaitable);
+                    handshake_timer_.expires_after(kHandshakeRetransmitInterval);
+                    co_await handshake_timer_.async_wait(asio::use_awaitable);
                 };
 
                 // operator|| completes when EITHER operand finishes and
@@ -681,7 +617,7 @@ asio::awaitable<void> VpnClient::ConnectionLoop()
 
 asio::awaitable<void> VpnClient::ReconnectLoop()
 {
-    const int max_attempts = config_.max_reconnect_attempts; // 0 = unlimited
+    const int max_attempts = config_.client->max_reconnect_attempts; // 0 = unlimited
 
     while (max_attempts == 0 || reconnect_attempts_ < max_attempts)
     {
@@ -697,7 +633,7 @@ asio::awaitable<void> VpnClient::ReconnectLoop()
 
         // Back-off before the next attempt
         asio::steady_timer timer(io_context_);
-        timer.expires_after(std::chrono::seconds(config_.reconnect_delay_seconds));
+        timer.expires_after(std::chrono::seconds(config_.client->reconnect_delay_seconds));
         co_await timer.async_wait(asio::use_awaitable);
 
         try
@@ -908,9 +844,9 @@ asio::awaitable<void> VpnClient::ProcessTlsHandshake()
             throw std::runtime_error("RAND_bytes failed generating client random");
 
         std::string options = "V4,dev-type tun,link-mtu 1549,tun-mtu 1500,proto UDPv4";
-        if (!config_.cipher.empty())
+        if (!config_.client->cipher.empty())
         {
-            options += ",cipher " + config_.cipher;
+            options += ",cipher " + config_.client->cipher;
         }
         options += ",key-method 2,tls-client";
 
@@ -985,12 +921,12 @@ asio::awaitable<void> VpnClient::ProcessReceivedPlaintext(std::vector<std::uint8
             std::string server_cipher = (end != std::string::npos)
                                             ? server_options.substr(start, end - start)
                                             : server_options.substr(start);
-            if (!server_cipher.empty() && server_cipher != config_.cipher)
+            if (!server_cipher.empty() && server_cipher != config_.client->cipher)
             {
                 logger_->info("NCP: server cipher '{}' overrides client cipher '{}'",
                               server_cipher,
-                              config_.cipher);
-                config_.cipher = server_cipher;
+                              config_.client->cipher);
+                config_.client->cipher = server_cipher;
             }
         }
 
@@ -1037,12 +973,12 @@ void VpnClient::HandlePushReply(const std::string &reply)
 
     // NCP: if the PUSH_REPLY carries a different cipher than what we derived
     // keys with, re-derive and re-install with the authoritative cipher.
-    if (!config.cipher.empty() && config.cipher != config_.cipher)
+    if (!config.cipher.empty() && config.cipher != config_.client->cipher)
     {
         logger_->info("NCP: PUSH_REPLY cipher '{}' overrides current cipher '{}' – re-keying",
                       config.cipher,
-                      config_.cipher);
-        config_.cipher = config.cipher;
+                      config_.client->cipher);
+        config_.client->cipher = config.cipher;
         if (!DeriveAndInstallKeys())
         {
             logger_->error("Re-keying with negotiated cipher failed");
@@ -1149,7 +1085,7 @@ void VpnClient::UserspaceDataPath::StartDataPath()
     }
 
     // Keepalive sender
-    if (client_->config_.keepalive_interval > 0)
+    if (client_->config_.client->keepalive_interval > 0)
     {
         asio::co_spawn(client_->io_context_, client_->KeepaliveLoop(), asio::detached);
     }
@@ -1236,7 +1172,7 @@ void VpnClient::ConfigureTunDevice()
     {
         tun_device_ = std::make_unique<tun::TunDevice>(io_context_);
 
-        std::string created_name = tun_device_->Create(config_.dev_name);
+        std::string created_name = tun_device_->Create(config_.client->dev_name);
         if (created_name.empty())
         {
             logger_->error("Failed to create TUN device");
@@ -1410,7 +1346,7 @@ bool VpnClient::DeriveAndInstallKeys()
     auto result = DeriveDataChannelKeys(control_channel_,
                                         client_random_,
                                         server_random_,
-                                        config_.cipher,
+                                        config_.client->cipher,
                                         /*is_server=*/false,
                                         *logger_);
     if (!result)
@@ -1745,11 +1681,11 @@ asio::awaitable<void> VpnClient::TunToServer()
 
 asio::awaitable<void> VpnClient::KeepaliveLoop()
 {
-    logger_->info("Starting keepalive loop (interval={}s)", config_.keepalive_interval);
+    logger_->info("Starting keepalive loop (interval={}s)", config_.client->keepalive_interval);
 
     while (running_ && state_ == VpnClientState::Connected)
     {
-        keepalive_timer_.expires_after(std::chrono::seconds(config_.keepalive_interval));
+        keepalive_timer_.expires_after(std::chrono::seconds(config_.client->keepalive_interval));
         try
         {
             co_await keepalive_timer_.async_wait(asio::use_awaitable);
@@ -1768,10 +1704,10 @@ asio::awaitable<void> VpnClient::KeepaliveLoop()
         // In DCO mode the kernel delivers peer-death via netlink, but in
         // userspace mode we must poll.  If no packet has arrived within
         // keepalive_timeout seconds the server is considered unreachable.
-        if (config_.keepalive_timeout > 0 && !IsDco())
+        if (config_.client->keepalive_timeout > 0 && !IsDco())
         {
             auto silence = std::chrono::steady_clock::now() - last_rx_time_;
-            if (silence >= std::chrono::seconds(config_.keepalive_timeout))
+            if (silence >= std::chrono::seconds(config_.client->keepalive_timeout))
             {
                 logger_->warn("Keepalive timeout ({:.0f}s): server unreachable",
                               std::chrono::duration<double>(silence).count());
@@ -2076,14 +2012,14 @@ bool VpnClient::SetDcoPeerKeepalive()
     if (!dco.initialized_ || !dco.netlink_helper_.IsOpen())
         return false;
 
-    if (config_.keepalive_interval <= 0 && config_.keepalive_timeout <= 0)
+    if (config_.client->keepalive_interval <= 0 && config_.client->keepalive_timeout <= 0)
     {
         logger_->debug("DCO: Keepalive disabled");
         return true;
     }
 
-    uint32_t interval = static_cast<uint32_t>(std::max(0, config_.keepalive_interval));
-    uint32_t timeout = static_cast<uint32_t>(std::max(0, config_.keepalive_timeout));
+    uint32_t interval = static_cast<uint32_t>(std::max(0, config_.client->keepalive_interval));
+    uint32_t timeout = static_cast<uint32_t>(std::max(0, config_.client->keepalive_timeout));
 
     return dco::SetDcoPeerKeepalive(dco.ifindex_, dco.genl_family_id_, server_peer_id_, interval, timeout, dco.netlink_helper_, *logger_);
 }
@@ -2259,13 +2195,10 @@ asio::awaitable<void> VpnClient::StatsLoop()
 
     // Query actual kernel socket buffer sizes once
     int actualRcvBuf = 0, actualSndBuf = 0;
-    if (transport_ && transport_->IsUdp())
+    if (transport_)
     {
-        int fd = std::get<transport::UdpTransport>(*transport_).RawSocket().native_handle();
-        socklen_t optlen = sizeof(int);
-        getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &actualRcvBuf, &optlen);
-        optlen = sizeof(int);
-        getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &actualSndBuf, &optlen);
+        if (auto *udp = std::get_if<transport::UdpTransport>(&*transport_))
+            std::tie(actualRcvBuf, actualSndBuf) = udp->GetSocketBufferSizes();
     }
 
     logger_->info("[stats] enabled (interval={}s, mode={})",

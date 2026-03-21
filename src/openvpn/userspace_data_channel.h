@@ -161,6 +161,14 @@ class UserspaceDataChannel
     asio::awaitable<void> RunKeepaliveMonitor(DeadPeerCallback on_dead_peer);
 
     /**
+     * @brief Cancel the keepalive monitor's blocking timer.
+     *
+     * Wakes the RunKeepaliveMonitor coroutine so it can observe running_==false
+     * and exit cleanly. Safe to call before RunKeepaliveMonitor has started.
+     */
+    void StopKeepaliveMonitor();
+
+    /**
      * @brief Stop the TUN receiver loop
      *
      * Sets internal flag to break the receive loop started by StartTunReceiver().
@@ -275,6 +283,7 @@ class UserspaceDataChannel
     std::chrono::seconds keepalive_timeout_;
     const bool &running_; ///< Reference to server's running flag
     bool tun_running_ = true;
+    asio::steady_timer keepalive_timer_; ///< Timer for RunKeepaliveMonitor (member for cancellation)
 
     // Pre-allocated vectors reused every batch iteration to avoid heap churn
     // on the hot path.  Cleared (but not freed) at the start of each loop.

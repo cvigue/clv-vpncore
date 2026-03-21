@@ -1,6 +1,7 @@
 // Copyright (c) 2025- Charlie Vigue. All rights reserved.
 
 #include "listener.h"
+#include "socket_utils.h"
 #include "transport/transport.h"
 
 #include <asio/buffer.hpp>
@@ -10,6 +11,7 @@
 #include <cstdint>
 #include <memory>
 #include <type_traits>
+#include <unistd.h>
 #include <utility>
 #include <variant>
 
@@ -38,6 +40,24 @@ UdpTransport UdpListener::TransportFor(const asio::ip::udp::endpoint &ep)
 UdpTransport UdpListener::TransportFor(const PeerEndpoint &ep)
 {
     return UdpTransport(socket_, ToUdpEndpoint(ep));
+}
+
+void UdpListener::ApplySocketBuffers(int recv_buf, int send_buf, spdlog::logger &logger)
+{
+    int fd = socket_->native_handle();
+    clv::vpn::ApplySocketBuffer(fd, SO_RCVBUFFORCE, SO_RCVBUF, recv_buf, "SO_RCVBUF", logger);
+    clv::vpn::ApplySocketBuffer(fd, SO_SNDBUFFORCE, SO_SNDBUF, send_buf, "SO_SNDBUF", logger);
+}
+
+std::pair<int, int> UdpListener::GetSocketBufferSizes() const
+{
+    int fd = socket_->native_handle();
+    int rcv = 0, snd = 0;
+    socklen_t len = sizeof(int);
+    getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcv, &len);
+    len = sizeof(int);
+    getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &snd, &len);
+    return {rcv, snd};
 }
 
 // ---------------------------------------------------------------------------

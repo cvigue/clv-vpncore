@@ -245,11 +245,11 @@ int main(int argc, char *argv[])
 
         // Print summary
         std::cout << "\nConfiguration Summary:\n";
-        std::cout << "  Remote: " << server_config.server.host << ":"
-                  << server_config.server.port << "\n";
-        std::cout << "  Protocol: " << server_config.server.proto << "\n";
-        std::cout << "  Cipher: " << server_config.crypto.cipher << "\n";
-        std::cout << "  Auth: " << server_config.crypto.auth << "\n";
+        std::cout << "  Remote: " << server_config.server->host << ":"
+                  << server_config.server->port << "\n";
+        std::cout << "  Protocol: " << server_config.server->proto << "\n";
+        std::cout << "  Cipher: " << server_config.server->cipher << "\n";
+        std::cout << "  Auth: " << server_config.server->auth << "\n";
         std::cout << "  Certificates: "
                   << (args.embed_certificates ? "embedded" : "external") << "\n";
 

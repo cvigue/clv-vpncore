@@ -127,7 +127,7 @@ class ClientConfigGenerator
      * @return "remote hostname port [proto]"
      */
     std::string BuildRemoteDirective(
-        const OpenVpnConfig::ServerSettings &server,
+        const VpnConfig::ServerConfig &server,
         const ClientOptions &client_opts) const;
 
     /**
@@ -137,7 +137,7 @@ class ClientConfigGenerator
      * @return Multi-line crypto directives (cipher, auth, tls-cipher)
      */
     std::string BuildCryptoDirectives(
-        const OpenVpnConfig::CryptoSettings &crypto,
+        const VpnConfig::ServerConfig &server,
         const ClientOptions &client_opts) const;
 
     /**
@@ -147,7 +147,7 @@ class ClientConfigGenerator
      * @return Multi-line network directives
      */
     std::string BuildNetworkDirectives(
-        const OpenVpnConfig::NetworkSettings &network,
+        const VpnConfig::ServerConfig &server,
         const ClientOptions &client_opts) const;
 
     /**

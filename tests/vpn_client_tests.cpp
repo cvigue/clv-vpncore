@@ -49,25 +49,19 @@ class VpnClientConfigTest : public ::testing::Test
 TEST_F(VpnClientConfigTest, LoadFromFile_ValidConfig)
 {
     std::string json_content = R"({
-        "server": {
-            "host": "vpn.example.com",
-            "port": 1194,
-            "proto": "udp"
-        },
-        "crypto": {
+        "client": {
+            "server_host": "vpn.example.com",
+            "server_port": 1194,
+            "protocol": "udp",
+            "cert": "/path/to/client.crt",
+            "key": "/path/to/client.key",
+            "dev_name": "tun0",
+            "reconnect_delay_seconds": 10,
+            "max_reconnect_attempts": 5,
             "ca_cert": "/path/to/ca.crt",
-            "client_cert": "/path/to/client.crt",
-            "client_key": "/path/to/client.key",
             "tls_crypt_key": "/path/to/tls-crypt.key",
             "cipher": "AES-256-GCM",
             "auth": "SHA256"
-        },
-        "tun": {
-            "dev_name": "tun0"
-        },
-        "reconnect": {
-            "delay_seconds": 10,
-            "max_attempts": 5
         },
         "logging": {
             "verbosity": 4
@@ -78,27 +72,28 @@ TEST_F(VpnClientConfigTest, LoadFromFile_ValidConfig)
 
     auto config = VpnClientConfig::LoadFromFile((temp_dir_ / "valid_config.json").string());
 
-    EXPECT_EQ(config.server_host, "vpn.example.com");
-    EXPECT_EQ(config.server_port, 1194);
-    EXPECT_EQ(config.protocol, "udp");
-    EXPECT_EQ(config.ca_cert_file, "/path/to/ca.crt");
-    EXPECT_EQ(config.client_cert_file, "/path/to/client.crt");
-    EXPECT_EQ(config.client_key_file, "/path/to/client.key");
-    EXPECT_EQ(config.tls_crypt_key_file, "/path/to/tls-crypt.key");
-    EXPECT_EQ(config.cipher, "AES-256-GCM");
-    EXPECT_EQ(config.auth, "SHA256");
-    EXPECT_EQ(config.dev_name, "tun0");
-    EXPECT_EQ(config.reconnect_delay_seconds, 10);
-    EXPECT_EQ(config.max_reconnect_attempts, 5);
-    EXPECT_EQ(config.verbosity, 4);
+    EXPECT_EQ(config.client->server_host, "vpn.example.com");
+    EXPECT_EQ(config.client->server_port, 1194);
+    EXPECT_EQ(config.client->protocol, "udp");
+    EXPECT_EQ(config.client->ca_cert, "/path/to/ca.crt");
+    EXPECT_EQ(config.client->cert, "/path/to/client.crt");
+    EXPECT_EQ(config.client->key, "/path/to/client.key");
+    EXPECT_EQ(config.client->tls_crypt_key, "/path/to/tls-crypt.key");
+    EXPECT_EQ(config.client->cipher, "AES-256-GCM");
+    EXPECT_EQ(config.client->auth, "SHA256");
+    EXPECT_EQ(config.client->dev_name, "tun0");
+    EXPECT_EQ(config.client->reconnect_delay_seconds, 10);
+    EXPECT_EQ(config.client->max_reconnect_attempts, 5);
+    // verbosity 4 stored as string "4"
+    EXPECT_EQ(config.logging.verbosity, "4");
 }
 
 TEST_F(VpnClientConfigTest, LoadFromFile_MinimalConfig)
 {
     // Test with minimal required fields
     std::string json_content = R"({
-        "server": {
-            "host": "10.0.0.1"
+        "client": {
+            "server_host": "10.0.0.1"
         }
     })";
 
@@ -107,21 +102,20 @@ TEST_F(VpnClientConfigTest, LoadFromFile_MinimalConfig)
     auto config = VpnClientConfig::LoadFromFile((temp_dir_ / "minimal_config.json").string());
 
     // Check specified values
-    EXPECT_EQ(config.server_host, "10.0.0.1");
+    EXPECT_EQ(config.client->server_host, "10.0.0.1");
 
-    // Defaults come from json.value() with fallback - but these are only applied
-    // if the section exists. Since "crypto" section is missing, no defaults are set.
-    EXPECT_EQ(config.server_port, 1194);
-    EXPECT_EQ(config.protocol, "udp");
+    // Defaults from ClientConfig struct
+    EXPECT_EQ(config.client->server_port, 1194);
+    EXPECT_EQ(config.client->protocol, "udp");
 
-    // These are empty because the crypto section wasn't provided
-    EXPECT_EQ(config.cipher, "");
-    EXPECT_EQ(config.auth, "");
+    // Crypto defaults when section is absent
+    EXPECT_EQ(config.client->cipher, "AES-256-GCM"); // struct default
+    EXPECT_EQ(config.client->auth, "SHA256");        // struct default
 
     // Reconnect defaults
-    EXPECT_EQ(config.reconnect_delay_seconds, 5);
-    EXPECT_EQ(config.max_reconnect_attempts, 10);
-    EXPECT_EQ(config.verbosity, 3);
+    EXPECT_EQ(config.client->reconnect_delay_seconds, 5);
+    EXPECT_EQ(config.client->max_reconnect_attempts, 10);
+    EXPECT_EQ(config.logging.verbosity, "info"); // default
 }
 
 TEST_F(VpnClientConfigTest, LoadFromFile_FileNotFound)
@@ -147,18 +141,16 @@ TEST_F(VpnClientConfigTest, LoadFromFile_EmptyJson)
     // Should use defaults for everything
     auto config = VpnClientConfig::LoadFromFile((temp_dir_ / "empty.json").string());
 
-    EXPECT_EQ(config.server_host, "");
-    EXPECT_EQ(config.server_port, 0);
-    EXPECT_EQ(config.cipher, "");
+    EXPECT_FALSE(config.HasClientRole());
 }
 
 TEST_F(VpnClientConfigTest, LoadFromFile_IPv6Server)
 {
     std::string json_content = R"({
-        "server": {
-            "host": "2001:db8::1",
-            "port": 443,
-            "proto": "udp6"
+        "client": {
+            "server_host": "2001:db8::1",
+            "server_port": 443,
+            "protocol": "udp6"
         }
     })";
 
@@ -166,18 +158,16 @@ TEST_F(VpnClientConfigTest, LoadFromFile_IPv6Server)
 
     auto config = VpnClientConfig::LoadFromFile((temp_dir_ / "ipv6_config.json").string());
 
-    EXPECT_EQ(config.server_host, "2001:db8::1");
-    EXPECT_EQ(config.server_port, 443);
-    EXPECT_EQ(config.protocol, "udp6");
+    EXPECT_EQ(config.client->server_host, "2001:db8::1");
+    EXPECT_EQ(config.client->server_port, 443);
+    EXPECT_EQ(config.client->protocol, "udp6");
 }
 
 TEST_F(VpnClientConfigTest, LoadFromFile_ChaCha20Cipher)
 {
     std::string json_content = R"({
-        "server": {
-            "host": "vpn.example.com"
-        },
-        "crypto": {
+        "client": {
+            "server_host": "vpn.example.com",
             "cipher": "CHACHA20-POLY1305"
         }
     })";
@@ -186,7 +176,7 @@ TEST_F(VpnClientConfigTest, LoadFromFile_ChaCha20Cipher)
 
     auto config = VpnClientConfig::LoadFromFile((temp_dir_ / "chacha_config.json").string());
 
-    EXPECT_EQ(config.cipher, "CHACHA20-POLY1305");
+    EXPECT_EQ(config.client->cipher, "CHACHA20-POLY1305");
 }
 
 // ============================================================================
@@ -220,12 +210,13 @@ class VpnClientTest : public ::testing::Test
   protected:
     void SetUp() override
     {
-        config_.server_host = "127.0.0.1";
-        config_.server_port = 1194;
-        config_.protocol = "udp";
-        config_.cipher = "AES-256-GCM";
-        config_.auth = "SHA256";
-        config_.verbosity = 6; // trace level for tests
+        config_.client.emplace();
+        config_.client->server_host = "127.0.0.1";
+        config_.client->server_port = 1194;
+        config_.client->protocol = "udp";
+        config_.client->cipher = "AES-256-GCM";
+        config_.client->auth = "SHA256";
+        config_.logging.verbosity = "trace"; // trace level for tests
     }
 
     void TearDown() override
@@ -235,7 +226,7 @@ class VpnClientTest : public ::testing::Test
     }
 
     asio::io_context io_context_;
-    VpnClientConfig config_;
+    VpnConfig config_;
 };
 
 TEST_F(VpnClientTest, Construction)
@@ -324,7 +315,7 @@ class VpnClientConnectTest : public VpnClientTest
 
 TEST_F(VpnClientConnectTest, ConnectFailsWithBadTlsCryptPath)
 {
-    config_.tls_crypt_key_file = "/nonexistent/tls-crypt.key";
+    config_.client->tls_crypt_key = "/nonexistent/tls-crypt.key";
 
     VpnClient client(io_context_, config_);
     client.Connect();
@@ -338,8 +329,8 @@ TEST_F(VpnClientConnectTest, ConnectFailsWithBadTlsCryptPath)
 
 TEST_F(VpnClientConnectTest, ConnectWithoutTlsCrypt)
 {
-    // Don't set tls_crypt_key_file - should try to connect without TLS-Crypt
-    config_.tls_crypt_key_file = "";
+    // Don't set tls_crypt_key - should try to connect without TLS-Crypt
+    config_.client->tls_crypt_key = "";
 
     VpnClient client(io_context_, config_);
 
@@ -351,11 +342,16 @@ TEST_F(VpnClientConnectTest, ConnectWithoutTlsCrypt)
 
     // State should be past Disconnected
     EXPECT_NE(client.GetState(), VpnClientState::Disconnected);
+
+    // Clean shutdown: cancel all coroutine I/O before destroying client/io_context
+    client.Disconnect();
+    io_context_.restart();
+    io_context_.run();
 }
 
 TEST_F(VpnClientConnectTest, ConnectWhileRunning)
 {
-    config_.tls_crypt_key_file = "";
+    config_.client->tls_crypt_key = "";
 
     VpnClient client(io_context_, config_);
     client.Connect();
@@ -368,6 +364,11 @@ TEST_F(VpnClientConnectTest, ConnectWhileRunning)
     // Should still be in a connection state
     auto state = client.GetState();
     EXPECT_TRUE(state == VpnClientState::Connecting || state == VpnClientState::TlsHandshake || state == VpnClientState::Error);
+
+    // Clean shutdown: cancel all coroutine I/O before destroying client/io_context
+    client.Disconnect();
+    io_context_.restart();
+    io_context_.run();
 }
 
 // ============================================================================
@@ -394,7 +395,7 @@ TEST_F(VpnClientTest, NonMovable)
 
 TEST_F(VpnClientTest, HighPort)
 {
-    config_.server_port = 65535;
+    config_.client->server_port = 65535;
 
     VpnClient client(io_context_, config_);
     EXPECT_EQ(client.GetState(), VpnClientState::Disconnected);
@@ -402,7 +403,7 @@ TEST_F(VpnClientTest, HighPort)
 
 TEST_F(VpnClientTest, LowPort)
 {
-    config_.server_port = 1;
+    config_.client->server_port = 1;
 
     VpnClient client(io_context_, config_);
     EXPECT_EQ(client.GetState(), VpnClientState::Disconnected);
@@ -410,7 +411,7 @@ TEST_F(VpnClientTest, LowPort)
 
 TEST_F(VpnClientTest, EmptyServerHost)
 {
-    config_.server_host = "";
+    config_.client->server_host = "";
 
     VpnClient client(io_context_, config_);
     EXPECT_EQ(client.GetState(), VpnClientState::Disconnected);

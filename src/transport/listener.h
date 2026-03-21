@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <utility>
 #include <variant>
 
 namespace clv::vpn::transport {
@@ -56,6 +57,13 @@ class UdpListener
     {
         return *socket_;
     }
+
+    /// @brief Apply SO_RCVBUF/SO_SNDBUF (with FORCE fallback) to the socket.
+    void ApplySocketBuffers(int recv_buf, int send_buf, spdlog::logger &logger);
+
+    /// @brief Query actual kernel socket buffer sizes.
+    /// @return {recv_buf, send_buf} as reported by getsockopt.
+    std::pair<int, int> GetSocketBufferSizes() const;
 
     /// @brief Get the local port the listener is bound to.
     std::uint16_t LocalPort() const

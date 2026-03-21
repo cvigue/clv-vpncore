@@ -39,28 +39,25 @@ TEST_F(VpnConfigTest, ParseValidJsonString)
             "host": "0.0.0.0",
             "port": 1194,
             "proto": "udp",
-            "dev": "tun"
-        },
-        "crypto": {
+            "dev": "tun",
+            "cert": "/etc/ssl/server.crt",
+            "key": "/etc/ssl/server.key",
+            "network": "10.8.0.0 255.255.255.0",
             "ca_cert": "/etc/ssl/ca.crt",
-            "server_cert": "/etc/ssl/server.crt",
-            "server_key": "/etc/ssl/server.key",
             "cipher": "AES-256-GCM"
-        },
-        "network": {
-            "server_network": "10.8.0.0 255.255.255.0"
         }
     })";
 
     OpenVpnConfig config = OpenVpnConfigParser::ParseString(json_str);
 
-    EXPECT_EQ(config.server.host, "0.0.0.0");
-    EXPECT_EQ(config.server.port, 1194);
-    EXPECT_EQ(config.server.proto, "udp");
-    EXPECT_EQ(config.server.dev, "tun");
-    EXPECT_EQ(config.crypto.ca_cert, "/etc/ssl/ca.crt");
-    EXPECT_EQ(config.crypto.cipher, "AES-256-GCM");
-    EXPECT_EQ(config.network.server_network, "10.8.0.0 255.255.255.0");
+    EXPECT_EQ(config.server->host, "0.0.0.0");
+    EXPECT_EQ(config.server->port, 1194);
+    EXPECT_EQ(config.server->proto, "udp");
+    EXPECT_EQ(config.server->dev, "tun");
+    EXPECT_EQ(config.server->cert, "/etc/ssl/server.crt");
+    EXPECT_EQ(config.server->ca_cert, "/etc/ssl/ca.crt");
+    EXPECT_EQ(config.server->cipher, "AES-256-GCM");
+    EXPECT_EQ(config.server->network, "10.8.0.0 255.255.255.0");
 }
 
 TEST_F(VpnConfigTest, ParseValidJsonFile)
@@ -70,23 +67,15 @@ TEST_F(VpnConfigTest, ParseValidJsonFile)
         "server": {
             "port": 443,
             "proto": "tcp",
-            "dev": "tap"
-        },
-        "crypto": {
-            "ca_cert": "/path/to/ca.crt",
-            "server_cert": "/path/to/server.crt",
-            "server_key": "/path/to/server.key"
-        },
-        "network": {
-            "server_network": "192.168.1.0 255.255.255.0",
-            "client_dns": ["8.8.8.8", "8.8.4.4"]
-        },
-        "auth": {
-            "client_cert_required": true
-        },
-        "performance": {
+            "dev": "tap",
+            "cert": "/path/to/server.crt",
+            "key": "/path/to/server.key",
+            "network": "192.168.1.0 255.255.255.0",
+            "client_dns": ["8.8.8.8", "8.8.4.4"],
+            "client_cert_required": true,
             "max_clients": 100,
-            "keepalive": [10, 120]
+            "keepalive": [10, 120],
+            "ca_cert": "/path/to/ca.crt"
         },
         "logging": {
             "verbosity": "debug"
@@ -100,18 +89,18 @@ TEST_F(VpnConfigTest, ParseValidJsonFile)
 
     OpenVpnConfig config = OpenVpnConfigParser::ParseFile(config_file);
 
-    EXPECT_EQ(config.server.port, 443);
-    EXPECT_EQ(config.server.proto, "tcp");
-    EXPECT_EQ(config.server.dev, "tap");
-    EXPECT_EQ(config.crypto.ca_cert, "/path/to/ca.crt");
-    EXPECT_EQ(config.network.server_network, "192.168.1.0 255.255.255.0");
-    EXPECT_EQ(config.network.client_dns.size(), 2);
-    EXPECT_EQ(config.network.client_dns[0], "8.8.8.8");
-    EXPECT_EQ(config.network.client_dns[1], "8.8.4.4");
-    EXPECT_TRUE(config.auth.client_cert_required);
-    EXPECT_EQ(config.performance.max_clients, 100);
-    EXPECT_EQ(config.server.keepalive.first, 10);
-    EXPECT_EQ(config.server.keepalive.second, 120);
+    EXPECT_EQ(config.server->port, 443);
+    EXPECT_EQ(config.server->proto, "tcp");
+    EXPECT_EQ(config.server->dev, "tap");
+    EXPECT_EQ(config.server->ca_cert, "/path/to/ca.crt");
+    EXPECT_EQ(config.server->network, "192.168.1.0 255.255.255.0");
+    EXPECT_EQ(config.server->client_dns.size(), 2);
+    EXPECT_EQ(config.server->client_dns[0], "8.8.8.8");
+    EXPECT_EQ(config.server->client_dns[1], "8.8.4.4");
+    EXPECT_TRUE(config.server->client_cert_required);
+    EXPECT_EQ(config.server->max_clients, 100);
+    EXPECT_EQ(config.server->keepalive.first, 10);
+    EXPECT_EQ(config.server->keepalive.second, 120);
     EXPECT_EQ(config.logging.verbosity, "debug");
 }
 
@@ -133,20 +122,20 @@ TEST_F(VpnConfigTest, ValidateMissingRequiredFields)
 {
     OpenVpnConfig config;
 
-    // Missing required server port
-    EXPECT_THROW(OpenVpnConfigParser::Validate(config), std::runtime_error);
+    // Missing server role entirely
+    EXPECT_THROW(OpenVpnConfigParser::ValidateServer(config), std::runtime_error);
 
-    config.server.port = 1194;
-    config.server.proto = "invalid";
-    EXPECT_THROW(OpenVpnConfigParser::Validate(config), std::runtime_error);
+    config.server.emplace();
+    config.server->proto = "invalid";
+    EXPECT_THROW(OpenVpnConfigParser::ValidateServer(config), std::runtime_error);
 
-    config.server.proto = "udp";
-    config.server.dev = "invalid";
-    EXPECT_THROW(OpenVpnConfigParser::Validate(config), std::runtime_error);
+    config.server->proto = "udp";
+    config.server->dev = "invalid";
+    EXPECT_THROW(OpenVpnConfigParser::ValidateServer(config), std::runtime_error);
 
-    config.server.dev = "tun";
-    // Missing required crypto fields
-    EXPECT_THROW(OpenVpnConfigParser::Validate(config), std::runtime_error);
+    config.server->dev = "tun";
+    // Missing required ca_cert field
+    EXPECT_THROW(OpenVpnConfigParser::ValidateServer(config), std::runtime_error);
 }
 
 TEST_F(VpnConfigTest, ParseEmptySections)
@@ -154,9 +143,6 @@ TEST_F(VpnConfigTest, ParseEmptySections)
     std::string json_str = R"(
     {
         "server": {},
-        "crypto": {},
-        "network": {},
-        "auth": {},
         "performance": {},
         "logging": {}
     })";
@@ -164,8 +150,8 @@ TEST_F(VpnConfigTest, ParseEmptySections)
     OpenVpnConfig config = OpenVpnConfigParser::ParseString(json_str);
 
     // Should have default values
-    EXPECT_EQ(config.server.port, 1194); // Default port
-    EXPECT_TRUE(config.crypto.ca_cert.empty());
+    EXPECT_EQ(config.server->port, 1194); // Default port
+    EXPECT_TRUE(config.server->ca_cert.empty());
 }
 
 TEST_F(VpnConfigTest, ParseRoutesAndPushRoutes)
@@ -175,26 +161,22 @@ TEST_F(VpnConfigTest, ParseRoutesAndPushRoutes)
         "server": {
             "port": 1194,
             "proto": "udp",
-            "dev": "tun"
-        },
-        "crypto": {
-            "ca_cert": "/ca.crt",
-            "server_cert": "/server.crt",
-            "server_key": "/server.key"
-        },
-        "network": {
-            "server_network": "10.0.0.0 255.255.255.0",
+            "dev": "tun",
+            "cert": "/server.crt",
+            "key": "/server.key",
+            "network": "10.0.0.0 255.255.255.0",
             "routes": ["192.168.1.0 255.255.255.0", "10.10.0.0 255.255.0.0"],
-            "push_routes": true
+            "push_routes": true,
+            "ca_cert": "/ca.crt"
         }
     })";
 
     OpenVpnConfig config = OpenVpnConfigParser::ParseString(json_str);
 
-    EXPECT_EQ(config.network.routes.size(), 2);
-    EXPECT_EQ(config.network.routes[0], "192.168.1.0 255.255.255.0");
-    EXPECT_EQ(config.network.routes[1], "10.10.0.0 255.255.0.0");
-    EXPECT_TRUE(config.network.push_routes);
+    EXPECT_EQ(config.server->routes.size(), 2);
+    EXPECT_EQ(config.server->routes[0], "192.168.1.0 255.255.255.0");
+    EXPECT_EQ(config.server->routes[1], "10.10.0.0 255.255.0.0");
+    EXPECT_TRUE(config.server->push_routes);
 }
 
 TEST_F(VpnConfigTest, ParseRoutesV6)
@@ -204,34 +186,29 @@ TEST_F(VpnConfigTest, ParseRoutesV6)
         "server": {
             "port": 1194,
             "proto": "udp",
-            "dev": "tun"
-        },
-        "crypto": {
-            "ca_cert": "/ca.crt",
-            "server_cert": "/server.crt",
-            "server_key": "/server.key"
-        },
-        "network": {
-            "server_network": "10.0.0.0/24",
-            "server_network_v6": "fd00::/112",
+            "dev": "tun",
+            "cert": "/server.crt",
+            "key": "/server.key",
+            "network": "10.0.0.0/24",
+            "network_v6": "fd00::/112",
             "routes_v6": ["fd01::/64", "2001:db8::/32"],
-            "push_routes": true
+            "push_routes": true,
+            "ca_cert": "/ca.crt"
         }
     })";
 
     OpenVpnConfig config = OpenVpnConfigParser::ParseString(json_str);
 
-    ASSERT_EQ(config.network.routes_v6.size(), 2);
-    EXPECT_EQ(config.network.routes_v6[0], "fd01::/64");
-    EXPECT_EQ(config.network.routes_v6[1], "2001:db8::/32");
+    ASSERT_EQ(config.server->routes_v6.size(), 2);
+    EXPECT_EQ(config.server->routes_v6[0], "fd01::/64");
+    EXPECT_EQ(config.server->routes_v6[1], "2001:db8::/32");
 }
 
 TEST_F(VpnConfigTest, ParseSubsystemLogLevels)
 {
     std::string json_str = R"(
     {
-        "server": { "port": 1194, "proto": "udp", "dev": "tun" },
-        "crypto": { "ca_cert": "/ca.crt", "server_cert": "/s.crt", "server_key": "/s.key" },
+        "server": { "port": 1194, "proto": "udp", "dev": "tun", "ca_cert": "/ca.crt" },
         "logging": {
             "verbosity": "info",
             "subsystems": {
@@ -255,8 +232,7 @@ TEST_F(VpnConfigTest, ParseSubsystemLogLevelsEmpty)
 {
     std::string json_str = R"(
     {
-        "server": { "port": 1194, "proto": "udp", "dev": "tun" },
-        "crypto": { "ca_cert": "/ca.crt", "server_cert": "/s.crt", "server_key": "/s.key" },
+        "server": { "port": 1194, "proto": "udp", "dev": "tun", "ca_cert": "/ca.crt" },
         "logging": {
             "verbosity": "warn"
         }
@@ -283,26 +259,27 @@ TEST_F(VpnConfigTest, DefaultPerformanceSettings)
 {
     // An empty config should have the documented defaults
     OpenVpnConfig config;
+    config.server.emplace(); // Need server to check server-specific defaults
 
     EXPECT_EQ(config.performance.stats_interval_seconds, 0);
     EXPECT_EQ(config.performance.socket_recv_buffer, 0);
     EXPECT_EQ(config.performance.socket_send_buffer, 0);
     EXPECT_EQ(config.performance.batch_size, 0);
-    EXPECT_EQ(config.network.tun_mtu, 1500);
+    EXPECT_EQ(config.server->tun_mtu, 1500);
 }
 
 TEST_F(VpnConfigTest, ParsePerformanceTuningFields)
 {
     std::string json_str = R"(
     {
+        "server": {
+            "tun_mtu": 1420
+        },
         "performance": {
             "stats_interval_seconds": 30,
             "socket_recv_buffer": 2097152,
             "socket_send_buffer": 1048576,
             "batch_size": 16
-        },
-        "network": {
-            "tun_mtu": 1420
         }
     })";
 
@@ -312,7 +289,7 @@ TEST_F(VpnConfigTest, ParsePerformanceTuningFields)
     EXPECT_EQ(config.performance.socket_recv_buffer, 2097152);
     EXPECT_EQ(config.performance.socket_send_buffer, 1048576);
     EXPECT_EQ(config.performance.batch_size, 16);
-    EXPECT_EQ(config.network.tun_mtu, 1420);
+    EXPECT_EQ(config.server->tun_mtu, 1420);
 }
 
 TEST_F(VpnConfigTest, OmittedTuningFieldsGetDefaults)
@@ -321,11 +298,11 @@ TEST_F(VpnConfigTest, OmittedTuningFieldsGetDefaults)
     // defaults should apply (0 = OS default / disabled).
     std::string json_str = R"(
     {
-        "performance": {
-            "max_clients": 50
+        "server": {
+            "max_clients": 50,
+            "network": "10.8.0.0/24"
         },
-        "network": {
-            "server_network": "10.8.0.0/24"
+        "performance": {
         }
     })";
 
@@ -335,30 +312,31 @@ TEST_F(VpnConfigTest, OmittedTuningFieldsGetDefaults)
     EXPECT_EQ(config.performance.socket_send_buffer, 0);
     EXPECT_EQ(config.performance.stats_interval_seconds, 0);
     EXPECT_EQ(config.performance.batch_size, 0);
-    EXPECT_EQ(config.network.tun_mtu, 1500);
-    EXPECT_EQ(config.network.tun_txqueuelen, 0);
+    EXPECT_EQ(config.server->tun_mtu, 1500);
+    EXPECT_EQ(config.server->tun_txqueuelen, 0);
     // Verify the explicitly-set field still parsed
-    EXPECT_EQ(config.performance.max_clients, 50);
+    EXPECT_EQ(config.server->max_clients, 50);
 }
 
 TEST_F(VpnConfigTest, ParseTxQueueLen)
 {
     std::string json_str = R"(
     {
-        "network": {
+        "server": {
             "tun_txqueuelen": 200
         }
     })";
 
     OpenVpnConfig config = OpenVpnConfigParser::ParseString(json_str);
 
-    EXPECT_EQ(config.network.tun_txqueuelen, 200);
+    EXPECT_EQ(config.server->tun_txqueuelen, 200);
 }
 
 TEST_F(VpnConfigTest, DefaultTxQueueLen)
 {
     OpenVpnConfig config;
-    EXPECT_EQ(config.network.tun_txqueuelen, 0);
+    config.server.emplace();
+    EXPECT_EQ(config.server->tun_txqueuelen, 0);
 }
 
 TEST_F(VpnConfigTest, ParseBatchSize)
@@ -389,52 +367,52 @@ TEST_F(VpnConfigTest, NegativeTunMtuClampedToMinimum)
 {
     std::string json_str = R"(
     {
-        "network": {
+        "server": {
             "tun_mtu": -1
         }
     })";
 
     OpenVpnConfig config = OpenVpnConfigParser::ParseString(json_str);
-    EXPECT_EQ(config.network.tun_mtu, 576);
+    EXPECT_EQ(config.server->tun_mtu, 576);
 }
 
 TEST_F(VpnConfigTest, ExcessiveTunMtuClampedToMaximum)
 {
     std::string json_str = R"(
     {
-        "network": {
+        "server": {
             "tun_mtu": 65535
         }
     })";
 
     OpenVpnConfig config = OpenVpnConfigParser::ParseString(json_str);
-    EXPECT_EQ(config.network.tun_mtu, 9000);
+    EXPECT_EQ(config.server->tun_mtu, 9000);
 }
 
 TEST_F(VpnConfigTest, ValidTunMtuPassesThrough)
 {
     std::string json_str = R"(
     {
-        "network": {
+        "server": {
             "tun_mtu": 1400
         }
     })";
 
     OpenVpnConfig config = OpenVpnConfigParser::ParseString(json_str);
-    EXPECT_EQ(config.network.tun_mtu, 1400);
+    EXPECT_EQ(config.server->tun_mtu, 1400);
 }
 
 TEST_F(VpnConfigTest, NegativeTxQueueLenClampedToZero)
 {
     std::string json_str = R"(
     {
-        "network": {
+        "server": {
             "tun_txqueuelen": -100
         }
     })";
 
     OpenVpnConfig config = OpenVpnConfigParser::ParseString(json_str);
-    EXPECT_EQ(config.network.tun_txqueuelen, 0);
+    EXPECT_EQ(config.server->tun_txqueuelen, 0);
 }
 
 TEST_F(VpnConfigTest, NegativeSocketBuffersClampedToZero)

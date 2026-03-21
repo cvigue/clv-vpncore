@@ -16,17 +16,17 @@
 
 namespace clv::vpn {
 
-OpenVpnConfig OpenVpnConfigParser::ParseFile(const std::filesystem::path &filepath)
+VpnConfig VpnConfigParser::ParseFile(const std::filesystem::path &filepath)
 {
     if (!std::filesystem::exists(filepath))
     {
-        throw std::runtime_error("OpenVpnConfigParser: Config file not found: " + filepath.string());
+        throw std::runtime_error("VpnConfigParser: Config file not found: " + filepath.string());
     }
 
     std::ifstream file(filepath);
     if (!file.is_open())
     {
-        throw std::runtime_error("OpenVpnConfigParser: Cannot open config file: " + filepath.string());
+        throw std::runtime_error("VpnConfigParser: Cannot open config file: " + filepath.string());
     }
 
     nlohmann::json json;
@@ -36,13 +36,13 @@ OpenVpnConfig OpenVpnConfigParser::ParseFile(const std::filesystem::path &filepa
     }
     catch (const nlohmann::json::parse_error &e)
     {
-        throw std::runtime_error("OpenVpnConfigParser: JSON parse error in " + filepath.string() + ": " + e.what());
+        throw std::runtime_error("VpnConfigParser: JSON parse error in " + filepath.string() + ": " + e.what());
     }
 
     return ParseJson(json);
 }
 
-OpenVpnConfig OpenVpnConfigParser::ParseString(const std::string &jsonString)
+VpnConfig VpnConfigParser::ParseString(const std::string &jsonString)
 {
     nlohmann::json json;
     try
@@ -51,100 +51,101 @@ OpenVpnConfig OpenVpnConfigParser::ParseString(const std::string &jsonString)
     }
     catch (const nlohmann::json::parse_error &e)
     {
-        throw std::runtime_error("OpenVpnConfigParser: JSON parse error: " + std::string(e.what()));
+        throw std::runtime_error("VpnConfigParser: JSON parse error: " + std::string(e.what()));
     }
 
     return ParseJson(json);
 }
 
-OpenVpnConfig OpenVpnConfigParser::ParseJson(const nlohmann::json &json)
+VpnConfig VpnConfigParser::ParseJson(const nlohmann::json &json)
 {
-    OpenVpnConfig config;
+    VpnConfig config;
 
     if (!json.is_object())
     {
-        throw std::runtime_error("OpenVpnConfigParser: Root JSON must be an object");
+        throw std::runtime_error("VpnConfigParser: Root JSON must be an object");
     }
 
-    // Parse each section
-    if (json.contains("server"))
+    // ---- Parse sections ----
+    if (json.contains("server") && json["server"].is_object())
     {
-        config.server = ParseServerSettings(json["server"]);
+        config.server = ParseServerConfig(json["server"]);
     }
-    if (json.contains("crypto"))
+    if (json.contains("client") && json["client"].is_object())
     {
-        config.crypto = ParseCryptoSettings(json["crypto"]);
+        config.client = ParseClientConfig(json["client"]);
     }
-    if (json.contains("network"))
+    if (json.contains("process"))
     {
-        config.network = ParseNetworkSettings(json["network"]);
-    }
-    if (json.contains("auth"))
-    {
-        config.auth = ParseAuthSettings(json["auth"]);
+        config.process = ParseProcessConfig(json["process"]);
     }
     if (json.contains("performance"))
     {
-        config.performance = ParsePerformanceSettings(json["performance"]);
+        config.performance = ParsePerformanceConfig(json["performance"]);
     }
     if (json.contains("logging"))
     {
-        config.logging = ParseLoggingSettings(json["logging"]);
+        config.logging = ParseLoggingConfig(json["logging"]);
     }
 
     return config;
 }
 
-void OpenVpnConfigParser::Validate(const OpenVpnConfig &config, std::shared_ptr<spdlog::logger> logger)
+void VpnConfigParser::ValidateServer(const VpnConfig &config, std::shared_ptr<spdlog::logger> logger)
 {
-    // Validate server settings
-    if (config.server.port == 0)
+    if (!config.server)
     {
-        throw std::runtime_error("OpenVpnConfig: Invalid port number");
+        throw std::runtime_error("VpnConfig: No server role configured");
     }
-    if (config.server.proto != "udp" && config.server.proto != "tcp")
+    const auto &srv = *config.server;
+
+    if (srv.port == 0)
     {
-        throw std::runtime_error("OpenVpnConfig: Protocol must be 'udp' or 'tcp'");
+        throw std::runtime_error("VpnConfig: Invalid port number");
     }
-    if (config.server.proto == "tcp" && config.performance.enable_dco)
+    if (srv.proto != "udp" && srv.proto != "tcp")
     {
-        throw std::runtime_error("OpenVpnConfig: DCO (Data Channel Offload) is not supported with TCP transport. "
+        throw std::runtime_error("VpnConfig: Protocol must be 'udp' or 'tcp'");
+    }
+    if (srv.proto == "tcp" && config.performance.enable_dco)
+    {
+        throw std::runtime_error("VpnConfig: DCO (Data Channel Offload) is not supported with TCP transport. "
                                  "Set enable_dco=false or use proto=udp.");
     }
-    if (config.server.dev != "tun" && config.server.dev != "tap")
+    if (srv.dev != "tun" && srv.dev != "tap")
     {
-        throw std::runtime_error("OpenVpnConfig: Device must be 'tun' or 'tap'");
+        throw std::runtime_error("VpnConfig: Device must be 'tun' or 'tap'");
     }
 
     // Validate crypto settings
-    if (config.crypto.ca_cert.empty())
+    if (srv.ca_cert.empty())
     {
-        throw std::runtime_error("OpenVpnConfig: CA certificate path is required");
+        throw std::runtime_error("VpnConfig: CA certificate is required");
     }
-    if (config.crypto.server_cert.empty())
+    if (srv.cert.empty())
     {
-        throw std::runtime_error("OpenVpnConfig: Server certificate path is required");
+        throw std::runtime_error("VpnConfig: Server certificate path is required");
     }
-    if (config.crypto.server_key.empty())
+    if (srv.key.empty())
     {
-        throw std::runtime_error("OpenVpnConfig: Server key path is required");
+        throw std::runtime_error("VpnConfig: Server key path is required");
     }
 
     // Validate network settings
-    if (config.network.server_network.empty())
+    if (srv.network.empty())
     {
-        throw std::runtime_error("OpenVpnConfig: Server network is required");
+        throw std::runtime_error("VpnConfig: Server network is required");
     }
 
     // Check file existence for certificates
-    std::vector<std::filesystem::path> cert_files = {
-        config.crypto.ca_cert,
-        config.crypto.server_cert,
-        config.crypto.server_key};
+    std::vector<std::filesystem::path> cert_files;
+    cert_files.push_back(srv.ca_cert);
+    cert_files.push_back(srv.cert);
+    cert_files.push_back(srv.key);
 
-    if (!config.crypto.dh_params.empty())
+    if (!srv.dh_params.empty())
     {
-        cert_files.push_back(config.crypto.dh_params);
+        cert_files.push_back(srv.dh_params);
     }
 
     for (const auto &cert_file : cert_files)
@@ -157,148 +158,192 @@ void OpenVpnConfigParser::Validate(const OpenVpnConfig &config, std::shared_ptr<
     }
 }
 
-OpenVpnConfig::ServerSettings OpenVpnConfigParser::ParseServerSettings(const nlohmann::json &json)
+void VpnConfigParser::ValidateClient(const VpnConfig &config, std::shared_ptr<spdlog::logger> /* logger */)
 {
-    OpenVpnConfig::ServerSettings settings;
+    if (!config.client)
+    {
+        throw std::runtime_error("VpnConfig: No client role configured");
+    }
+    const auto &cli = *config.client;
 
+    if (cli.server_host.empty())
+    {
+        throw std::runtime_error("VpnConfig: Client server_host is required");
+    }
+    if (cli.server_port == 0)
+    {
+        throw std::runtime_error("VpnConfig: Client server_port must be non-zero");
+    }
+}
+
+// ============================================================================
+// Section parsers
+// ============================================================================
+
+VpnConfig::ServerConfig VpnConfigParser::ParseServerConfig(const nlohmann::json &json)
+{
+    VpnConfig::ServerConfig s;
+
+    // Listen settings
     if (json.contains("host"))
-        settings.host = json["host"];
+        s.host = json["host"];
     if (json.contains("port"))
-        settings.port = json["port"];
+        s.port = json["port"];
     if (json.contains("proto"))
-        settings.proto = json["proto"];
+        s.proto = json["proto"];
     if (json.contains("dev"))
-        settings.dev = json["dev"];
+        s.dev = json["dev"];
     if (json.contains("dev_node"))
-        settings.dev_node = json["dev_node"];
+        s.dev_node = json["dev_node"];
     if (json.contains("keepalive") && json["keepalive"].is_array() && json["keepalive"].size() == 2)
     {
-        settings.keepalive = {json["keepalive"][0], json["keepalive"][1]};
+        s.keepalive = {json["keepalive"][0], json["keepalive"][1]};
     }
 
-    return settings;
-}
-
-OpenVpnConfig::CryptoSettings OpenVpnConfigParser::ParseCryptoSettings(const nlohmann::json &json)
-{
-    OpenVpnConfig::CryptoSettings settings;
-
-    if (json.contains("ca_cert"))
-        settings.ca_cert = json["ca_cert"].get<std::string>();
-    if (json.contains("server_cert"))
-        settings.server_cert = json["server_cert"].get<std::string>();
-    if (json.contains("server_key"))
-        settings.server_key = json["server_key"].get<std::string>();
-    if (json.contains("dh_params"))
-        settings.dh_params = json["dh_params"].get<std::string>();
+    // Crypto
     if (json.contains("cipher"))
-        settings.cipher = json["cipher"];
+        s.cipher = json["cipher"];
     if (json.contains("auth"))
-        settings.auth = json["auth"];
+        s.auth = json["auth"];
     if (json.contains("tls_cipher"))
-        settings.tls_cipher = json["tls_cipher"];
+        s.tls_cipher = json["tls_cipher"];
     if (json.contains("keysize"))
-        settings.keysize = json["keysize"];
+        s.keysize = json["keysize"];
+    if (json.contains("ca_cert"))
+        s.ca_cert = json["ca_cert"].get<std::string>();
     if (json.contains("tls_crypt_key"))
-        settings.tls_crypt_key = json["tls_crypt_key"].get<std::string>();
+        s.tls_crypt_key = json["tls_crypt_key"].get<std::string>();
 
-    return settings;
-}
+    // Server identity
+    if (json.contains("cert"))
+        s.cert = json["cert"].get<std::string>();
+    if (json.contains("key"))
+        s.key = json["key"].get<std::string>();
+    if (json.contains("dh_params"))
+        s.dh_params = json["dh_params"].get<std::string>();
 
-OpenVpnConfig::NetworkSettings OpenVpnConfigParser::ParseNetworkSettings(const nlohmann::json &json)
-{
-    OpenVpnConfig::NetworkSettings settings;
-
-    if (json.contains("server_network"))
-        settings.server_network = json["server_network"];
-    if (json.contains("server_network_v6"))
-        settings.server_network_v6 = json["server_network_v6"];
-    if (json.contains("server_bridge"))
-        settings.server_bridge = json["server_bridge"];
-
+    // Network
+    if (json.contains("network"))
+        s.network = json["network"];
+    if (json.contains("network_v6"))
+        s.network_v6 = json["network_v6"];
+    if (json.contains("bridge_ip"))
+        s.bridge_ip = json["bridge_ip"];
     if (json.contains("client_dns") && json["client_dns"].is_array())
     {
-        settings.client_dns.clear();
+        s.client_dns.clear();
         for (const auto &dns : json["client_dns"])
-        {
-            settings.client_dns.push_back(dns);
-        }
+            s.client_dns.push_back(dns);
     }
-
     if (json.contains("routes") && json["routes"].is_array())
     {
-        settings.routes.clear();
+        s.routes.clear();
         for (const auto &route : json["routes"])
-        {
-            settings.routes.push_back(route);
-        }
+            s.routes.push_back(route);
     }
-
     if (json.contains("routes_v6") && json["routes_v6"].is_array())
     {
-        settings.routes_v6.clear();
+        s.routes_v6.clear();
         for (const auto &route : json["routes_v6"])
-        {
-            settings.routes_v6.push_back(route);
-        }
+            s.routes_v6.push_back(route);
     }
-
     if (json.contains("push_routes"))
-        settings.push_routes = json["push_routes"];
+        s.push_routes = json["push_routes"];
     if (json.contains("tun_mtu"))
-        settings.tun_mtu = json["tun_mtu"];
+        s.tun_mtu = json["tun_mtu"];
     if (json.contains("tun_txqueuelen"))
-        settings.tun_txqueuelen = json["tun_txqueuelen"];
+        s.tun_txqueuelen = json["tun_txqueuelen"];
 
     // Validate ranges
-    settings.tun_mtu = std::clamp(settings.tun_mtu, 576, 9000);
-    if (settings.tun_txqueuelen < 0)
-        settings.tun_txqueuelen = 0;
+    s.tun_mtu = std::clamp(s.tun_mtu, 576, 9000);
+    if (s.tun_txqueuelen < 0)
+        s.tun_txqueuelen = 0;
 
-    return settings;
-}
-
-OpenVpnConfig::AuthSettings OpenVpnConfigParser::ParseAuthSettings(const nlohmann::json &json)
-{
-    OpenVpnConfig::AuthSettings settings;
-
+    // Auth
     if (json.contains("client_cert_required"))
-        settings.client_cert_required = json["client_cert_required"];
+        s.client_cert_required = json["client_cert_required"];
     if (json.contains("username_password"))
-        settings.username_password = json["username_password"];
+        s.username_password = json["username_password"];
     if (json.contains("crl_verify"))
-        settings.crl_verify = json["crl_verify"];
+        s.crl_verify = json["crl_verify"];
     if (json.contains("crl_file"))
-        settings.crl_file = json["crl_file"].get<std::string>();
+        s.crl_file = json["crl_file"].get<std::string>();
 
-    return settings;
+    // Server-specific tuning
+    if (json.contains("max_clients"))
+        s.max_clients = json["max_clients"];
+    if (json.contains("ping_timer_remote"))
+        s.ping_timer_remote = json["ping_timer_remote"];
+    if (json.contains("renegotiate_seconds"))
+        s.renegotiate_seconds = json["renegotiate_seconds"];
+    if (json.contains("lame_duck_seconds"))
+        s.lame_duck_seconds = json["lame_duck_seconds"];
+
+    return s;
 }
 
-OpenVpnConfig::PerformanceSettings OpenVpnConfigParser::ParsePerformanceSettings(const nlohmann::json &json)
+VpnConfig::ClientConfig VpnConfigParser::ParseClientConfig(const nlohmann::json &json)
 {
-    OpenVpnConfig::PerformanceSettings settings;
+    VpnConfig::ClientConfig c;
 
-    if (json.contains("max_clients"))
-        settings.max_clients = json["max_clients"];
+    if (json.contains("server_host"))
+        c.server_host = json["server_host"];
+    if (json.contains("server_port"))
+        c.server_port = static_cast<uint16_t>(json["server_port"].get<int>());
+    if (json.contains("protocol"))
+        c.protocol = json["protocol"];
 
-    if (json.contains("ping_timer_remote"))
-        settings.ping_timer_remote = json["ping_timer_remote"];
-    if (json.contains("renegotiate_seconds"))
-        settings.renegotiate_seconds = json["renegotiate_seconds"];
-    if (json.contains("enable_dco"))
-        settings.enable_dco = json["enable_dco"];
-    if (json.contains("stats_interval_seconds"))
-        settings.stats_interval_seconds = json["stats_interval_seconds"];
-    if (json.contains("socket_recv_buffer"))
-        settings.socket_recv_buffer = json["socket_recv_buffer"];
-    if (json.contains("socket_send_buffer"))
-        settings.socket_send_buffer = json["socket_send_buffer"];
-    if (json.contains("batch_size"))
-        settings.batch_size = json["batch_size"];
-    if (json.contains("process_quanta"))
-        settings.process_quanta = json["process_quanta"];
-    if (json.contains("lame_duck_seconds"))
-        settings.lame_duck_seconds = json["lame_duck_seconds"];
+    // Crypto
+    if (json.contains("cipher"))
+        c.cipher = json["cipher"];
+    if (json.contains("auth"))
+        c.auth = json["auth"];
+    if (json.contains("ca_cert"))
+        c.ca_cert = json["ca_cert"].get<std::string>();
+    if (json.contains("ca_cert_pem"))
+        c.ca_cert_pem = json["ca_cert_pem"];
+    if (json.contains("tls_crypt_key"))
+        c.tls_crypt_key = json["tls_crypt_key"].get<std::string>();
+    if (json.contains("tls_crypt_key_pem"))
+        c.tls_crypt_key_pem = json["tls_crypt_key_pem"];
+
+    // Client identity
+    if (json.contains("cert"))
+        c.cert = json["cert"].get<std::string>();
+    if (json.contains("cert_pem"))
+        c.cert_pem = json["cert_pem"];
+    if (json.contains("key"))
+        c.key = json["key"].get<std::string>();
+    if (json.contains("key_pem"))
+        c.key_pem = json["key_pem"];
+
+    // TUN
+    if (json.contains("dev_name"))
+        c.dev_name = json["dev_name"];
+
+    // Reconnection
+    if (json.contains("reconnect_delay_seconds"))
+        c.reconnect_delay_seconds = json["reconnect_delay_seconds"];
+    if (json.contains("max_reconnect_attempts"))
+        c.max_reconnect_attempts = json["max_reconnect_attempts"];
+
+    // Keepalive
+    if (json.contains("keepalive") && json["keepalive"].is_array() && json["keepalive"].size() >= 2)
+    {
+        c.keepalive_interval = json["keepalive"][0].get<int>();
+        c.keepalive_timeout = json["keepalive"][1].get<int>();
+    }
+    if (json.contains("keepalive_interval"))
+        c.keepalive_interval = json["keepalive_interval"];
+    if (json.contains("keepalive_timeout"))
+        c.keepalive_timeout = json["keepalive_timeout"];
+
+    return c;
+}
+
+VpnConfig::ProcessConfig VpnConfigParser::ParseProcessConfig(const nlohmann::json &json)
+{
+    VpnConfig::ProcessConfig proc;
 
     if (json.contains("cpu_affinity"))
     {
@@ -307,66 +352,57 @@ OpenVpnConfig::PerformanceSettings OpenVpnConfigParser::ParsePerformanceSettings
         {
             auto s = val.get<std::string>();
             if (s == "off")
-                settings.cpu_affinity = -1; // kAffinityOff
+                proc.cpu_affinity = -1;
             else if (s == "auto")
-                settings.cpu_affinity = -2; // kAffinityAuto
-            else if (s == "adaptive")
-                settings.cpu_affinity = -3; // kAffinityAdaptive
+                proc.cpu_affinity = -2;
         }
         else if (val.is_number_integer())
-            settings.cpu_affinity = val.get<int>();
-        else if (val.is_object())
-        {
-            // Object form: {"mode": "adaptive", "probe_interval": 10, ...}
-            if (val.contains("mode"))
-            {
-                auto m = val["mode"].get<std::string>();
-                if (m == "off")
-                    settings.cpu_affinity = -1;
-                else if (m == "auto")
-                    settings.cpu_affinity = -2;
-                else if (m == "adaptive")
-                    settings.cpu_affinity = -3;
-            }
-            if (val.contains("probe_interval"))
-                settings.adaptive_probe_interval = val["probe_interval"];
-            if (val.contains("probe_duration"))
-                settings.adaptive_probe_duration = val["probe_duration"];
-            if (val.contains("baseline_windows"))
-                settings.adaptive_baseline_windows = val["baseline_windows"];
-            if (val.contains("ema_alpha"))
-                settings.adaptive_ema_alpha = val["ema_alpha"];
-            if (val.contains("throughput_threshold"))
-                settings.adaptive_throughput_threshold = val["throughput_threshold"];
-            if (val.contains("window_seconds"))
-                settings.adaptive_window_seconds = val["window_seconds"];
-        }
-        // else: leave at default -1 (off)
+            proc.cpu_affinity = val.get<int>();
     }
 
-    // Validate ranges — negative values clamp to 0 (meaning "use default")
-    if (settings.socket_recv_buffer < 0)
-        settings.socket_recv_buffer = 0;
-    if (settings.socket_send_buffer < 0)
-        settings.socket_send_buffer = 0;
-    settings.batch_size = std::clamp(settings.batch_size, 0, static_cast<int>(transport::kMaxBatchSize));
-    if (settings.process_quanta < 0)
-        settings.process_quanta = 0;
-
-    return settings;
+    return proc;
 }
 
-OpenVpnConfig::LoggingSettings OpenVpnConfigParser::ParseLoggingSettings(const nlohmann::json &json)
+VpnConfig::PerformanceConfig VpnConfigParser::ParsePerformanceConfig(const nlohmann::json &json)
 {
-    OpenVpnConfig::LoggingSettings settings;
+    VpnConfig::PerformanceConfig p;
+
+    if (json.contains("enable_dco"))
+        p.enable_dco = json["enable_dco"];
+    if (json.contains("stats_interval_seconds"))
+        p.stats_interval_seconds = json["stats_interval_seconds"];
+    if (json.contains("socket_recv_buffer"))
+        p.socket_recv_buffer = json["socket_recv_buffer"];
+    if (json.contains("socket_send_buffer"))
+        p.socket_send_buffer = json["socket_send_buffer"];
+    if (json.contains("batch_size"))
+        p.batch_size = json["batch_size"];
+    if (json.contains("process_quanta"))
+        p.process_quanta = json["process_quanta"];
+
+    // Validate ranges
+    if (p.socket_recv_buffer < 0)
+        p.socket_recv_buffer = 0;
+    if (p.socket_send_buffer < 0)
+        p.socket_send_buffer = 0;
+    p.batch_size = std::clamp(p.batch_size, 0, static_cast<int>(transport::kMaxBatchSize));
+    if (p.process_quanta < 0)
+        p.process_quanta = 0;
+
+    return p;
+}
+
+VpnConfig::LoggingConfig VpnConfigParser::ParseLoggingConfig(const nlohmann::json &json)
+{
+    VpnConfig::LoggingConfig l;
 
     if (json.contains("verbosity"))
     {
         auto &v = json["verbosity"];
         if (v.is_string())
-            settings.verbosity = v.get<std::string>();
+            l.verbosity = v.get<std::string>();
         else if (v.is_number_integer())
-            settings.verbosity = std::to_string(v.get<int>());
+            l.verbosity = std::to_string(v.get<int>());
     }
 
     if (json.contains("subsystems") && json["subsystems"].is_object())
@@ -374,13 +410,13 @@ OpenVpnConfig::LoggingSettings OpenVpnConfigParser::ParseLoggingSettings(const n
         for (auto &[key, val] : json["subsystems"].items())
         {
             if (val.is_string())
-                settings.subsystem_levels[key] = val.get<std::string>();
+                l.subsystem_levels[key] = val.get<std::string>();
             else if (val.is_number_integer())
-                settings.subsystem_levels[key] = std::to_string(val.get<int>());
+                l.subsystem_levels[key] = std::to_string(val.get<int>());
         }
     }
 
-    return settings;
+    return l;
 }
 
 } // namespace clv::vpn

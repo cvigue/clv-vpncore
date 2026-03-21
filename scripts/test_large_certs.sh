@@ -48,4 +48,4 @@ echo "Press Ctrl+C to stop"
 echo ""
 
 # Run server with debug logging
-exec env VPN_LOG_LEVEL=debug ../build/demos/simple_vpn_server ../configs/server_config_large_certs.json
+exec env VPN_LOG_LEVEL=debug ../build/demos/simple_vpn ../configs/server_config_large_certs.json

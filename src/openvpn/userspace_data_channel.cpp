@@ -64,6 +64,7 @@ UserspaceDataChannel::UserspaceDataChannel(asio::io_context &io_context,
       keepalive_interval_(keepalive_interval > 0 ? keepalive_interval : 10),
       keepalive_timeout_(keepalive_timeout > 0 ? keepalive_timeout : 120),
       running_(running_flag),
+      keepalive_timer_(io_context),
       outbound_arena_(batchSize > 0
                           ? std::min(batchSize, transport::kMaxBatchSize)
                           : transport::kDefaultBatchSize)
@@ -344,9 +345,9 @@ UserspaceDataChannel::PrepareOutgoingPacket(tun::IpPacket &packet)
     if (!session->HasTransport())
         return std::nullopt;
 
-    // Only batch UDP — TCP packets fall back to the per-packet coroutine path
+    // Only batch transports that support sendmmsg — TCP falls back to per-packet coroutine
     auto &transport = session->GetTransport();
-    if (!transport.IsUdp())
+    if (!transport.IsBatchingSupported())
         return std::nullopt;
 
     auto &udp = std::get<transport::UdpTransport>(transport);
@@ -486,8 +487,8 @@ asio::awaitable<void> UserspaceDataChannel::StartTunReceiver()
                     if (!session_ready)
                         continue;
 
-                    // Check if batchable (UDP transport)
-                    if (!session->HasTransport() || !session->GetTransport().IsUdp())
+                    // Check if batchable (transport supports sendmmsg)
+                    if (!session->HasTransport() || !session->GetTransport().IsBatchingSupported())
                     {
                         // Fallback — copy IP data to IpPacket for coroutine path
                         tun::IpPacket pkt;
@@ -570,10 +571,18 @@ asio::awaitable<void> UserspaceDataChannel::StartTunReceiver()
                     co_await asio::post(io_context_, asio::use_awaitable);
             }
         }
+        catch (const asio::system_error &e)
+        {
+            if (e.code() == asio::error::operation_aborted)
+            {
+                logger_->debug("TUN receiver stopped (shutdown)");
+                co_return;
+            }
+            logger_->error("Error reading from TUN: {}", e.what());
+        }
         catch (const std::exception &e)
         {
             logger_->error("Error reading from TUN: {}", e.what());
-            // Continue reading even on error
         }
     }
 
@@ -703,15 +712,14 @@ asio::awaitable<void> UserspaceDataChannel::RunKeepaliveMonitor(DeadPeerCallback
                   keepalive_interval_.count(),
                   keepalive_timeout_.count());
 
-    asio::steady_timer timer(io_context_);
     auto last_tick = std::chrono::steady_clock::now();
 
     while (running_)
     {
-        timer.expires_after(keepalive_interval_);
+        keepalive_timer_.expires_after(keepalive_interval_);
         try
         {
-            co_await timer.async_wait(asio::use_awaitable);
+            co_await keepalive_timer_.async_wait(asio::use_awaitable);
         }
         catch (const asio::system_error &e)
         {
@@ -771,6 +779,11 @@ asio::awaitable<void> UserspaceDataChannel::RunKeepaliveMonitor(DeadPeerCallback
             }
         }
     }
+}
+
+void UserspaceDataChannel::StopKeepaliveMonitor()
+{
+    keepalive_timer_.cancel();
 }
 
 } // namespace clv::vpn

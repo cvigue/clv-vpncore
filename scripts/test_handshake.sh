@@ -6,7 +6,7 @@ set -e
 cd "$(dirname "$0")"
 
 # Configuration
-SERVER_BIN="../build/demos/simple_vpn_server"
+SERVER_BIN="../build/demos/simple_vpn"
 SERVER_CONFIG="../configs/server_config.json"
 CLIENT_CONFIG="../test_data/test_client.ovpn"
 TEST_DURATION=8
@@ -23,7 +23,7 @@ echo "==================================================================="
 
 # Clean up any existing processes
 echo "[1/6] Cleaning up existing processes..."
-sudo pkill -9 simple_vpn_server openvpn 2>/dev/null || true
+sudo pkill -9 simple_vpn openvpn 2>/dev/null || true
 sudo fuser -k 1194/udp 2>/dev/null || true
 sleep 2
 
@@ -68,7 +68,7 @@ fi
 echo "[6/7] Stopping processes..."
 sudo kill -2 $SERVER_PID $CLIENT_PID 2>/dev/null || true
 sleep 2
-sudo pkill -9 simple_vpn_server openvpn 2>/dev/null || true
+sudo pkill -9 simple_vpn openvpn 2>/dev/null || true
 
 # Display results
 echo "[7/7] Results:"

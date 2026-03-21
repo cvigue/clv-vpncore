@@ -62,8 +62,7 @@ clv-vpncore/
 │   ├── scoped_ipv6_masquerade.{h,cpp} RAII nftables IPv6 masquerade
 │   └── …
 ├── tests/              Unit tests (GoogleTest)
-├── demos/              Runnable demos: simple_vpn (unified, experimental),
-│                       simple_vpn_server, simple_vpn_client, config generator, .ovpn parser
+├── demos/              Runnable demos: simple_vpn (unified node), config generator, .ovpn parser
 ├── configs/            Server and client JSON configs, sample .ovpn profile
 ├── scripts/            Helper scripts (test_handshake.sh, test_large_certs.sh)
 └── test_data/          Test certificates, .ovpn files
@@ -71,72 +70,43 @@ clv-vpncore/
 
 ## Running
 
-```bash
-# Server (requires root for TUN device)
-sudo ./build/demos/simple_vpn_server configs/server_config.json
+`simple_vpn` is a unified VPN node that supports 0‑1 server instances and 0‑N
+client connections in a single process, sharing one `io_context`.
 
-# Client (requires root for TUN/DCO device)
-sudo ./build/demos/simple_vpn_client configs/client_config.json
-# or with an OpenVPN .ovpn profile:
-sudo ./build/demos/simple_vpn_client test_data/test_client.ovpn
+```bash
+# Server-only (requires root for TUN device)
+sudo ./build/demos/simple_vpn configs/server_config.json
+
+# Client-only
+sudo ./build/demos/simple_vpn configs/client_config.json
+
+# Server + N clients (mesh node)
+sudo ./build/demos/simple_vpn configs/simple_vpn_config.json
 
 # Connect with a stock OpenVPN client
 sudo openvpn --config test_data/test_client.ovpn
 
-# Or use the automated handshake test
+# Automated handshake test
 ./scripts/test_handshake.sh
 ```
 
-The client auto-detects the config format by file extension (`.json` vs `.ovpn`). The `.ovpn` loader handles inline `<ca>`, `<cert>`, `<key>`, and `<tls-crypt>` blocks.
-
-### simple_vpn (Experimental)
-
-> **Status: Experimental** — functional and tested across server/client mode
-> combinations (userspace and DCO), but not yet hardened for production use.
-
-`simple_vpn` is a unified executable that runs as server, client, or both from
-a single config file. It composes the existing `VpnServer` and `VpnClient` on a
-shared `io_context`.
-
-```bash
-# Client-only via .ovpn profile (most common)
-sudo ./build/demos/simple_vpn my_profile.ovpn
-
-# Server, client, or both via JSON config
-sudo ./build/demos/simple_vpn config.json
-```
-
-**Features:**
-- Single binary for all roles — server-only, client-only, or dual server+client(s)
-- Direct `.ovpn` profile support (pass as the sole argument for client mode)
-- JSON config with `"server"` and/or `"client"` top-level sections
-- Flexible role references: inline config, `"$ref"` to external file, or bare string path
-- File paths resolved relative to the master config's directory
-- Shared `io_context` for dual-role — both roles run on the same event loop
-- Graceful shutdown via SIGINT/SIGTERM
-- Post-run client statistics (assigned IP, uptime, bytes sent/received)
-
-**JSON config formats:**
+The `"clients"` array accepts inline objects (inheriting root `performance`/`logging`)
+or string paths to `.json`/`.ovpn` files (self-contained):
 
 ```json
-// Dual-role via $ref
 {
-    "server": { "$ref": "server_config.json" },
-    "client": { "$ref": "../test_data/test_client.ovpn" }
-}
-
-// Server-only with inline config
-{
-    "server": { ... server fields ... }
-}
-
-// Client-only via bare path
-{
-    "client": "my_profile.ovpn"
+    "server": { "..." : "..." },
+    "performance": { "batch_size": 4096 },
+    "logging": { "verbosity": "info" },
+    "clients": [
+        { "server_host": "10.0.0.2", "cert": "c1.crt", "key": "c1.key" },
+        "configs/client_config.json",
+        "test_data/test_client.ovpn"
+    ]
 }
 ```
 
-See `demos/README.md` for full configuration details and additional examples.
+See `demos/README.md` for full configuration details.
 
 ## Client
 
@@ -152,7 +122,9 @@ The VPN client implements the full OpenVPN connection lifecycle:
 
 ## Configuration Reference
 
-The server reads a JSON config file. Below is a section-by-section reference.
+All roles share a single JSON config shape. Top-level sections are all optional —
+include only what you need. The unified `simple_vpn` binary inspects which
+sections are present to determine what to start.
 
 ### `server`
 
@@ -164,115 +136,85 @@ The server reads a JSON config file. Below is a section-by-section reference.
 | `dev` | `"tun"` | Device type |
 | `dev_node` | `"/dev/net/tun"` | TUN device path |
 | `keepalive` | `[10, 120]` | `[ping_interval, timeout]` in seconds |
+| `cipher` | `"AES-256-GCM"` | Data channel cipher (`"AES-256-GCM"`, `"AES-128-GCM"`, `"CHACHA20-POLY1305"`) |
+| `auth` | `"SHA256"` | HMAC digest |
+| `tls_cipher` | `"TLS-ECDHE-RSA-WITH-AES-256-GCM-SHA384"` | Control channel TLS cipher suite |
+| `keysize` | `256` | Key size in bits |
+| `ca_cert` | — | CA certificate path |
+| `tls_crypt_key` | — | tls-crypt (v1/v2) pre-shared key path |
+| `cert` | — | Server certificate |
+| `key` | — | Server private key |
+| `dh_params` | — | Diffie-Hellman parameters file |
+| `network` | `"10.8.0.0/24"` | IPv4 tunnel subnet in CIDR |
+| `network_v6` | `""` | IPv6 tunnel subnet in CIDR (empty = IPv6 disabled) |
+| `bridge_ip` | `"10.8.0.1"` | Server-side tunnel IP |
+| `client_dns` | `["8.8.8.8","8.8.4.4"]` | DNS servers pushed to clients |
+| `routes` | `[]` | IPv4 subnets routed through the tunnel |
+| `routes_v6` | `[]` | IPv6 subnets routed through the tunnel |
+| `push_routes` | `true` | Push routes to clients on connect |
+| `tun_mtu` | `1500` | TUN device MTU (pushed to clients in PUSH_REPLY) |
+| `tun_txqueuelen` | `0` | TUN TX queue length (0 = OS default) |
+| `client_cert_required` | `true` | Require client certificates |
+| `username_password` | `false` | Enable username/password auth |
+| `crl_verify` | `false` | Check certificate revocation list |
+| `crl_file` | — | CRL file path |
+| `max_clients` | `100` | Maximum simultaneous clients |
+| `ping_timer_remote` | `60` | Remote ping timer (seconds) |
+| `renegotiate_seconds` | `3600` | Key renegotiation interval |
+| `lame_duck_seconds` | `0` | Lame-duck key lifetime after rekey (`0` = no timer) |
 
-### `crypto`
+### `client`
 
-| Field | Description |
-|-------|-------------|
-| `ca_cert` | CA certificate path |
-| `server_cert` / `server_key` | Server certificate and private key |
-| `dh_params` | Diffie-Hellman parameters file |
-| `cipher` | Data channel cipher: `"AES-256-GCM"`, `"AES-128-GCM"`, `"CHACHA20-POLY1305"` |
-| `auth` | HMAC digest (e.g. `"SHA256"`) |
-| `tls_cipher` | Control channel TLS cipher suite |
-| `keysize` | Key size in bits |
-| `tls_crypt_key` | tls-crypt (v1/v2) pre-shared key path |
+| Field | Default | Description |
+|-------|---------|-------------|
+| `server_host` | — | Server hostname or IP |
+| `server_port` | `1194` | Server port |
+| `protocol` | `"udp"` | Transport protocol (`"udp"`, `"udp6"`, `"tcp"`) |
+| `cipher` | `"AES-256-GCM"` | Preferred data channel cipher (server may override via NCP) |
+| `auth` | `"SHA256"` | HMAC digest |
+| `ca_cert` | — | CA certificate path |
+| `ca_cert_pem` | — | Inline PEM alternative |
+| `tls_crypt_key` | — | tls-crypt pre-shared key path |
+| `tls_crypt_key_pem` | — | Inline PEM alternative |
+| `cert` | — | Client certificate |
+| `cert_pem` | — | Inline PEM alternative |
+| `key` | — | Client private key |
+| `key_pem` | — | Inline PEM alternative |
+| `dev_name` | `""` | TUN device name (auto if empty) |
+| `reconnect_delay_seconds` | `5` | Seconds between reconnect attempts |
+| `max_reconnect_attempts` | `10` | Maximum reconnect attempts (`0` = unlimited) |
+| `keepalive_interval` | `10` | Send PING every N seconds |
+| `keepalive_timeout` | `60` | Declare peer dead after N seconds of silence |
 
-### `network`
+### `process`
 
-| Field | Description |
-|-------|-------------|
-| `server_network` | IPv4 tunnel subnet in CIDR (e.g. `"10.8.0.0/24"`) |
-| `server_network_v6` | IPv6 tunnel subnet in CIDR (e.g. `"fd00::/112"`). Empty = IPv6 disabled |
-| `server_bridge` | Server-side tunnel IP |
-| `client_dns` | DNS servers pushed to clients |
-| `routes` | IPv4 subnets routed through the tunnel |
-| `routes_v6` | IPv6 subnets routed through the tunnel (pushed as `route-ipv6`) |
-| `push_routes` | Push routes to clients on connect |
-| `tun_mtu` | TUN device MTU (pushed to clients in PUSH_REPLY) |
-| `tun_txqueuelen` | TUN TX queue length (0 = OS default) |
+Process-global settings (not inherited by individual connections).
 
-### `auth`
-
-| Field | Description |
-|-------|-------------|
-| `client_cert_required` | Require client certificates |
-| `username_password` | Enable username/password auth |
-| `crl_verify` / `crl_file` | Certificate revocation list |
+| Field | Default | Description |
+|-------|---------|-------------|
+| `cpu_affinity` | `-1` (off) | Pin reactor thread: `-1`=off, `"auto"`=pin to current core, `N`=explicit core |
 
 ### `performance`
 
+Shared tuning — inherited by clients in the `"clients"` array unless overridden.
+
 | Field | Default | Description |
 |-------|---------|-------------|
-| `max_clients` | `100` | Maximum simultaneous clients |
-| `enable_dco` | `false` | Use kernel DCO data path instead of userspace |
-| `batch_size` | `4096` | recvmmsg/sendmmsg batch depth (clamped to 4096) |
-| `process_quanta` | `128` | Packets processed per event-loop chunk before yielding. Prevents HOL blocking on large batches. 0 = no chunking (process entire batch before yielding). |
-| `lame_duck_seconds` | `0` | Lame-duck key lifetime after rekey. `0` = no timer (lives until next rekey). |
-| `cpu_affinity` | `-1` (off) | Pin reactor thread: `-1`=off, `"auto"`=pin to current core, `"adaptive"`=monitor+probe, `N`=explicit core |
-| | | Adaptive sub-keys (object form): `probe_interval`, `probe_duration`, `baseline_windows`, `ema_alpha`, `throughput_threshold` |
+| `enable_dco` | `true` | Use kernel DCO data path instead of userspace |
+| `batch_size` | `0` | recvmmsg/sendmmsg batch depth (clamped to 4096) |
+| `process_quanta` | `0` | Packets per event-loop chunk before yielding (`0` = no chunking) |
 | `socket_recv_buffer` | `0` (OS default) | UDP `SO_RCVBUF` size in bytes |
 | `socket_send_buffer` | `0` (OS default) | UDP `SO_SNDBUF` size in bytes |
 | `stats_interval_seconds` | `0` (disabled) | Periodic stats report interval |
-| `ping_timer_remote` | `60` | Remote ping timer (seconds) |
-| `renegotiate_seconds` | `3600` | Key renegotiation interval |
 
 See the [tuning appendix](#appendix-batch--buffer-tuning) for guidance on `batch_size` and socket buffer values.
 
-### Client Configuration
-
-The client reads a JSON config file or a standard `.ovpn` profile (auto-detected by extension).
-
-#### `server`
-
-| Field | Default | Description |
-|-------|---------|-------------|
-| `host` | `""` | Server hostname or IP |
-| `port` | `1194` | Server port |
-| `proto` | `"udp"` | Transport protocol (`"udp"`) |
-| `keepalive` | `[10, 60]` | `[ping_interval, timeout]` in seconds |
-
-#### `crypto`
-
-| Field | Description |
-|-------|-------------|
-| `ca_cert` | CA certificate path |
-| `client_cert` / `client_key` | Client certificate and private key |
-| `tls_crypt_key` | tls-crypt pre-shared key path |
-| `cipher` | Preferred data channel cipher (server may override via NCP) |
-| `auth` | HMAC digest |
-
-#### `reconnect`
-
-| Field | Default | Description |
-|-------|---------|-------------|
-| `delay_seconds` | `5` | Seconds to wait between reconnect attempts |
-| `max_attempts` | `10` | Maximum reconnect attempts (`0` = unlimited) |
-
-#### `performance` (client)
-
-| Field | Default | Description |
-|-------|---------|-------------|
-| `enable_dco` | `false` | Use kernel DCO data path |
-| `socket_recv_buffer` | `0` | UDP `SO_RCVBUF` size in bytes |
-| `socket_send_buffer` | `0` | UDP `SO_SNDBUF` size in bytes |
-| `batch_size` | `4096` | recvmmsg/sendmmsg batch depth |
-| `process_quanta` | `0` | Packets per yield (`0` = no chunking, appropriate for single-peer clients) |
-| `cpu_affinity` | `-1` | Pin reactor thread (`-1` = off) |
-| `stats_interval_seconds` | `0` | Periodic stats interval (`0` = disabled) |
-
-#### `logging` (client)
-
-| Field | Default | Description |
-|-------|---------|-------------|
-| `verbosity` | `3` | Log level: 0=off, 1=critical, 2=error, 3=warn, 4=info, 5=debug, 6=trace |
-
 ### `logging`
 
-| Field | Description |
-|-------|-------------|
-| `verbosity` | Default log level — spdlog name (`"trace"`, `"debug"`, `"info"`, `"warn"`, `"err"`, `"critical"`, `"off"`) or numeric (`0`–`6`) |
-| `subsystems` | Per-subsystem level overrides (JSON object, keys are subsystem names) |
+| Field | Default | Description |
+|-------|---------|-------------|
+| `verbosity` | `"info"` | Default log level — spdlog name (`"trace"`, `"debug"`, `"info"`, `"warn"`, `"err"`, `"critical"`, `"off"`) or numeric (`0`–`6`) |
+| `subsystems` | `{}` | Per-subsystem level overrides (JSON object, keys are subsystem names) |
 
 Subsystem names: `keepalive`, `sessions`, `control`, `dataio`, `routing`, `general`.
 
@@ -291,10 +233,10 @@ Environment variables override config values (highest priority):
 
 ```bash
 # Override the default level for all subsystems
-sudo VPN_LOG_LEVEL=debug ./build/demos/simple_vpn_server configs/server_config.json
+sudo VPN_LOG_LEVEL=debug ./build/demos/simple_vpn configs/server_config.json
 
 # Override a single subsystem (set by SubsystemLoggerManager at startup)
-SPDLOG_LEVEL_vpn_dataio=trace  sudo ./build/demos/simple_vpn_server configs/server_config.json
+SPDLOG_LEVEL_vpn_dataio=trace  sudo ./build/demos/simple_vpn configs/server_config.json
 ```
 
 Priority order: **env var** > **config `subsystems`** > **config `verbosity`**.
@@ -347,7 +289,7 @@ Single-threaded `asio::io_context` event loop with C++20 coroutines (both server
 
 **DCO data path**: The kernel `ovpn-dco` module handles encrypt/decrypt. The server manages sessions and keys via generic netlink, monitors peer health via multicast netlink events, and queries per-peer stats via `OVPN_CMD_GET_PEER`.
 
-**IPv6**: Dual-stack support throughout. The server assigns IPv6 addresses from a configurable pool (`server_network_v6`), adds the address to the TUN/DCO interface, enables IPv6 forwarding and ip6 masquerade via RAII guards, pushes `ifconfig-ipv6` and `route-ipv6` directives to clients, and maintains a separate `RoutingTableIpv6` for data-plane routing. Both userspace and DCO modes register the peer's IPv6 address.
+**IPv6**: Dual-stack support throughout. The server assigns IPv6 addresses from a configurable pool (`network_v6`), adds the address to the TUN/DCO interface, enables IPv6 forwarding and ip6 masquerade via RAII guards, pushes `ifconfig-ipv6` and `route-ipv6` directives to clients, and maintains a separate `RoutingTableIpv6` for data-plane routing. Both userspace and DCO modes register the peer's IPv6 address.
 
 ## License
 

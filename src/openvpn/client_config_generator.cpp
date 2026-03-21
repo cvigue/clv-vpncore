@@ -31,11 +31,11 @@ std::string ClientConfigGenerator::GenerateConfig(const OpenVpnConfig &server_co
 
     // Basic client directives
     config << "client\n";
-    config << "dev " << server_config.server.dev << "\n";
-    config << "proto " << server_config.server.proto << "\n";
+    config << "dev " << server_config.server->dev << "\n";
+    config << "proto " << server_config.server->proto << "\n";
 
     // Remote directive
-    config << BuildRemoteDirective(server_config.server, client_opts) << "\n";
+    config << BuildRemoteDirective(*server_config.server, client_opts) << "\n";
 
     // Connection behavior
     config << "resolv-retry infinite\n";
@@ -44,7 +44,7 @@ std::string ClientConfigGenerator::GenerateConfig(const OpenVpnConfig &server_co
     config << "persist-tun\n";
 
     // Crypto directives
-    config << BuildCryptoDirectives(server_config.crypto, client_opts);
+    config << BuildCryptoDirectives(*server_config.server, client_opts);
 
     // Compression (if enabled)
     if (client_opts.enable_compression)
@@ -57,13 +57,13 @@ std::string ClientConfigGenerator::GenerateConfig(const OpenVpnConfig &server_co
     config << "\n";
 
     // Network directives (routes, DNS)
-    config << BuildNetworkDirectives(server_config.network, client_opts);
+    config << BuildNetworkDirectives(*server_config.server, client_opts);
 
     // Certificate/key material
     if (client_opts.embed_certificates)
     {
         // Embed CA certificate
-        config << EmbedCertificate(server_config.crypto.ca_cert, "ca");
+        config << EmbedCertificate(server_config.server->ca_cert, "ca");
 
         // Embed client certificate if provided
         if (client_opts.client_cert)
@@ -86,7 +86,7 @@ std::string ClientConfigGenerator::GenerateConfig(const OpenVpnConfig &server_co
     else
     {
         // External file references
-        config << ExternalFileReference("ca", server_config.crypto.ca_cert);
+        config << ExternalFileReference("ca", server_config.server->ca_cert);
 
         if (client_opts.client_cert)
         {
@@ -139,9 +139,9 @@ std::string ClientConfigGenerator::ValidateFiles(const OpenVpnConfig &server_con
     std::vector<std::string> missing_files;
 
     // Check CA certificate
-    if (!std::filesystem::exists(server_config.crypto.ca_cert))
+    if (!std::filesystem::exists(server_config.server->ca_cert))
     {
-        missing_files.push_back("CA certificate: " + server_config.crypto.ca_cert.string());
+        missing_files.push_back("CA certificate: " + server_config.server->ca_cert.string());
     }
 
     // Check client certificate if provided
@@ -176,7 +176,7 @@ std::string ClientConfigGenerator::ValidateFiles(const OpenVpnConfig &server_con
     return error.str();
 }
 
-std::string ClientConfigGenerator::BuildRemoteDirective(const OpenVpnConfig::ServerSettings &server,
+std::string ClientConfigGenerator::BuildRemoteDirective(const VpnConfig::ServerConfig &server,
                                                         const ClientOptions &client_opts) const
 {
     std::ostringstream remote;
@@ -195,38 +195,38 @@ std::string ClientConfigGenerator::BuildRemoteDirective(const OpenVpnConfig::Ser
     return remote.str();
 }
 
-std::string ClientConfigGenerator::BuildCryptoDirectives(const OpenVpnConfig::CryptoSettings &crypto,
+std::string ClientConfigGenerator::BuildCryptoDirectives(const VpnConfig::ServerConfig &server,
                                                          const ClientOptions &client_opts) const
 {
     std::ostringstream directives;
 
-    directives << "cipher " << crypto.cipher << "\n";
-    directives << "auth " << crypto.auth << "\n";
+    directives << "cipher " << server.cipher << "\n";
+    directives << "auth " << server.auth << "\n";
 
     // TLS cipher if specified
-    if (!crypto.tls_cipher.empty())
+    if (!server.tls_cipher.empty())
     {
-        directives << "tls-cipher " << crypto.tls_cipher << "\n";
+        directives << "tls-cipher " << server.tls_cipher << "\n";
     }
 
     // Key size (if non-default)
-    if (crypto.keysize != 256)
+    if (server.keysize != 256)
     {
-        directives << "keysize " << crypto.keysize << "\n";
+        directives << "keysize " << server.keysize << "\n";
     }
 
     directives << "\n";
     return directives.str();
 }
 
-std::string ClientConfigGenerator::BuildNetworkDirectives(const OpenVpnConfig::NetworkSettings &network,
+std::string ClientConfigGenerator::BuildNetworkDirectives(const VpnConfig::ServerConfig &server,
                                                           const ClientOptions &client_opts) const
 {
     std::ostringstream directives;
 
     // DNS servers - use custom if provided, otherwise server defaults
     const auto &dns_servers = client_opts.custom_dns.empty()
-                                  ? network.client_dns
+                                  ? server.client_dns
                                   : client_opts.custom_dns;
 
     for (const auto &dns : dns_servers)
@@ -235,9 +235,9 @@ std::string ClientConfigGenerator::BuildNetworkDirectives(const OpenVpnConfig::N
     }
 
     // Routes from server config
-    if (network.push_routes)
+    if (server.push_routes)
     {
-        for (const auto &route : network.routes)
+        for (const auto &route : server.routes)
         {
             directives << "route " << route << "\n";
         }
@@ -249,7 +249,7 @@ std::string ClientConfigGenerator::BuildNetworkDirectives(const OpenVpnConfig::N
         directives << "route " << route << "\n";
     }
 
-    if (!dns_servers.empty() || !network.routes.empty() || !client_opts.extra_routes.empty())
+    if (!dns_servers.empty() || !server.routes.empty() || !client_opts.extra_routes.empty())
     {
         directives << "\n";
     }

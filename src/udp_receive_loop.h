@@ -14,7 +14,7 @@
  *   - ControlDispatchFn: (IncomingSlot&) → void                — slow-path
  *
  * An optional fourth callback (PostRecvFn) fires after each recvmmsg,
- * e.g. for adaptive-affinity bookkeeping on the server.
+ * e.g. for post-receive bookkeeping on the server.
  */
 
 #include "data_path_stats.h"

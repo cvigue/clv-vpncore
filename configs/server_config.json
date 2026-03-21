@@ -8,23 +8,19 @@
         "keepalive": [
             20,
             120
-        ]
-    },
-    "crypto": {
-        "ca_cert": "test_data/certs/ca.crt",
-        "server_cert": "test_data/certs/server.crt",
-        "server_key": "test_data/certs/server.key",
-        "dh_params": "test_data/certs/dh2048.pem",
+        ],
         "cipher": "AES-256-GCM",
         "auth": "SHA256",
         "tls_cipher": "TLS-DHE-RSA-WITH-AES-256-GCM-SHA384",
         "keysize": 256,
-        "tls_crypt_key": "test_data/certs/tls-crypt.key"
-    },
-    "network": {
-        "server_network": "10.8.0.0/24",
-        "server_network_v6": "fd00::/112",
-        "server_bridge": "10.8.0.1",
+        "ca_cert": "test_data/certs/ca.crt",
+        "tls_crypt_key": "test_data/certs/tls-crypt.key",
+        "cert": "test_data/certs/server.crt",
+        "key": "test_data/certs/server.key",
+        "dh_params": "test_data/certs/dh2048.pem",
+        "network": "10.8.0.0/24",
+        "network_v6": "fd00::/112",
+        "bridge_ip": "10.8.0.1",
         "client_dns": [
             "8.8.8.8",
             "8.8.4.4"
@@ -37,34 +33,26 @@
         ],
         "push_routes": true,
         "tun_mtu": 1400,
-        "tun_txqueuelen": 4096
-    },
-    "auth": {
+        "tun_txqueuelen": 4096,
         "client_cert_required": true,
         "username_password": false,
         "crl_verify": true,
-        "crl_file": ""
-    },
-    "performance": {
+        "crl_file": "",
         "max_clients": 100,
-        "enable_dco": false,
         "ping_timer_remote": 60,
         "renegotiate_seconds": 3600,
+        "lame_duck_seconds": 0
+    },
+    "performance": {
+        "enable_dco": true,
         "stats_interval_seconds": 120,
         "socket_recv_buffer": 4194304,
         "socket_send_buffer": 4194304,
         "batch_size": 4096,
-        "process_quanta": 128,
-        "lame_duck_seconds": 0,
-        "cpu_affinity": {
-            "mode": "auto",
-            "probe_interval": 20,
-            "probe_duration": 1,
-            "baseline_windows": 5,
-            "ema_alpha": 0.3,
-            "throughput_threshold": 0.75,
-            "window_seconds": 15.0
-        }
+        "process_quanta": 128
+    },
+    "process": {
+        "cpu_affinity": "auto"
     },
     "logging": {
         "verbosity": "info",

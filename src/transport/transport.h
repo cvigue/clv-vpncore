@@ -6,10 +6,12 @@
 #include <asio/awaitable.hpp>
 #include <asio/ip/tcp.hpp>
 #include <asio/ip/udp.hpp>
+#include <spdlog/spdlog.h>
 
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -94,6 +96,13 @@ class UdpTransport
     {
         return *socket_;
     }
+
+    /// @brief Apply SO_RCVBUF/SO_SNDBUF (with FORCE fallback) to the socket.
+    void ApplySocketBuffers(int recv_buf, int send_buf, spdlog::logger &logger);
+
+    /// @brief Query actual kernel socket buffer sizes.
+    /// @return {recv_buf, send_buf} as reported by getsockopt.
+    std::pair<int, int> GetSocketBufferSizes() const;
 
   private:
     std::shared_ptr<asio::ip::udp::socket> socket_;
@@ -189,6 +198,9 @@ struct TransportHandle : std::variant<UdpTransport, TcpTransport>
     {
         return std::holds_alternative<UdpTransport>(*this);
     }
+
+    /// @brief Whether this transport supports batched I/O (sendmmsg/recvmmsg).
+    bool IsBatchingSupported() const { return IsUdp(); }
 };
 
 } // namespace clv::vpn::transport
