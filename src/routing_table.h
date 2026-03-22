@@ -18,7 +18,6 @@ namespace clv::vpn {
  *
  * Maintains a mapping of IPv4 CIDR blocks to client session IDs.
  * Supports efficient longest-prefix-match lookups for routing decisions.
- * @note Add an IPv6 version to this file later, or rename this and IPv6 enable.
  */
 class RoutingTableIpv4
 {

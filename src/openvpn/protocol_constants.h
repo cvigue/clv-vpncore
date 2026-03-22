@@ -5,6 +5,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <span>
 
 namespace clv::vpn::openvpn {
 
@@ -108,6 +110,21 @@ constexpr std::size_t KEEPALIVE_PING_SIZE = 16;
  */
 constexpr std::uint8_t KEEPALIVE_PING_PAYLOAD[KEEPALIVE_PING_SIZE] = {
     0x2a, 0x18, 0x7b, 0xf3, 0x64, 0x1e, 0xb4, 0xcb, 0x07, 0xed, 0x2d, 0x0a, 0x98, 0x1f, 0xc7, 0x48};
+
+/**
+ * @brief Test whether a decrypted payload is the keepalive ping magic.
+ */
+inline bool IsKeepalivePing(const std::uint8_t *data, std::size_t len) noexcept
+{
+    return len == KEEPALIVE_PING_SIZE
+           && std::memcmp(data, KEEPALIVE_PING_PAYLOAD, KEEPALIVE_PING_SIZE) == 0;
+}
+
+/// @overload Accepts a std::span.
+inline bool IsKeepalivePing(std::span<const std::uint8_t> buf) noexcept
+{
+    return IsKeepalivePing(buf.data(), buf.size());
+}
 
 // ================================================================================================
 // IPv4 Packet Constants

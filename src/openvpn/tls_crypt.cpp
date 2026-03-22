@@ -34,6 +34,54 @@ constexpr size_t TLS_CRYPT_TAG_SIZE = 32;      // HMAC-SHA256
 constexpr size_t TLS_CRYPT_PACKET_ID_SIZE = 8; // 4-byte timestamp + 4-byte counter
 
 /**
+ * Parse hex-encoded key data from a sequence of lines.
+ *
+ * Recognises the OpenVPN static-key PEM envelope (-----BEGIN / -----END).
+ * Skips blank lines and # comments.  Collects pairs of hex digits.
+ */
+std::optional<std::vector<std::uint8_t>> ParseHexKeyLines(std::istream &input)
+{
+    std::vector<std::uint8_t> key_data;
+    key_data.reserve(OPENVPN_KEY_SIZE);
+
+    std::string line;
+    bool in_key = false;
+
+    while (std::getline(input, line))
+    {
+        if (line.empty() || line[0] == '#')
+            continue;
+        if (line.find("-----BEGIN") != std::string::npos)
+        {
+            in_key = true;
+            continue;
+        }
+        if (line.find("-----END") != std::string::npos)
+        {
+            in_key = false;
+            break;
+        }
+        if (in_key)
+        {
+            for (size_t i = 0; i < line.length(); ++i)
+            {
+                if (std::isxdigit(line[i]) && i + 1 < line.length() && std::isxdigit(line[i + 1]))
+                {
+                    std::string hex_pair = line.substr(i, 2);
+                    key_data.push_back(static_cast<std::uint8_t>(std::stoul(hex_pair, nullptr, 16)));
+                    ++i;
+                }
+            }
+        }
+    }
+
+    if (key_data.size() != OPENVPN_KEY_SIZE)
+        return std::nullopt;
+
+    return key_data;
+}
+
+/**
  * Parse OpenVPN static key file format
  */
 std::optional<std::vector<std::uint8_t>> ParseKeyFile(const std::string &filename, spdlog::logger &logger)
@@ -45,57 +93,13 @@ std::optional<std::vector<std::uint8_t>> ParseKeyFile(const std::string &filenam
         return std::nullopt;
     }
 
-    std::vector<std::uint8_t> key_data;
-    key_data.reserve(OPENVPN_KEY_SIZE);
-
-    std::string line;
-    bool in_key = false;
-
-    while (std::getline(file, line))
+    auto result = ParseHexKeyLines(file);
+    if (!result)
     {
-        // Skip comments and empty lines
-        if (line.empty() || line[0] == '#')
-            continue;
-
-        // Check for key delimiters
-        if (line.find("-----BEGIN") != std::string::npos)
-        {
-            in_key = true;
-            continue;
-        }
-        if (line.find("-----END") != std::string::npos)
-        {
-            in_key = false;
-            break;
-        }
-
-        if (in_key)
-        {
-            // Parse hex line: remove whitespace and convert
-            for (size_t i = 0; i < line.length(); ++i)
-            {
-                char c = line[i];
-                if (std::isxdigit(c))
-                {
-                    // Collect pairs of hex digits
-                    if (i + 1 < line.length() && std::isxdigit(line[i + 1]))
-                    {
-                        std::string hex_pair = line.substr(i, 2);
-                        key_data.push_back(static_cast<std::uint8_t>(std::stoul(hex_pair, nullptr, 16)));
-                        ++i; // Skip next digit
-                    }
-                }
-            }
-        }
-    }
-
-    if (key_data.size() != OPENVPN_KEY_SIZE)
-    {
-        logger.error("Invalid key size: {} (expected {})", key_data.size(), OPENVPN_KEY_SIZE);
+        logger.error("Invalid key size in file: {} (expected {})", filename, OPENVPN_KEY_SIZE);
         return std::nullopt;
     }
-
-    return key_data;
+    return result;
 }
 
 /**
@@ -143,49 +147,15 @@ std::optional<TlsCrypt> TlsCrypt::FromKeyFile(const std::string &filename, spdlo
 
 std::optional<TlsCrypt> TlsCrypt::FromKeyString(const std::string &key_content, spdlog::logger &logger)
 {
-    // Parse the same static key hex format, but from a string instead of a file
-    std::vector<std::uint8_t> key_data;
-    key_data.reserve(OPENVPN_KEY_SIZE);
-
     std::istringstream stream(key_content);
-    std::string line;
-    bool in_key = false;
-
-    while (std::getline(stream, line))
+    auto key_data = ParseHexKeyLines(stream);
+    if (!key_data)
     {
-        if (line.empty() || line[0] == '#')
-            continue;
-        if (line.find("-----BEGIN") != std::string::npos)
-        {
-            in_key = true;
-            continue;
-        }
-        if (line.find("-----END") != std::string::npos)
-        {
-            in_key = false;
-            break;
-        }
-        if (in_key)
-        {
-            for (size_t i = 0; i < line.length(); ++i)
-            {
-                if (std::isxdigit(line[i]) && i + 1 < line.length() && std::isxdigit(line[i + 1]))
-                {
-                    std::string hex_pair = line.substr(i, 2);
-                    key_data.push_back(static_cast<std::uint8_t>(std::stoul(hex_pair, nullptr, 16)));
-                    ++i;
-                }
-            }
-        }
-    }
-
-    if (key_data.size() != OPENVPN_KEY_SIZE)
-    {
-        logger.error("Invalid inline key size: {} (expected {})", key_data.size(), OPENVPN_KEY_SIZE);
+        logger.error("Invalid inline key size (expected {})", OPENVPN_KEY_SIZE);
         return std::nullopt;
     }
 
-    return FromKeyData(key_data, logger);
+    return FromKeyData(*key_data, logger);
 }
 
 std::optional<TlsCrypt> TlsCrypt::FromKeyData(std::span<const std::uint8_t> key_data, spdlog::logger &logger)

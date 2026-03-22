@@ -87,8 +87,7 @@ UserspaceDataChannel::ProcessIncomingDataPacket(ClientSession *session,
 
         // OpenVPN internal ping/keepalive packets are exactly 16 bytes with a magic prefix.
         // Check for these FIRST, before any compression byte stripping.
-        if (plaintext.size() == openvpn::KEEPALIVE_PING_SIZE
-            && std::equal(plaintext.begin(), plaintext.end(), openvpn::KEEPALIVE_PING_PAYLOAD))
+        if (openvpn::IsKeepalivePing(plaintext))
         {
             logger_->debug("Received OpenVPN keepalive ping from client");
             co_return;
@@ -116,8 +115,7 @@ UserspaceDataChannel::ProcessIncomingDataPacket(ClientSession *session,
         }
 
         // Check for keepalive after compress strip
-        if (plaintext.size() == openvpn::KEEPALIVE_PING_SIZE
-            && std::equal(plaintext.begin(), plaintext.end(), openvpn::KEEPALIVE_PING_PAYLOAD))
+        if (openvpn::IsKeepalivePing(plaintext))
         {
             logger_->debug("Received OpenVPN keepalive ping from peer (compressed)");
             co_return;
@@ -164,8 +162,7 @@ UserspaceDataChannel::DecryptAndStripInPlace(ClientSession *session,
     stats_.packetsDecrypted++;
 
     // Check for raw keepalive magic (no compress byte)
-    if (plaintext.size() == openvpn::KEEPALIVE_PING_SIZE
-        && std::equal(plaintext.begin(), plaintext.end(), openvpn::KEEPALIVE_PING_PAYLOAD))
+    if (openvpn::IsKeepalivePing(plaintext))
     {
         logger_->debug("Received OpenVPN keepalive ping from peer");
         return {}; // Consumed — not forwarded to TUN
@@ -192,8 +189,7 @@ UserspaceDataChannel::DecryptAndStripInPlace(ClientSession *session,
     }
 
     // Check for keepalive after compress strip
-    if (ip_data.size() == openvpn::KEEPALIVE_PING_SIZE
-        && std::equal(ip_data.begin(), ip_data.end(), openvpn::KEEPALIVE_PING_PAYLOAD))
+    if (openvpn::IsKeepalivePing(ip_data))
     {
         logger_->debug("Received OpenVPN keepalive ping from peer (compressed)");
         return {}; // Consumed — not forwarded to TUN

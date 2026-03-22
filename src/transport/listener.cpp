@@ -54,9 +54,11 @@ std::pair<int, int> UdpListener::GetSocketBufferSizes() const
     int fd = socket_->native_handle();
     int rcv = 0, snd = 0;
     socklen_t len = sizeof(int);
-    getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcv, &len);
+    if (getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcv, &len) != 0)
+        rcv = -1;
     len = sizeof(int);
-    getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &snd, &len);
+    if (getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &snd, &len) != 0)
+        snd = -1;
     return {rcv, snd};
 }
 

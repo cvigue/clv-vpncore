@@ -14,7 +14,6 @@
  * Requires root/CAP_NET_ADMIN when a server section is present.
  */
 
-#include "nlohmann/json_fwd.hpp"
 #include "vpn_server.h"
 #include "vpn_client.h"
 #include "openvpn/vpn_config.h"

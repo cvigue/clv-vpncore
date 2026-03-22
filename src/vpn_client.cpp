@@ -10,7 +10,6 @@
 #include "openvpn/vpn_config.h"
 #include "route_utils.h"
 #include "udp_receive_loop.h"
-#include "nlohmann/json_fwd.hpp"
 #include "openvpn/config_exchange.h"
 #include "openvpn/control_channel.h"
 #include "openvpn/control_plane_helpers.h"
@@ -775,9 +774,8 @@ asio::awaitable<void> VpnClient::HandleDataPacket(const openvpn::OpenVpnPacket &
         co_return;
     }
 
-    // Check for raw keepalive magic (no compress byte) - keeping memcmp since this is the hot path
-    if (plaintext.size() == openvpn::KEEPALIVE_PING_SIZE
-        && std::memcmp(plaintext.data(), openvpn::KEEPALIVE_PING_PAYLOAD, openvpn::KEEPALIVE_PING_SIZE) == 0)
+    // Check for raw keepalive magic (no compress byte)
+    if (openvpn::IsKeepalivePing(plaintext))
     {
         logger_->trace("Received keepalive PING from server");
         co_return;
@@ -802,13 +800,11 @@ asio::awaitable<void> VpnClient::HandleDataPacket(const openvpn::OpenVpnPacket &
     }
 
     // Check for keepalive after compress strip
-    if (plaintext.size() == openvpn::KEEPALIVE_PING_SIZE && std::memcmp(plaintext.data(), openvpn::KEEPALIVE_PING_PAYLOAD, openvpn::KEEPALIVE_PING_SIZE) == 0)
+    if (openvpn::IsKeepalivePing(plaintext))
     {
         logger_->trace("Received keepalive PING from server");
         co_return;
     }
-
-    stats_.bytesReceived += plaintext.size();
     stats_.packetsDecrypted++;
 
     if (tun_device_)
@@ -1425,7 +1421,7 @@ asio::awaitable<void> VpnClient::UdpReceiveLoop()
             stats_.packetsDecrypted++;
 
             // Check for raw keepalive magic (no compress byte)
-            if (plaintext.size() == openvpn::KEEPALIVE_PING_SIZE && std::memcmp(plaintext.data(), openvpn::KEEPALIVE_PING_PAYLOAD, openvpn::KEEPALIVE_PING_SIZE) == 0)
+            if (openvpn::IsKeepalivePing(plaintext))
             {
                 logger_->trace("Received keepalive PING");
                 return {};
@@ -1451,7 +1447,7 @@ asio::awaitable<void> VpnClient::UdpReceiveLoop()
             }
 
             // Check for keepalive after compress strip
-            if (ip_data.size() == openvpn::KEEPALIVE_PING_SIZE && std::memcmp(ip_data.data(), openvpn::KEEPALIVE_PING_PAYLOAD, openvpn::KEEPALIVE_PING_SIZE) == 0)
+            if (openvpn::IsKeepalivePing(ip_data))
             {
                 logger_->trace("Received keepalive PING");
                 return {};

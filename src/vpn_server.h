@@ -104,7 +104,7 @@ class VpnServer
     /**
      * @brief Get server configuration
      */
-    const OpenVpnConfig &GetConfig() const
+    const VpnConfig &GetConfig() const
     {
         return config_;
     }

@@ -10,7 +10,6 @@
 #include "../data_path_stats.h"
 #include "transport/batch_constants.h"
 #include "util/ipv6_utils.h"
-#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <span>
