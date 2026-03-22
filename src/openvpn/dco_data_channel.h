@@ -5,6 +5,7 @@
 
 #include "client_session.h"
 #include "data_path_stats.h"
+#include <atomic>
 #include <cstddef>
 #include <span>
 #include <util/netlink_helper.h>
@@ -88,7 +89,7 @@ class DcoDataChannel
                    asio::ip::udp::socket &socket,
                    const NetworkConfig &network_config,
                    spdlog::logger &logger,
-                   const bool &running_flag);
+                   const std::atomic<bool> &running_flag);
 
     /**
      * @brief Destructor - cleans up DCO device and sockets
@@ -315,7 +316,7 @@ class DcoDataChannel
     asio::ip::udp::socket &socket_;
     NetworkConfig network_config_; ///< Network configuration for DCO interface
     clv::not_null<spdlog::logger *> logger_;
-    const bool &running_;
+    const std::atomic<bool> &running_;
 
     bool dco_initialized_ = false;
     int dco_ifindex_ = -1;                                             ///< DCO network interface index

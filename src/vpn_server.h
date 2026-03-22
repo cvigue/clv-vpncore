@@ -15,6 +15,7 @@
 #include "openvpn/tls_crypt.h"
 #include "openvpn/vpn_config.h"
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <span>
 #include <string_view>
@@ -310,6 +311,8 @@ class VpnServer
     std::size_t currentBatchSize_ = 0;                             ///< Current recvmmsg batch depth
     std::size_t processQuanta_ = transport::kDefaultProcessQuanta; ///< Max packets per event-loop yield
 
+    std::atomic<bool> running_ = false; ///< Server running flag
+
     // Data channel strategy (userspace vs DCO)
     DataPathEngine data_channel_strategy_;
 
@@ -322,8 +325,6 @@ class VpnServer
     std::optional<ScopedIpv6Masquerade> masquerade6_guard_; ///< IPv6 NAT masquerade rule
     std::optional<ScopedIpForward> ip_forward_guard_;       ///< IPv4 forwarding
     std::optional<ScopedIpv6Forward> ip6_forward_guard_;    ///< IPv6 forwarding
-
-    bool running_ = false; ///< Server running flag
 
     // Timers for periodic coroutines (members so Stop() can cancel them)
     asio::steady_timer cleanup_timer_; ///< Timer for SessionCleanupLoop

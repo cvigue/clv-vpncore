@@ -10,6 +10,7 @@
 #include "packet.h"
 #include "session_manager.h"
 #include <algorithm>
+#include <atomic>
 #include <util/ipv4_utils.h>
 #include <util/ipv6_utils.h>
 #include "../routing_table.h"
@@ -48,7 +49,7 @@ UserspaceDataChannel::UserspaceDataChannel(asio::io_context &io_context,
                                            std::size_t processQuanta,
                                            int keepalive_interval,
                                            int keepalive_timeout,
-                                           const bool &running_flag)
+                                           const std::atomic<bool> &running_flag)
     : io_context_(io_context),
       tun_device_(tun_device),
       routing_table_(routing_table),

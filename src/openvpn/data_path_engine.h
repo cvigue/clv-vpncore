@@ -28,6 +28,7 @@
 #include <asio/awaitable.hpp>
 #include <asio/io_context.hpp>
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -75,7 +76,7 @@ class DataPathEngine
                    std::size_t processQuanta,
                    int keepalive_interval,
                    int keepalive_timeout,
-                   const bool &running_flag)
+                   const std::atomic<bool> &running_flag)
         : tun_device_{}, impl_(std::in_place_type<UserspaceDataChannel>,
                                io_context, tun_device_, routing_table, routing_table_v6,
                                session_manager, logger, stats, stats_observer,
@@ -92,7 +93,7 @@ class DataPathEngine
                    asio::ip::udp::socket &socket,
                    const DcoDataChannel::NetworkConfig &network_config,
                    spdlog::logger &logger,
-                   const bool &running_flag)
+                   const std::atomic<bool> &running_flag)
         : tun_device_{}, impl_(std::in_place_type<DcoDataChannel>,
                                io_context, socket, network_config, logger, running_flag)
     {

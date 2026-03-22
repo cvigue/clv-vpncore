@@ -200,7 +200,10 @@ struct TransportHandle : std::variant<UdpTransport, TcpTransport>
     }
 
     /// @brief Whether this transport supports batched I/O (sendmmsg/recvmmsg).
-    bool IsBatchingSupported() const { return IsUdp(); }
+    bool IsBatchingSupported() const
+    {
+        return IsUdp();
+    }
 };
 
 } // namespace clv::vpn::transport

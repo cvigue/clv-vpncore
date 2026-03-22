@@ -1,7 +1,7 @@
 // Copyright (c) 2025- Charlie Vigue. All rights reserved.
 
 #include "openvpn/config_exchange.h"
-#include <cstdint>
+
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>
@@ -424,48 +424,94 @@ TEST_F(ConfigExchangeTest, RenegotiationFlow)
 }
 
 // ============================================================================
-// IPv4 Configuration Tests
+// Serialize Tests
 // ============================================================================
 
-TEST_F(ConfigExchangeTest, BuildPushReplyWithBasicIpv4Config)
+TEST_F(ConfigExchangeTest, SerializeBasicIpv4Config)
 {
-    // Test IPv4 address: 10.8.0.2 (client)
-    // Server address: 10.8.0.1 (gateway)
-    std::uint32_t client_ipv4 = (10 << 24) | (8 << 16) | (0 << 8) | 2;
-    std::uint32_t server_ipv4 = (10 << 24) | (8 << 16) | (0 << 8) | 1;
+    NegotiatedConfig config;
+    config.ifconfig = {"10.8.0.2", "10.8.0.1"};
+    config.route_gateway = "10.8.0.1";
+    config.cipher = "AES-256-GCM";
 
-    std::string push_reply = ConfigExchange::BuildPushReplyWithIpv4(client_ipv4, server_ipv4);
+    std::string reply = ConfigExchange::Serialize(config);
 
-    EXPECT_NE(push_reply.find("PUSH_REPLY,"), std::string::npos);
-    EXPECT_NE(push_reply.find("ifconfig 10.8.0.2 10.8.0.1"), std::string::npos);
-    EXPECT_NE(push_reply.find("route-gateway 10.8.0.1"), std::string::npos);
+    EXPECT_NE(reply.find("PUSH_REPLY,"), std::string::npos);
+    EXPECT_NE(reply.find("ifconfig 10.8.0.2 10.8.0.1"), std::string::npos);
+    EXPECT_NE(reply.find("route-gateway 10.8.0.1"), std::string::npos);
+    EXPECT_NE(reply.find("cipher AES-256-GCM"), std::string::npos);
 }
 
-TEST_F(ConfigExchangeTest, BuildPushReplyWithExtraOptions)
+TEST_F(ConfigExchangeTest, SerializeRoundTripAllFields)
 {
-    std::uint32_t client_ipv4 = (192 << 24) | (168 << 16) | (1 << 8) | 100;
-    std::uint32_t server_ipv4 = (192 << 24) | (168 << 16) | (1 << 8) | 1;
+    NegotiatedConfig original;
+    original.ifconfig = {"10.8.0.6", "10.8.0.5"};
+    original.ifconfig_ipv6 = {"fd00::6/64 fd00::1", 0};
+    original.topology = "net30";
+    original.route_gateway = "10.8.0.5";
+    original.routes = {{"192.168.50.0", "255.255.255.0", 0}, {"10.0.0.0", "255.0.0.0", 0}};
+    original.routes_ipv6 = {{"fd01::/64", "", 0}};
+    original.cipher = "AES-256-GCM";
+    original.auth = "SHA256";
+    original.tun_mtu = 1500;
+    original.ping_interval = 10;
+    original.ping_restart = 60;
+    original.peer_id = 42;
 
-    std::vector<std::string> extra_opts = {"cipher AES-256-GCM", "auth SHA256", "route 10.0.0.0 255.255.255.0"};
+    std::string serialized = ConfigExchange::Serialize(original);
 
-    std::string push_reply = ConfigExchange::BuildPushReplyWithIpv4(client_ipv4, server_ipv4, extra_opts);
+    // Strip "PUSH_REPLY," prefix before feeding to ProcessPushReply
+    ASSERT_TRUE(serialized.starts_with("PUSH_REPLY,"));
+    std::string options = serialized.substr(std::string("PUSH_REPLY,").size());
 
-    EXPECT_NE(push_reply.find("ifconfig 192.168.1.100 192.168.1.1"), std::string::npos);
-    EXPECT_NE(push_reply.find("cipher AES-256-GCM"), std::string::npos);
-    EXPECT_NE(push_reply.find("auth SHA256"), std::string::npos);
-    EXPECT_NE(push_reply.find("route 10.0.0.0 255.255.255.0"), std::string::npos);
+    ConfigExchange rx;
+    ASSERT_TRUE(rx.ProcessPushReply(options));
+
+    auto &parsed = rx.GetNegotiatedConfig();
+    EXPECT_EQ(parsed.ifconfig.first, original.ifconfig.first);
+    EXPECT_EQ(parsed.ifconfig.second, original.ifconfig.second);
+    EXPECT_EQ(parsed.topology, original.topology);
+    EXPECT_EQ(parsed.cipher, original.cipher);
+    EXPECT_EQ(parsed.auth, original.auth);
+    EXPECT_EQ(parsed.tun_mtu, original.tun_mtu);
+    EXPECT_EQ(parsed.ping_interval, original.ping_interval);
+    EXPECT_EQ(parsed.ping_restart, original.ping_restart);
+    EXPECT_EQ(parsed.peer_id, original.peer_id);
+    ASSERT_EQ(parsed.routes.size(), 2u);
+    EXPECT_EQ(std::get<0>(parsed.routes[0]), "192.168.50.0");
+    EXPECT_EQ(std::get<1>(parsed.routes[0]), "255.255.255.0");
+    EXPECT_EQ(std::get<0>(parsed.routes[1]), "10.0.0.0");
+    EXPECT_EQ(std::get<1>(parsed.routes[1]), "255.0.0.0");
+    ASSERT_EQ(parsed.routes_ipv6.size(), 1u);
+    EXPECT_EQ(std::get<0>(parsed.routes_ipv6[0]), "fd01::/64");
 }
 
-TEST_F(ConfigExchangeTest, BuildPushReplyAddressFormatting)
+TEST_F(ConfigExchangeTest, SerializeMinimalConfig)
 {
-    // Test various IPv4 addresses to ensure proper formatting
-    // 172.16.0.50
-    std::uint32_t client_ipv4 = (172 << 24) | (16 << 16) | (0 << 8) | 50;
-    std::uint32_t server_ipv4 = (172 << 24) | (16 << 16) | (0 << 8) | 1;
+    // Only the fields that Serialize always emits
+    NegotiatedConfig config;
+    config.cipher = "AES-128-GCM";
+    config.ping_interval = 5;
+    config.ping_restart = 30;
 
-    std::string push_reply = ConfigExchange::BuildPushReplyWithIpv4(client_ipv4, server_ipv4);
+    std::string reply = ConfigExchange::Serialize(config);
 
-    EXPECT_NE(push_reply.find("ifconfig 172.16.0.50 172.16.0.1"), std::string::npos);
+    EXPECT_NE(reply.find("PUSH_REPLY"), std::string::npos);
+    EXPECT_NE(reply.find("cipher AES-128-GCM"), std::string::npos);
+    EXPECT_NE(reply.find("ping 5"), std::string::npos);
+    EXPECT_NE(reply.find("ping-restart 30"), std::string::npos);
+    // Should NOT contain ifconfig since it was empty
+    EXPECT_EQ(reply.find("ifconfig"), std::string::npos);
+}
+
+TEST_F(ConfigExchangeTest, SerializeWithIpv6Route)
+{
+    NegotiatedConfig config;
+    config.cipher = "AES-256-GCM";
+    config.routes_ipv6 = {{"2001:db8::/32", "", 0}};
+
+    std::string reply = ConfigExchange::Serialize(config);
+    EXPECT_NE(reply.find("route-ipv6 2001:db8::/32"), std::string::npos);
 }
 
 } // namespace clv::vpn::openvpn::test

@@ -55,7 +55,7 @@ DcoDataChannel::DcoDataChannel(asio::io_context &io_context,
                                asio::ip::udp::socket &socket,
                                const NetworkConfig &network_config,
                                spdlog::logger &logger,
-                               const bool &running_flag)
+                               const std::atomic<bool> &running_flag)
     : io_context_(io_context),
       socket_(socket),
       network_config_(network_config),

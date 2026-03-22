@@ -35,9 +35,9 @@
 #include "cpu_affinity.h"
 #include "transport/udp_batch.h"
 
-#include <sys/uio.h>    // struct iovec for TUN batch writes
-#include <sys/wait.h>   // waitpid
-#include <fcntl.h>      // open, O_WRONLY
+#include <sys/uio.h>  // struct iovec for TUN batch writes
+#include <sys/wait.h> // waitpid
+#include <fcntl.h>    // open, O_WRONLY
 
 #include <asio/awaitable.hpp>
 #include <asio/buffer.hpp>
@@ -189,7 +189,8 @@ VpnServer::VpnServer(asio::io_context &io_context, const VpnConfig &config)
     if (auto *udp = std::get_if<transport::UdpListener>(&listener_))
     {
         udp->ApplySocketBuffers(config.performance.socket_recv_buffer,
-                                config.performance.socket_send_buffer, *logger_);
+                                config.performance.socket_send_buffer,
+                                *logger_);
     }
 }
 
@@ -463,7 +464,7 @@ asio::awaitable<void> VpnServer::UdpReceiveLoop()
         io_context_,
         logger_,
         [&]
-    { return running_; },
+    { return running_.load(); },
         onData,
         onControl);
 }
@@ -1112,56 +1113,46 @@ asio::awaitable<void> VpnServer::HandlePushRequest(ClientSession *session)
         }
     }
 
-    // Build PUSH_REPLY with IP configuration
-    std::string push_reply = "PUSH_REPLY";
+    // Build negotiated configuration for this session
+    openvpn::NegotiatedConfig push_config;
 
     // Derive server IP once for use in ifconfig and route-gateway
     std::string server_ip = DeriveServerIp(*config_.server);
 
-    // Add ifconfig (assigned IP and gateway)
+    // ifconfig (assigned IPv4 and gateway)
     if (session->GetAssignedIpv4())
     {
-        auto ip = session->GetAssignedIpv4().value();
-        std::string ip_str = ipv4::Ipv4ToString(ip);
-        push_reply += ",ifconfig " + ip_str + " " + server_ip;
+        push_config.ifconfig = {ipv4::Ipv4ToString(session->GetAssignedIpv4().value()), server_ip};
     }
     else
     {
-        // No IP allocated - this is a server configuration error
         logger_->error("No IP assigned to session - IP pool exhausted or not initialized");
         throw std::runtime_error("Failed to allocate IP for client session");
     }
 
-    // Add ifconfig-ipv6 if client has an IPv6 address assigned
+    // ifconfig-ipv6
     if (session->GetAssignedIpv6())
     {
-        auto ipv6_addr = session->GetAssignedIpv6().value();
-        std::string ipv6_str = ipv6::Ipv6ToString(ipv6_addr);
-
-        // Derive server IPv6 (network + 1, e.g. fd00::1)
         auto parsed_v6 = ipv6::ParseCidr6(config_.server->network_v6);
         if (parsed_v6)
         {
             auto [net_v6, prefix_v6] = *parsed_v6;
-            // Server address = network + 1 (last byte)
             ipv6::Ipv6Address server_v6 = net_v6;
             server_v6[15] += 1;
-            std::string server_v6_str = ipv6::Ipv6ToString(server_v6);
 
-            // OpenVPN format: ifconfig-ipv6 <client_addr>/<prefix> <server_addr>
-            push_reply += ",ifconfig-ipv6 " + ipv6_str + "/" + std::to_string(prefix_v6)
-                          + " " + server_v6_str;
+            std::string ipv6_str = ipv6::Ipv6ToString(session->GetAssignedIpv6().value());
+            std::string server_v6_str = ipv6::Ipv6ToString(server_v6);
+            push_config.ifconfig_ipv6 = {ipv6_str + "/" + std::to_string(prefix_v6)
+                                             + " " + server_v6_str,
+                                         0};
             logger_->debug("Pushing IPv6 config: {} -> server {}", ipv6_str, server_v6_str);
         }
     }
 
-    // Add topology
-    push_reply += ",topology net30";
+    push_config.topology = "net30";
+    push_config.route_gateway = server_ip;
 
-    // Add route for the VPN subnet
-    push_reply += ",route-gateway " + server_ip;
-
-    // Push routes from config (e.g., "192.168.50.0/24" → "route 192.168.50.0 255.255.255.0")
+    // Push routes from config
     if (config_.server->push_routes)
     {
         for (const auto &route_cidr : config_.server->routes)
@@ -1172,7 +1163,7 @@ asio::awaitable<void> VpnServer::HandlePushRequest(ClientSession *session)
                 auto [net_addr, prefix_len] = *parsed_route;
                 std::string net_str = ipv4::Ipv4ToString(net_addr);
                 std::string mask_str = ipv4::Ipv4ToString(ipv4::CreateMask(prefix_len));
-                push_reply += ",route " + net_str + " " + mask_str;
+                push_config.routes.push_back({net_str, mask_str, 0});
                 logger_->debug("Pushing route: {} {}", net_str, mask_str);
             }
             else
@@ -1181,14 +1172,12 @@ asio::awaitable<void> VpnServer::HandlePushRequest(ClientSession *session)
             }
         }
 
-        // Push IPv6 routes (e.g., "fd01::/64" → "route-ipv6 fd01::/64")
         for (const auto &route_v6 : config_.server->routes_v6)
         {
             auto parsed_v6_route = ipv6::ParseCidr6(route_v6);
             if (parsed_v6_route)
             {
-                // OpenVPN format: route-ipv6 <network>/<prefix>
-                push_reply += ",route-ipv6 " + route_v6;
+                push_config.routes_ipv6.push_back({route_v6, "", 0});
                 logger_->debug("Pushing IPv6 route: {}", route_v6);
             }
             else
@@ -1198,27 +1187,21 @@ asio::awaitable<void> VpnServer::HandlePushRequest(ClientSession *session)
         }
     }
 
-    // Explicitly set data channel cipher (required for client to activate encryption)
-    // cipher is required - VpnConfig has a default but we don't silently fall back
+    // cipher is required
     if (config_.server->cipher.empty())
     {
         throw std::runtime_error("cipher not configured - this is required for data channel encryption");
     }
-    push_reply += ",cipher " + config_.server->cipher;
+    push_config.cipher = config_.server->cipher;
+    push_config.tun_mtu = static_cast<std::uint16_t>(config_.server->tun_mtu);
+    push_config.ping_interval = static_cast<std::uint32_t>(config_.server->keepalive.first);
+    push_config.ping_restart = static_cast<std::uint32_t>(config_.server->keepalive.second);
 
-    // Always push TUN MTU so client and server agree
-    push_reply += ",tun-mtu " + std::to_string(config_.server->tun_mtu);
+    // peer-id: lower 24 bits of session ID (same algorithm as DcoDataChannel::GetPeerId)
+    push_config.peer_id = static_cast<std::int32_t>(
+        session->GetSessionId().value & openvpn::PEER_ID_MASK);
 
-    // Push keepalive settings from server config so client uses same timeouts
-    push_reply += ",ping " + std::to_string(config_.server->keepalive.first);
-    push_reply += ",ping-restart " + std::to_string(config_.server->keepalive.second);
-
-    // Add peer-id - required for DATA_V2 packet format and DCO
-    // peer-id must match what we registered with DCO kernel module
-    // Use lower 24 bits of session ID (same algorithm as DcoDataChannel::GetPeerId)
-    uint32_t peer_id = static_cast<uint32_t>(session->GetSessionId().value & openvpn::PEER_ID_MASK);
-    push_reply += ",peer-id " + std::to_string(peer_id);
-
+    std::string push_reply = openvpn::ConfigExchange::Serialize(push_config);
     logger_->info("PUSH_REPLY: {}", push_reply);
 
     // Send through TLS (null-terminated)

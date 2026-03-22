@@ -447,11 +447,6 @@ void VpnClient::Disconnect()
     remote_session_id_ = 0;
     server_peer_id_ = 0;
     config_exchange_.Reset();
-    assigned_ip_.clear();
-    assigned_netmask_.clear();
-    gateway_.clear();
-    pushed_routes_.clear();
-    pushed_dns_.clear();
 
     // Wake any long-sleeping loops (StatsLoop, KeepaliveLoop) so they exit
     // promptly instead of waiting out their full timer intervals.
@@ -914,21 +909,10 @@ asio::awaitable<void> VpnClient::ProcessReceivedPlaintext(std::vector<std::uint8
 
         // NCP: adopt the server's cipher from its key-method 2 options.
         // The server's cipher is authoritative for the data channel.
-        if (auto pos = server_options.find(",cipher "); pos != std::string::npos)
-        {
-            auto start = pos + 8; // skip ",cipher "
-            auto end = server_options.find(',', start);
-            std::string server_cipher = (end != std::string::npos)
-                                            ? server_options.substr(start, end - start)
-                                            : server_options.substr(start);
-            if (!server_cipher.empty() && server_cipher != config_.client->cipher)
-            {
-                logger_->info("NCP: server cipher '{}' overrides client cipher '{}'",
-                              server_cipher,
-                              config_.client->cipher);
-                config_.client->cipher = server_cipher;
-            }
-        }
+        // NOTE: The PUSH_REPLY cipher (handled in HandlePushReply) is the
+        // definitive NCP mechanism and will re-key if needed.  We no longer
+        // parse the cipher ad-hoc here — DeriveAndInstallKeys uses whatever
+        // cipher is currently configured, and HandlePushReply corrects it.
 
         if (!DeriveAndInstallKeys())
         {
@@ -994,31 +978,16 @@ void VpnClient::HandlePushReply(const std::string &reply)
         logger_->info("Server assigned peer-id: {}", server_peer_id_);
     }
 
+    // Log pushed configuration
     if (!config.ifconfig.first.empty())
-    {
-        assigned_ip_ = config.ifconfig.first;
-        assigned_netmask_ = config.ifconfig.second;
-        logger_->info("Assigned IP: {} / {}", assigned_ip_, assigned_netmask_);
-    }
+        logger_->info("Assigned IP: {} / {}", config.ifconfig.first, config.ifconfig.second);
 
     for (const auto &[network, gw, metric] : config.routes)
-    {
-        pushed_routes_.push_back(network);
-        if (!gateway_.empty() && !gw.empty())
-        {
-            gateway_ = gw;
-        }
         logger_->info("Route: {} via {} metric {}", network, gw, metric);
-    }
 
     for (const auto &[type, value] : config.dhcp_options)
-    {
         if (type == "DNS")
-        {
-            pushed_dns_.push_back(value);
             logger_->info("DNS: {}", value);
-        }
-    }
 
     if (data_channel_strategy_)
     {
@@ -1160,13 +1129,17 @@ asio::awaitable<void> VpnClient::DcoDataPath::RunConnectedLoop()
 
 void VpnClient::ConfigureTunDevice()
 {
-    if (assigned_ip_.empty())
+    const auto &negotiated = config_exchange_.GetNegotiatedConfig();
+    const auto &assigned_ip = negotiated.ifconfig.first;
+    const auto &assigned_netmask = negotiated.ifconfig.second;
+
+    if (assigned_ip.empty())
     {
         logger_->warn("No IP assigned - TUN device not configured");
         return;
     }
 
-    logger_->info("Configuring TUN device with IP: {}", assigned_ip_);
+    logger_->info("Configuring TUN device with IP: {}", assigned_ip);
 
     try
     {
@@ -1180,31 +1153,29 @@ void VpnClient::ConfigureTunDevice()
         }
         logger_->info("Created TUN device: {}", created_name);
 
-        const auto &negotiated = config_exchange_.GetNegotiatedConfig();
-
         // Determine IPv4 prefix length based on topology.
         // For "net30" / "p2p": ifconfig <local> <remote_peer> -> point-to-point
         // For "subnet":       ifconfig <local> <netmask>       -> compute from netmask
-        if (negotiated.topology == "subnet" && !assigned_netmask_.empty())
+        if (negotiated.topology == "subnet" && !assigned_netmask.empty())
         {
-            auto prefix_length = ipv4::MaskToPrefix(asio::ip::make_address_v4(assigned_netmask_).to_uint());
-            tun_device_->SetAddress(assigned_ip_, prefix_length);
+            auto prefix_length = ipv4::MaskToPrefix(asio::ip::make_address_v4(assigned_netmask).to_uint());
+            tun_device_->SetAddress(assigned_ip, prefix_length);
             logger_->debug("TUN device configured: {} with {}/{} (subnet)",
                            tun_device_->GetName(),
-                           assigned_ip_,
+                           assigned_ip,
                            prefix_length);
         }
         else
         {
             // net30 / p2p topology: configure as point-to-point link.
-            // assigned_netmask_ holds the remote peer IP (e.g., "10.8.0.1").
-            std::string remote_ip = assigned_netmask_.empty() ? "255.255.255.255" : assigned_netmask_;
+            // assigned_netmask holds the remote peer IP (e.g., "10.8.0.1").
+            std::string remote_ip = assigned_netmask.empty() ? "255.255.255.255" : assigned_netmask;
 
-            iface::SetPointToPoint(tun_device_->GetName().c_str(), assigned_ip_, remote_ip);
+            iface::SetPointToPoint(tun_device_->GetName().c_str(), assigned_ip, remote_ip);
 
             logger_->debug("TUN device configured: {} with {} peer {} (net30/p2p)",
                            tun_device_->GetName(),
-                           assigned_ip_,
+                           assigned_ip,
                            remote_ip);
         }
 
@@ -1808,43 +1779,45 @@ void VpnClient::DestroyDcoDevice()
 
 void VpnClient::ConfigureDcoInterface()
 {
-    if (assigned_ip_.empty())
+    const auto &negotiated = config_exchange_.GetNegotiatedConfig();
+    const auto &assigned_ip = negotiated.ifconfig.first;
+    const auto &assigned_netmask = negotiated.ifconfig.second;
+
+    if (assigned_ip.empty())
     {
         logger_->warn("DCO: No IP assigned - cannot configure interface");
         return;
     }
 
     auto &dco = Dco();
-    logger_->info("DCO: Configuring interface {} with IP {}", dco.ifname_, assigned_ip_);
+    logger_->info("DCO: Configuring interface {} with IP {}", dco.ifname_, assigned_ip);
 
-    const auto &negotiated = config_exchange_.GetNegotiatedConfig();
-
-    if (negotiated.topology == "subnet" && !assigned_netmask_.empty())
+    if (negotiated.topology == "subnet" && !assigned_netmask.empty())
     {
-        // Subnet topology: assigned_netmask_ is an actual netmask (e.g. "255.255.255.0").
+        // Subnet topology: assigned_netmask is an actual netmask (e.g. "255.255.255.0").
         clv::UniqueFd sock(::socket(AF_INET, SOCK_DGRAM, 0));
 
-        iface::SetIpAddress(sock.get(), dco.ifname_.c_str(), assigned_ip_);
+        iface::SetIpAddress(sock.get(), dco.ifname_.c_str(), assigned_ip);
 
         // Convert dotted-decimal netmask to host-order uint32_t
-        uint32_t mask = asio::ip::make_address_v4(assigned_netmask_).to_uint();
+        uint32_t mask = asio::ip::make_address_v4(assigned_netmask).to_uint();
         iface::SetNetmask(sock.get(), dco.ifname_.c_str(), mask);
 
         iface::BringUp(sock.get(), dco.ifname_.c_str());
 
-        logger_->debug("DCO: Interface {} configured with {}/{} (subnet)", dco.ifname_, assigned_ip_, ipv4::MaskToPrefix(mask));
+        logger_->debug("DCO: Interface {} configured with {}/{} (subnet)", dco.ifname_, assigned_ip, ipv4::MaskToPrefix(mask));
     }
     else
     {
-        // net30 / P2P topology: assigned_netmask_ holds the remote peer IP
+        // net30 / P2P topology: assigned_netmask holds the remote peer IP
         // (e.g. "10.8.0.1"), NOT a netmask.  Configure as a point-to-point link
         // so that the connected route is a /32 host route for the peer, which
         // avoids a /0 default route that would capture tunnel traffic.
-        std::string remote_ip = assigned_netmask_.empty() ? "255.255.255.255" : assigned_netmask_;
+        std::string remote_ip = assigned_netmask.empty() ? "255.255.255.255" : assigned_netmask;
 
-        iface::SetPointToPoint(dco.ifname_.c_str(), assigned_ip_, remote_ip);
+        iface::SetPointToPoint(dco.ifname_.c_str(), assigned_ip, remote_ip);
 
-        logger_->debug("DCO: Interface {} configured with {} peer {} (net30/p2p)", dco.ifname_, assigned_ip_, remote_ip);
+        logger_->debug("DCO: Interface {} configured with {} peer {} (net30/p2p)", dco.ifname_, assigned_ip, remote_ip);
     }
 
     // Add IPv6 address if pushed by server (mirrors ConfigureTunDevice logic)
@@ -1947,10 +1920,11 @@ bool VpnClient::CreateDcoPeer()
     }
 
     // VPN IP (assigned to us)
-    if (!assigned_ip_.empty())
+    const auto &vpn_ip = config_exchange_.GetNegotiatedConfig().ifconfig.first;
+    if (!vpn_ip.empty())
     {
         struct in_addr addr;
-        if (inet_pton(AF_INET, assigned_ip_.c_str(), &addr) == 1)
+        if (inet_pton(AF_INET, vpn_ip.c_str(), &addr) == 1)
         {
             NlaPut(buf, offset, kAttrsCap, OVPN_NEW_PEER_ATTR_IPV4, &addr.s_addr, sizeof(addr.s_addr));
         }

@@ -11,6 +11,7 @@
 #include "transport/batch_constants.h"
 #include "util/ipv6_utils.h"
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <span>
 #include <tun/tun_device.h>
@@ -80,7 +81,7 @@ class UserspaceDataChannel
                          std::size_t processQuanta,
                          int keepalive_interval,
                          int keepalive_timeout,
-                         const bool &running_flag);
+                         const std::atomic<bool> &running_flag);
 
     /**
      * @brief Process incoming data packet from network
@@ -281,7 +282,7 @@ class UserspaceDataChannel
     std::size_t processQuanta_; ///< Max packets per event-loop yield
     std::chrono::seconds keepalive_interval_;
     std::chrono::seconds keepalive_timeout_;
-    const bool &running_; ///< Reference to server's running flag
+    const std::atomic<bool> &running_; ///< Reference to server's running flag
     bool tun_running_ = true;
     asio::steady_timer keepalive_timer_; ///< Timer for RunKeepaliveMonitor (member for cancellation)
 

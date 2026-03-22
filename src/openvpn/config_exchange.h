@@ -5,7 +5,10 @@
 
 #include <cstdint>
 #include <optional>
+#include <span>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -15,6 +18,12 @@ namespace clv::vpn::openvpn {
 /**
  * @brief Configuration option types from config/push directives
  */
+/// Thrown when a config option cannot be parsed or applied.
+struct ConfigParseError : std::runtime_error
+{
+    using std::runtime_error::runtime_error;
+};
+
 enum class ConfigOptionType
 {
     CIPHER,           ///< cipher <algo> - Data channel cipher algorithm
@@ -143,6 +152,42 @@ struct NegotiatedConfig
     std::uint16_t tun_mtu = 0;
 };
 
+// ---------------------------------------------------------------------------
+// Table-driven option registry
+// ---------------------------------------------------------------------------
+
+/// Signature for applying parsed args to a NegotiatedConfig.
+/// Throws ConfigParseError on bad input.
+using ApplyFn = void (*)(NegotiatedConfig &, const std::vector<std::string> &args);
+
+/// Signature for emitting a field from NegotiatedConfig into a PUSH_REPLY fragment.
+/// Returns an empty string when the field is at its default.
+using EmitFn = std::string (*)(const NegotiatedConfig &);
+
+/// How ParseOption reads arguments after the keyword.
+enum class ArgMode
+{
+    SINGLE, ///< Read one whitespace-delimited token
+    PAIR,   ///< Read exactly two tokens
+    ALL,    ///< Read all remaining tokens
+    REST,   ///< getline the entire rest of the line (preserves internal spaces)
+    NONE,   ///< No arguments (flag)
+};
+
+/// One row in the option table.
+struct OptionSpec
+{
+    std::string_view keyword; ///< Wire keyword (e.g. "cipher")
+    ConfigOptionType type;    ///< Enum tag (for ConfigOption / external code)
+    ArgMode arg_mode;         ///< How to parse arguments
+    ApplyFn apply;            ///< Store parsed args into NegotiatedConfig
+    EmitFn emit;              ///< Serialize field from NegotiatedConfig
+};
+
+/// The global option table — one entry per recognized keyword, searched linearly.
+/// Defined in config_exchange.cpp.
+std::span<const OptionSpec> GetOptionTable();
+
 /**
  * @brief Configuration exchange negotiation state machine
  *
@@ -248,19 +293,20 @@ class ConfigExchange
     }
 
     /**
-     * @brief Build PUSH_REPLY packet with IPv4 configuration
+     * @brief Serialize a NegotiatedConfig into a PUSH_REPLY wire string.
      *
-     * Constructs a PUSH_REPLY string containing IPv4 interface configuration.
-     * Format: "PUSH_REPLY,ifconfig <local> <remote>,route-gateway <gw>,...options"
+     * Produces the comma-separated option string that follows the "PUSH_REPLY,"
+     * prefix.  The returned string includes the "PUSH_REPLY" leader so it is
+     * ready to send as-is.
      *
-     * @param client_ipv4 Allocated client IPv4 address (host byte order)
-     * @param server_ipv4 Server IPv4 address for P2P (host byte order)
-     * @param extra_options Additional options to include (cipher, auth, routes, etc.)
+     * Only non-default fields are emitted.  The output is compatible with
+     * ProcessPushReply() — i.e. `ProcessPushReply(Serialize(cfg))` reproduces
+     * the original config (the round-trip guarantee).
+     *
+     * @param config The negotiated configuration to serialize
      * @return PUSH_REPLY string ready to send to client
      */
-    static std::string BuildPushReplyWithIpv4(uint32_t client_ipv4,
-                                              uint32_t server_ipv4,
-                                              const std::vector<std::string> &extra_options = {});
+    static std::string Serialize(const NegotiatedConfig &config);
 
     /**
      * @brief Get local configuration options
@@ -298,10 +344,10 @@ class ConfigExchange
     std::optional<ConfigOption> ParseOption(const std::string &option_str);
 
     /// Apply a configuration option to negotiated_config_
-    bool ApplyOption(const ConfigOption &option);
+    void ApplyOption(const ConfigOption &option);
 
     /// Merge server and client options according to priority rules
-    bool MergeOptions();
+    void MergeOptions();
 
     /// Validate cipher/auth combination for compatibility
     bool ValidateAlgorithms(bool strict = true);

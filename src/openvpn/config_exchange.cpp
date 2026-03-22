@@ -4,18 +4,338 @@
 #include "crypto_algorithms.h"
 #include "protocol_constants.h"
 #include "util/byte_packer.h"
+#include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
 #include <optional>
 #include <span>
 #include <sstream>
-#include <cctype>
 #include <string>
+#include <string_view>
 #include <tuple>
+#include <type_traits>
 #include <vector>
 
 namespace clv::vpn::openvpn {
+
+// ============================================================================
+// Table-driven option helpers
+// ============================================================================
+
+// --- String helpers: store args[0] into a std::string member ----------------
+template <std::string NegotiatedConfig::*Field>
+void ApplyString(NegotiatedConfig &c, const std::vector<std::string> &args)
+{
+    if (args.empty())
+        throw ConfigParseError("missing argument for string option");
+    c.*Field = args[0];
+}
+
+template <std::string NegotiatedConfig::*Field, char const *Keyword>
+std::string EmitString(const NegotiatedConfig &c)
+{
+    if ((c.*Field).empty())
+        return {};
+    return std::string(",") + Keyword + ' ' + c.*Field;
+}
+
+// --- Unsigned integer helpers -----------------------------------------------
+template <auto Field, typename Raw = unsigned long>
+void ApplyUint(NegotiatedConfig &c, const std::vector<std::string> &args)
+{
+    if (args.empty())
+        throw ConfigParseError("missing argument for integer option");
+    try
+    {
+        c.*Field = static_cast<std::remove_reference_t<decltype(c.*Field)>>(std::stoul(args[0]));
+    }
+    catch (const std::exception &)
+    {
+        throw ConfigParseError("invalid integer value '" + args[0] + "'");
+    }
+}
+
+template <auto Field>
+void ApplyUint64(NegotiatedConfig &c, const std::vector<std::string> &args)
+{
+    if (args.empty())
+        throw ConfigParseError("missing argument for integer option");
+    try
+    {
+        c.*Field = std::stoull(args[0]);
+    }
+    catch (const std::exception &)
+    {
+        throw ConfigParseError("invalid integer value '" + args[0] + "'");
+    }
+}
+
+template <auto Field>
+void ApplyInt32(NegotiatedConfig &c, const std::vector<std::string> &args)
+{
+    if (args.empty())
+        throw ConfigParseError("missing argument for integer option");
+    try
+    {
+        c.*Field = static_cast<std::int32_t>(std::stol(args[0]));
+    }
+    catch (const std::exception &)
+    {
+        throw ConfigParseError("invalid integer value '" + args[0] + "'");
+    }
+}
+
+template <auto Field, char const *Keyword>
+std::string EmitUint(const NegotiatedConfig &c)
+{
+    if (c.*Field <= 0)
+        return {};
+    return std::string(",") + Keyword + ' ' + std::to_string(c.*Field);
+}
+
+template <auto Field, char const *Keyword>
+std::string EmitInt32(const NegotiatedConfig &c)
+{
+    if (c.*Field < 0)
+        return {};
+    return std::string(",") + Keyword + ' ' + std::to_string(c.*Field);
+}
+
+// --- Flag helpers -----------------------------------------------------------
+template <bool NegotiatedConfig::*Field>
+void ApplyFlag(NegotiatedConfig &c, const std::vector<std::string> & /*args*/)
+{
+    c.*Field = true;
+}
+
+template <bool NegotiatedConfig::*Field, char const *Keyword>
+std::string EmitFlag(const NegotiatedConfig &c)
+{
+    if (!(c.*Field))
+        return {};
+    return std::string(",") + Keyword;
+}
+
+// --- Route helpers (vector of tuples) ----------------------------------------
+
+// Apply route: args = [net, mask_or_gw?, metric?]
+template <auto Field>
+void ApplyRoute(NegotiatedConfig &c, const std::vector<std::string> &args)
+{
+    if (args.empty())
+        throw ConfigParseError("missing network for route option");
+    std::string net = args[0];
+    std::string mask_or_gw = (args.size() >= 2) ? args[1] : "";
+    int metric = 0;
+    if (args.size() >= 3)
+    {
+        try
+        {
+            metric = std::stoi(args[2]);
+        }
+        catch (...)
+        { /* bad metric → 0 */
+        }
+    }
+    (c.*Field).push_back({net, mask_or_gw, metric});
+}
+
+template <auto Field, char const *Keyword>
+std::string EmitRoutes(const NegotiatedConfig &c)
+{
+    std::string result;
+    for (const auto &[net, mask, metric] : c.*Field)
+    {
+        result += ',';
+        result += Keyword;
+        result += ' ';
+        result += net;
+        if (!mask.empty())
+        {
+            result += ' ';
+            result += mask;
+        }
+        if (metric != 0)
+        {
+            result += ' ';
+            result += std::to_string(metric);
+        }
+    }
+    return result;
+}
+
+// --- Custom apply/emit for types that don't fit templates -------------------
+
+void ApplyPushReset(NegotiatedConfig &c, const std::vector<std::string> & /*args*/)
+{
+    c = NegotiatedConfig();
+}
+std::string EmitNoop(const NegotiatedConfig &)
+{
+    return {};
+}
+
+// ifconfig: pair of strings
+void ApplyIfconfig(NegotiatedConfig &c, const std::vector<std::string> &args)
+{
+    if (args.size() < 2)
+        throw ConfigParseError("ifconfig requires local and remote addresses");
+    c.ifconfig = {args[0], args[1]};
+}
+std::string EmitIfconfig(const NegotiatedConfig &c)
+{
+    if (c.ifconfig.first.empty() || c.ifconfig.second.empty())
+        return {};
+    return ",ifconfig " + c.ifconfig.first + ' ' + c.ifconfig.second;
+}
+
+// ifconfig-ipv6: "addr/prefix gateway" — complex slash-split parsing
+void ApplyIfconfigIpv6(NegotiatedConfig &c, const std::vector<std::string> &args)
+{
+    if (args.empty())
+        throw ConfigParseError("ifconfig-ipv6 requires address/prefix");
+    try
+    {
+        auto &addr_prefix = args[0];
+        auto slash = addr_prefix.find('/');
+        if (slash != std::string::npos)
+        {
+            std::string addr = addr_prefix.substr(0, slash);
+            int prefix = std::stoi(addr_prefix.substr(slash + 1));
+            c.ifconfig_ipv6 = {addr, prefix};
+        }
+        else if (args.size() >= 2)
+        {
+            int prefix = std::stoi(args[1]);
+            c.ifconfig_ipv6 = {addr_prefix, prefix};
+        }
+        else
+        {
+            throw ConfigParseError("ifconfig-ipv6 requires address/prefix");
+        }
+    }
+    catch (const ConfigParseError &)
+    {
+        throw;
+    }
+    catch (const std::exception &)
+    {
+        throw ConfigParseError("invalid ifconfig-ipv6 value '" + args[0] + "'");
+    }
+}
+std::string EmitIfconfigIpv6(const NegotiatedConfig &c)
+{
+    if (c.ifconfig_ipv6.first.empty() || c.ifconfig_ipv6.second <= 0)
+        return {};
+    return ",ifconfig-ipv6 " + c.ifconfig_ipv6.first + '/' + std::to_string(c.ifconfig_ipv6.second);
+}
+
+// dhcp-option: first arg is type, remaining args joined as value
+void ApplyDhcpOption(NegotiatedConfig &c, const std::vector<std::string> &args)
+{
+    if (args.size() < 2)
+        throw ConfigParseError("dhcp-option requires type and value");
+    std::string value = args[1];
+    for (std::size_t i = 2; i < args.size(); ++i)
+    {
+        value += ' ';
+        value += args[i];
+    }
+    c.dhcp_options.push_back({args[0], value});
+}
+std::string EmitDhcpOptions(const NegotiatedConfig &c)
+{
+    std::string result;
+    for (const auto &[type, value] : c.dhcp_options)
+    {
+        result += ",dhcp-option ";
+        result += type;
+        result += ' ';
+        result += value;
+    }
+    return result;
+}
+
+// reneg-sec: special default (3600) — only emit if non-default and > 0
+std::string EmitRenegSec(const NegotiatedConfig &c)
+{
+    if (c.reneg_sec == 3600 || c.reneg_sec <= 0)
+        return {};
+    return ",reneg-sec " + std::to_string(c.reneg_sec);
+}
+
+// ============================================================================
+// Keyword string constants (needed for template NTTP)
+// ============================================================================
+// NOLINTBEGIN(cppcoreguidelines-avoid-c-arrays)
+inline constexpr char kCipher[] = "cipher";
+inline constexpr char kAuth[] = "auth";
+inline constexpr char kCompress[] = "compress";
+inline constexpr char kFragment[] = "fragment";
+inline constexpr char kMssfix[] = "mssfix";
+inline constexpr char kTopology[] = "topology";
+inline constexpr char kRouteGateway[] = "route-gateway";
+inline constexpr char kRedirectGateway[] = "redirect-gateway";
+inline constexpr char kInactive[] = "inactive";
+inline constexpr char kRenegBytes[] = "reneg-bytes";
+inline constexpr char kRenegPackets[] = "reneg-packets";
+inline constexpr char kRenegSec[] = "reneg-sec";
+inline constexpr char kPeerId[] = "peer-id";
+inline constexpr char kPing[] = "ping";
+inline constexpr char kPingRestart[] = "ping-restart";
+inline constexpr char kTunMtu[] = "tun-mtu";
+inline constexpr char kRoute[] = "route";
+inline constexpr char kRouteIpv6[] = "route-ipv6";
+inline constexpr char kRegisterDns[] = "register-dns";
+// NOLINTEND(cppcoreguidelines-avoid-c-arrays)
+
+// ============================================================================
+// The option table
+// ============================================================================
+
+static constexpr auto kOptionTable = std::to_array<OptionSpec>({
+    // --- String options (single arg) ---
+    {"cipher", ConfigOptionType::CIPHER, ArgMode::SINGLE, ApplyString<&NegotiatedConfig::cipher>, EmitString<&NegotiatedConfig::cipher, kCipher>},
+    {"auth", ConfigOptionType::AUTH, ArgMode::SINGLE, ApplyString<&NegotiatedConfig::auth>, EmitString<&NegotiatedConfig::auth, kAuth>},
+    {"compress", ConfigOptionType::COMPRESS, ArgMode::SINGLE, ApplyString<&NegotiatedConfig::compress>, EmitString<&NegotiatedConfig::compress, kCompress>},
+    {"topology", ConfigOptionType::TOPOLOGY, ArgMode::SINGLE, ApplyString<&NegotiatedConfig::topology>, EmitString<&NegotiatedConfig::topology, kTopology>},
+    {"route-gateway", ConfigOptionType::ROUTE_GATEWAY, ArgMode::SINGLE, ApplyString<&NegotiatedConfig::route_gateway>, EmitString<&NegotiatedConfig::route_gateway, kRouteGateway>},
+    {"redirect-gateway", ConfigOptionType::REDIRECT_GATEWAY, ArgMode::REST, ApplyString<&NegotiatedConfig::redirect_gateway>, EmitString<&NegotiatedConfig::redirect_gateway, kRedirectGateway>},
+
+    // --- Unsigned integer options ---
+    {"fragment", ConfigOptionType::FRAGMENT, ArgMode::SINGLE, ApplyUint<&NegotiatedConfig::fragment_size>, EmitUint<&NegotiatedConfig::fragment_size, kFragment>},
+    {"mssfix", ConfigOptionType::MSSFIX, ArgMode::SINGLE, ApplyUint<&NegotiatedConfig::mssfix>, EmitUint<&NegotiatedConfig::mssfix, kMssfix>},
+    {"tun-mtu", ConfigOptionType::TUN_MTU, ArgMode::SINGLE, ApplyUint<&NegotiatedConfig::tun_mtu>, EmitUint<&NegotiatedConfig::tun_mtu, kTunMtu>},
+    {"inactive", ConfigOptionType::INACTIVE, ArgMode::SINGLE, ApplyUint<&NegotiatedConfig::inactive_timeout>, EmitUint<&NegotiatedConfig::inactive_timeout, kInactive>},
+    {"ping", ConfigOptionType::PING, ArgMode::SINGLE, ApplyUint<&NegotiatedConfig::ping_interval>, EmitUint<&NegotiatedConfig::ping_interval, kPing>},
+    {"ping-restart", ConfigOptionType::PING_RESTART, ArgMode::SINGLE, ApplyUint<&NegotiatedConfig::ping_restart>, EmitUint<&NegotiatedConfig::ping_restart, kPingRestart>},
+    {"reneg-sec", ConfigOptionType::RENEG_SEC, ArgMode::SINGLE, ApplyUint<&NegotiatedConfig::reneg_sec>, EmitRenegSec},
+    {"peer-id", ConfigOptionType::PEER_ID, ArgMode::SINGLE, ApplyInt32<&NegotiatedConfig::peer_id>, EmitInt32<&NegotiatedConfig::peer_id, kPeerId>},
+
+    // --- Uint64 options ---
+    {"reneg-bytes", ConfigOptionType::RENEG_BYTES, ArgMode::SINGLE, ApplyUint64<&NegotiatedConfig::reneg_bytes>, EmitUint<&NegotiatedConfig::reneg_bytes, kRenegBytes>},
+    {"reneg-packets", ConfigOptionType::RENEG_PACKETS, ArgMode::SINGLE, ApplyUint64<&NegotiatedConfig::reneg_packets>, EmitUint<&NegotiatedConfig::reneg_packets, kRenegPackets>},
+
+    // --- Flag options ---
+    {"register-dns", ConfigOptionType::REGISTER_DNS, ArgMode::NONE, ApplyFlag<&NegotiatedConfig::register_dns>, EmitFlag<&NegotiatedConfig::register_dns, kRegisterDns>},
+
+    // --- Route vectors ---
+    {"route", ConfigOptionType::ROUTE, ArgMode::ALL, ApplyRoute<&NegotiatedConfig::routes>, EmitRoutes<&NegotiatedConfig::routes, kRoute>},
+    {"route-ipv6", ConfigOptionType::ROUTE_IPV6, ArgMode::ALL, ApplyRoute<&NegotiatedConfig::routes_ipv6>, EmitRoutes<&NegotiatedConfig::routes_ipv6, kRouteIpv6>},
+
+    // --- Custom handlers ---
+    {"push-reset", ConfigOptionType::PUSH_RESET, ArgMode::NONE, ApplyPushReset, EmitNoop},
+    {"ifconfig", ConfigOptionType::IFCONFIG, ArgMode::PAIR, ApplyIfconfig, EmitIfconfig},
+    {"ifconfig-ipv6", ConfigOptionType::IFCONFIG_IPV6, ArgMode::PAIR, ApplyIfconfigIpv6, EmitIfconfigIpv6},
+    {"dhcp-option", ConfigOptionType::DHCP_OPTION, ArgMode::ALL, ApplyDhcpOption, EmitDhcpOptions},
+});
+
+std::span<const OptionSpec> GetOptionTable()
+{
+    return kOptionTable;
+}
 
 bool ConfigExchange::StartPushRequest()
 {
@@ -35,38 +355,47 @@ bool ConfigExchange::ProcessPushReply(const std::string &options_str)
     negotiated_config_ = NegotiatedConfig();
     received_options_.clear();
 
-    // Parse comma-separated options: "option1 val1,option2 val2,..."
-    std::istringstream stream(options_str);
-    std::string token;
-
-    while (std::getline(stream, token, ','))
+    try
     {
-        // Trim whitespace
-        token.erase(0, token.find_first_not_of(" \t\r\n"));
-        token.erase(token.find_last_not_of(" \t\r\n") + 1);
+        // Parse comma-separated options: "option1 val1,option2 val2,..."
+        std::istringstream stream(options_str);
+        std::string token;
 
-        if (token.empty())
-            continue;
+        while (std::getline(stream, token, ','))
+        {
+            // Trim whitespace
+            token.erase(0, token.find_first_not_of(" \t\r\n"));
+            token.erase(token.find_last_not_of(" \t\r\n") + 1);
 
-        if (token.length() > MAX_OPTION_LENGTH)
-            return false; // Option too long
+            if (token.empty())
+                continue;
 
-        auto option = ParseOption(token);
-        if (!option)
-            return false; // Parse error
+            if (token.length() > MAX_OPTION_LENGTH)
+                throw ConfigParseError("option exceeds maximum length: " + token.substr(0, 40) + "...");
 
-        if (!ApplyOption(*option))
-            return false; // Application error
+            auto option = ParseOption(token);
+            if (!option)
+                throw ConfigParseError("failed to parse option: " + token);
 
-        received_options_.push_back(*option);
+            ApplyOption(*option);
 
-        if (received_options_.size() > MAX_CONFIG_OPTIONS)
-            return false; // Too many options
+            received_options_.push_back(*option);
+
+            if (received_options_.size() > MAX_CONFIG_OPTIONS)
+                throw ConfigParseError("too many options (limit " + std::to_string(MAX_CONFIG_OPTIONS) + ")");
+        }
+
+        // Validate cipher/auth compatibility
+        if (!ValidateAlgorithms())
+            throw ConfigParseError("invalid cipher/auth combination: " + negotiated_config_.cipher + "/" + negotiated_config_.auth);
     }
-
-    // Validate cipher/auth compatibility
-    if (!ValidateAlgorithms())
+    catch (const ConfigParseError &e)
+    {
+        std::cerr << "PUSH_REPLY rejected: " << e.what() << '\n';
+        negotiated_config_ = NegotiatedConfig();
+        received_options_.clear();
         return false;
+    }
 
     push_pending_ = false;
     configured_ = true;
@@ -101,176 +430,54 @@ std::optional<ConfigOption> ConfigExchange::ParseOption(const std::string &optio
     if (!(stream >> key))
         return std::nullopt; // Empty option
 
-    // Determine option type and parse arguments
-    // This is a huge list of conditionals and I could make it better with a map if it really gets
-    // out of hand later. For now this is fine.
-    if (key == "cipher")
+    // Look up keyword in the option table
+    auto table = GetOptionTable();
+    auto it = std::find_if(table.begin(), table.end(), [&key](const OptionSpec &spec)
+    { return spec.keyword == key; });
+
+    if (it != table.end())
     {
-        option.type = ConfigOptionType::CIPHER;
-        std::string algo;
-        if (stream >> algo)
-            option.args.push_back(algo);
-    }
-    else if (key == "auth")
-    {
-        option.type = ConfigOptionType::AUTH;
-        std::string algo;
-        if (stream >> algo)
-            option.args.push_back(algo);
-    }
-    else if (key == "compress")
-    {
-        option.type = ConfigOptionType::COMPRESS;
-        std::string algo;
-        if (stream >> algo)
-            option.args.push_back(algo);
-    }
-    else if (key == "fragment")
-    {
-        option.type = ConfigOptionType::FRAGMENT;
-        std::string size_str;
-        if (stream >> size_str)
-            option.args.push_back(size_str);
-    }
-    else if (key == "mssfix")
-    {
-        option.type = ConfigOptionType::MSSFIX;
-        std::string size_str;
-        if (stream >> size_str)
-            option.args.push_back(size_str);
-    }
-    else if (key == "push-reset")
-    {
-        option.type = ConfigOptionType::PUSH_RESET;
-    }
-    else if (key == "route")
-    {
-        option.type = ConfigOptionType::ROUTE;
-        std::string tok;
-        while (stream >> tok)
-            option.args.push_back(tok);
-    }
-    else if (key == "route-ipv6")
-    {
-        option.type = ConfigOptionType::ROUTE_IPV6;
-        std::string tok;
-        while (stream >> tok)
-            option.args.push_back(tok);
-    }
-    else if (key == "route-gateway")
-    {
-        option.type = ConfigOptionType::ROUTE_GATEWAY;
-        std::string gw;
-        if (stream >> gw)
-            option.args.push_back(gw);
-    }
-    else if (key == "dhcp-option")
-    {
-        option.type = ConfigOptionType::DHCP_OPTION;
-        std::string type_str, value;
-        if (stream >> type_str)
+        option.type = it->type;
+        switch (it->arg_mode)
         {
-            option.args.push_back(type_str);
-            if (std::getline(stream, value))
+        case ArgMode::SINGLE:
             {
-                // Trim leading space from getline
-                if (!value.empty() && value[0] == ' ')
-                    value.erase(0, 1);
-                option.args.push_back(value);
+                std::string tok;
+                if (stream >> tok)
+                    option.args.push_back(tok);
+                break;
             }
+        case ArgMode::PAIR:
+            {
+                std::string a, b;
+                if (stream >> a)
+                    option.args.push_back(a);
+                if (stream >> b)
+                    option.args.push_back(b);
+                break;
+            }
+        case ArgMode::ALL:
+            {
+                std::string tok;
+                while (stream >> tok)
+                    option.args.push_back(tok);
+                break;
+            }
+        case ArgMode::REST:
+            {
+                std::string rest;
+                if (std::getline(stream, rest))
+                {
+                    if (!rest.empty() && rest[0] == ' ')
+                        rest.erase(0, 1);
+                    if (!rest.empty())
+                        option.args.push_back(rest);
+                }
+                break;
+            }
+        case ArgMode::NONE:
+            break;
         }
-    }
-    else if (key == "redirect-gateway")
-    {
-        option.type = ConfigOptionType::REDIRECT_GATEWAY;
-        std::string flags;
-        if (std::getline(stream, flags))
-        {
-            if (!flags.empty() && flags[0] == ' ')
-                flags.erase(0, 1);
-            option.args.push_back(flags);
-        }
-    }
-    else if (key == "topology")
-    {
-        option.type = ConfigOptionType::TOPOLOGY;
-        std::string mode;
-        if (stream >> mode)
-            option.args.push_back(mode);
-    }
-    else if (key == "ifconfig")
-    {
-        option.type = ConfigOptionType::IFCONFIG;
-        std::string local, remote;
-        if (stream >> local >> remote)
-            option.args = {local, remote};
-    }
-    else if (key == "ifconfig-ipv6")
-    {
-        option.type = ConfigOptionType::IFCONFIG_IPV6;
-        std::string local, prefix;
-        if (stream >> local >> prefix)
-            option.args = {local, prefix};
-    }
-    else if (key == "register-dns")
-    {
-        option.type = ConfigOptionType::REGISTER_DNS;
-    }
-    else if (key == "inactive")
-    {
-        option.type = ConfigOptionType::INACTIVE;
-        std::string timeout;
-        if (stream >> timeout)
-            option.args.push_back(timeout);
-    }
-    else if (key == "reneg-bytes")
-    {
-        option.type = ConfigOptionType::RENEG_BYTES;
-        std::string bytes;
-        if (stream >> bytes)
-            option.args.push_back(bytes);
-    }
-    else if (key == "reneg-packets")
-    {
-        option.type = ConfigOptionType::RENEG_PACKETS;
-        std::string packets;
-        if (stream >> packets)
-            option.args.push_back(packets);
-    }
-    else if (key == "reneg-sec")
-    {
-        option.type = ConfigOptionType::RENEG_SEC;
-        std::string seconds;
-        if (stream >> seconds)
-            option.args.push_back(seconds);
-    }
-    else if (key == "peer-id")
-    {
-        option.type = ConfigOptionType::PEER_ID;
-        std::string id;
-        if (stream >> id)
-            option.args.push_back(id);
-    }
-    else if (key == "ping")
-    {
-        option.type = ConfigOptionType::PING;
-        std::string seconds;
-        if (stream >> seconds)
-            option.args.push_back(seconds);
-    }
-    else if (key == "ping-restart")
-    {
-        option.type = ConfigOptionType::PING_RESTART;
-        std::string seconds;
-        if (stream >> seconds)
-            option.args.push_back(seconds);
-    }
-    else if (key == "tun-mtu")
-    {
-        option.type = ConfigOptionType::TUN_MTU;
-        std::string mtu;
-        if (stream >> mtu)
-            option.args.push_back(mtu);
     }
     else
     {
@@ -280,303 +487,26 @@ std::optional<ConfigOption> ConfigExchange::ParseOption(const std::string &optio
     return option;
 }
 
-bool ConfigExchange::ApplyOption(const ConfigOption &option)
+void ConfigExchange::ApplyOption(const ConfigOption &option)
 {
     if (!option.enabled)
-        return true; // Disabled options are silently skipped
+        return;
 
-    // Again monster switch statement; fix later if it gets worse. For now it's manageable.
-    switch (option.type)
-    {
-    case ConfigOptionType::CIPHER:
-        if (option.args.size() >= 1)
-            negotiated_config_.cipher = option.args[0];
-        return !option.args.empty();
+    if (option.type == ConfigOptionType::UNKNOWN)
+        return;
 
-    case ConfigOptionType::AUTH:
-        if (option.args.size() >= 1)
-            negotiated_config_.auth = option.args[0];
-        return !option.args.empty();
+    auto table = GetOptionTable();
+    auto it = std::find_if(table.begin(), table.end(), [&option](const OptionSpec &spec)
+    { return spec.type == option.type; });
 
-    case ConfigOptionType::COMPRESS:
-        if (option.args.size() >= 1)
-            negotiated_config_.compress = option.args[0];
-        return !option.args.empty();
-
-    case ConfigOptionType::FRAGMENT:
-        if (option.args.size() >= 1)
-        {
-            try
-            {
-                negotiated_config_.fragment_size = static_cast<std::uint16_t>(std::stoul(option.args[0]));
-            }
-            catch (...)
-            {
-                return false;
-            }
-        }
-        return !option.args.empty();
-
-    case ConfigOptionType::MSSFIX:
-        if (option.args.size() >= 1)
-        {
-            try
-            {
-                negotiated_config_.mssfix = static_cast<std::uint16_t>(std::stoul(option.args[0]));
-            }
-            catch (...)
-            {
-                return false;
-            }
-        }
-        return !option.args.empty();
-
-    case ConfigOptionType::PUSH_RESET:
-        // Clear all previously received options
-        negotiated_config_ = NegotiatedConfig();
-        return true;
-
-    case ConfigOptionType::ROUTE:
-        if (option.args.size() >= 1)
-        {
-            std::string net = option.args[0];
-            std::string mask_or_gw = (option.args.size() >= 2) ? option.args[1] : "";
-            int metric = 0;
-            if (option.args.size() >= 3)
-            {
-                try
-                {
-                    metric = std::stoi(option.args[2]);
-                }
-                catch (...)
-                { /* ignore bad metric */
-                }
-            }
-            negotiated_config_.routes.push_back({net, mask_or_gw, metric});
-        }
-        return option.args.size() >= 1;
-
-    case ConfigOptionType::ROUTE_IPV6:
-        if (option.args.size() >= 1)
-        {
-            std::string net = option.args[0];
-            std::string gw = (option.args.size() >= 2) ? option.args[1] : "";
-            int metric = 0;
-            if (option.args.size() >= 3)
-            {
-                try
-                {
-                    metric = std::stoi(option.args[2]);
-                }
-                catch (...)
-                { /* ignore bad metric */
-                }
-            }
-            negotiated_config_.routes_ipv6.push_back({net, gw, metric});
-        }
-        return option.args.size() >= 1;
-
-    case ConfigOptionType::DHCP_OPTION:
-        if (option.args.size() >= 2)
-        {
-            negotiated_config_.dhcp_options.push_back({option.args[0], option.args[1]});
-        }
-        return option.args.size() >= 2;
-
-    case ConfigOptionType::ROUTE_GATEWAY:
-        if (option.args.size() >= 1)
-            negotiated_config_.route_gateway = option.args[0];
-        return !option.args.empty();
-
-    case ConfigOptionType::REDIRECT_GATEWAY:
-        if (option.args.size() >= 1)
-            negotiated_config_.redirect_gateway = option.args[0];
-        return !option.args.empty();
-
-    case ConfigOptionType::TOPOLOGY:
-        if (option.args.size() >= 1)
-            negotiated_config_.topology = option.args[0];
-        return !option.args.empty();
-
-    case ConfigOptionType::IFCONFIG:
-        if (option.args.size() >= 2)
-        {
-            negotiated_config_.ifconfig = {option.args[0], option.args[1]};
-        }
-        return option.args.size() >= 2;
-
-    case ConfigOptionType::IFCONFIG_IPV6:
-        if (option.args.size() >= 1)
-        {
-            try
-            {
-                // Format: "addr/prefix [gateway]"
-                // args[0] = "fd00::65/112", args[1] = "fd00::1" (gateway, ignored here)
-                auto &addr_prefix = option.args[0];
-                auto slash = addr_prefix.find('/');
-                if (slash != std::string::npos)
-                {
-                    std::string addr = addr_prefix.substr(0, slash);
-                    int prefix = std::stoi(addr_prefix.substr(slash + 1));
-                    negotiated_config_.ifconfig_ipv6 = {addr, prefix};
-                }
-                else
-                {
-                    // No prefix in addr, try args[1] as prefix
-                    if (option.args.size() >= 2)
-                    {
-                        int prefix = std::stoi(option.args[1]);
-                        negotiated_config_.ifconfig_ipv6 = {addr_prefix, prefix};
-                    }
-                    else
-                    {
-                        return false;
-                    }
-                }
-            }
-            catch (...)
-            {
-                return false;
-            }
-        }
-        return option.args.size() >= 1;
-
-    case ConfigOptionType::REGISTER_DNS:
-        negotiated_config_.register_dns = true;
-        return true;
-
-    case ConfigOptionType::INACTIVE:
-        if (option.args.size() >= 1)
-        {
-            try
-            {
-                negotiated_config_.inactive_timeout = static_cast<std::uint32_t>(std::stoul(option.args[0]));
-            }
-            catch (...)
-            {
-                return false;
-            }
-        }
-        return !option.args.empty();
-
-    case ConfigOptionType::RENEG_BYTES:
-        if (option.args.size() >= 1)
-        {
-            try
-            {
-                negotiated_config_.reneg_bytes = std::stoull(option.args[0]);
-            }
-            catch (...)
-            {
-                return false;
-            }
-        }
-        return !option.args.empty();
-
-    case ConfigOptionType::RENEG_PACKETS:
-        if (option.args.size() >= 1)
-        {
-            try
-            {
-                negotiated_config_.reneg_packets = std::stoull(option.args[0]);
-            }
-            catch (...)
-            {
-                return false;
-            }
-        }
-        return !option.args.empty();
-
-    case ConfigOptionType::RENEG_SEC:
-        if (option.args.size() >= 1)
-        {
-            try
-            {
-                negotiated_config_.reneg_sec = static_cast<std::uint32_t>(std::stoul(option.args[0]));
-            }
-            catch (...)
-            {
-                return false;
-            }
-        }
-        return !option.args.empty();
-
-    case ConfigOptionType::UNKNOWN:
-        // Unknown options are accepted but not applied
-        return true;
-
-    case ConfigOptionType::PEER_ID:
-        if (option.args.size() >= 1)
-        {
-            try
-            {
-                negotiated_config_.peer_id = static_cast<std::int32_t>(std::stol(option.args[0]));
-            }
-            catch (...)
-            {
-                return false;
-            }
-        }
-        return !option.args.empty();
-
-    case ConfigOptionType::PING:
-        if (option.args.size() >= 1)
-        {
-            try
-            {
-                negotiated_config_.ping_interval = static_cast<std::uint32_t>(std::stoul(option.args[0]));
-            }
-            catch (...)
-            {
-                return false;
-            }
-        }
-        return !option.args.empty();
-
-    case ConfigOptionType::PING_RESTART:
-        if (option.args.size() >= 1)
-        {
-            try
-            {
-                negotiated_config_.ping_restart = static_cast<std::uint32_t>(std::stoul(option.args[0]));
-            }
-            catch (...)
-            {
-                return false;
-            }
-        }
-        return !option.args.empty();
-
-    case ConfigOptionType::TUN_MTU:
-        if (option.args.size() >= 1)
-        {
-            try
-            {
-                negotiated_config_.tun_mtu = static_cast<std::uint16_t>(std::stoul(option.args[0]));
-            }
-            catch (...)
-            {
-                return false;
-            }
-        }
-        return !option.args.empty();
-    }
-
-    return true;
+    if (it != table.end())
+        it->apply(negotiated_config_, option.args);
 }
 
-bool ConfigExchange::MergeOptions()
+void ConfigExchange::MergeOptions()
 {
-    // Simple merge: received options override local options
-    // In a full implementation, we'd have more complex priority rules
-
     for (const auto &opt : received_options_)
-    {
-        if (!ApplyOption(opt))
-            return false;
-    }
-
-    return true;
+        ApplyOption(opt);
 }
 
 bool ConfigExchange::ValidateAlgorithms(bool strict)
@@ -587,40 +517,14 @@ bool ConfigExchange::ValidateAlgorithms(bool strict)
                                         strict);
 }
 
-std::string ConfigExchange::BuildPushReplyWithIpv4(std::uint32_t client_ipv4,
-                                                   std::uint32_t server_ipv4,
-                                                   const std::vector<std::string> &extra_options)
+std::string ConfigExchange::Serialize(const NegotiatedConfig &config)
 {
-    // Convert uint32_t IPv4 addresses to dotted-decimal format
-    auto ipv4_to_string = [](std::uint32_t ip) -> std::string
-    {
-        return std::to_string((ip >> 24) & 0xFF) + "." + std::to_string((ip >> 16) & 0xFF) + "." + std::to_string((ip >> 8) & 0xFF) + "." + std::to_string(ip & 0xFF);
-    };
+    std::string result = "PUSH_REPLY";
 
-    std::string client_ip_str = ipv4_to_string(client_ipv4);
-    std::string server_ip_str = ipv4_to_string(server_ipv4);
+    for (const auto &spec : GetOptionTable())
+        result += spec.emit(config);
 
-    // Build PUSH_REPLY with required OpenVPN options
-    // Format: PUSH_REPLY,<option1>,<option2>,...
-    std::string push_reply = "PUSH_REPLY,";
-
-    // Add ifconfig option: assigns IP to TUN interface
-    // Format: ifconfig <client_ip> <server_ip>
-    push_reply += "ifconfig " + client_ip_str + " " + server_ip_str;
-
-    // Add route-gateway option: specifies default gateway
-    push_reply += ",route-gateway " + server_ip_str;
-
-    // Add extra options if provided (cipher, auth, routes, etc.)
-    for (const auto &opt : extra_options)
-    {
-        if (!opt.empty())
-        {
-            push_reply += "," + opt;
-        }
-    }
-
-    return push_reply;
+    return result;
 }
 
 std::vector<std::uint8_t> BuildKeyMethod2Message(

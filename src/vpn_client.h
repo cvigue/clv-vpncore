@@ -22,6 +22,7 @@
 #include <asio/awaitable.hpp>
 #include <asio/io_context.hpp>
 #include <asio/ip/udp.hpp>
+#include <atomic>
 #include <span>
 #include <spdlog/spdlog.h>
 
@@ -188,23 +189,30 @@ class VpnClient
      */
     std::string GetAssignedIp() const
     {
-        return assigned_ip_;
+        return config_exchange_.GetNegotiatedConfig().ifconfig.first;
     }
 
     /**
      * @brief Get server-pushed routes (after connected)
      */
-    const std::vector<std::string> &GetRoutes() const
+    std::vector<std::string> GetRoutes() const
     {
-        return pushed_routes_;
+        std::vector<std::string> result;
+        for (const auto &[network, gw, metric] : config_exchange_.GetNegotiatedConfig().routes)
+            result.push_back(network);
+        return result;
     }
 
     /**
      * @brief Get server-pushed DNS servers (after connected)
      */
-    const std::vector<std::string> &GetDnsServers() const
+    std::vector<std::string> GetDnsServers() const
     {
-        return pushed_dns_;
+        std::vector<std::string> result;
+        for (const auto &[type, value] : config_exchange_.GetNegotiatedConfig().dhcp_options)
+            if (type == "DNS")
+                result.push_back(value);
+        return result;
     }
 
     /**
@@ -470,7 +478,7 @@ class VpnClient
 
     // Connection state
     VpnClientState state_ = VpnClientState::Disconnected;
-    bool running_ = false;
+    std::atomic<bool> running_ = false;
     int reconnect_attempts_ = 0; ///< Consecutive reconnect attempts since last successful connect
 
     // Network
@@ -495,13 +503,6 @@ class VpnClient
 
     // TUN device (userspace mode only - DCO manages its own kernel netdev)
     std::unique_ptr<tun::TunDevice> tun_device_;
-
-    // Pushed configuration
-    std::string assigned_ip_;
-    std::string assigned_netmask_;
-    std::string gateway_;
-    std::vector<std::string> pushed_routes_;
-    std::vector<std::string> pushed_dns_;
 
     // Statistics
     DataPathStats stats_;                  ///< Monotonic counters (userspace path)
