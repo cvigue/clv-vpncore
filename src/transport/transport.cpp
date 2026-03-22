@@ -85,7 +85,7 @@ asio::awaitable<void> UdpTransport::Send(std::span<const std::uint8_t> data)
 asio::awaitable<std::vector<std::uint8_t>> UdpTransport::Receive()
 {
     // Buffer is coroutine-local to avoid per-instance overhead on server side
-    std::array<std::uint8_t, 4096> recvBuffer;
+    std::array<std::uint8_t, openvpn::MAX_UDP_RECEIVE_SIZE> recvBuffer;
     asio::ip::udp::endpoint recvEndpoint;
 
     auto bytesReceived = co_await socket_->async_receive_from(asio::buffer(recvBuffer),

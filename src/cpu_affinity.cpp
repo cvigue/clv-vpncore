@@ -37,6 +37,11 @@ bool SetThreadAffinity(int core, spdlog::logger &logger)
     }
 
     long nproc = sysconf(_SC_NPROCESSORS_ONLN);
+    if (nproc < 1)
+    {
+        logger.warn("cpu_affinity: sysconf(_SC_NPROCESSORS_ONLN) failed: {}", std::strerror(errno));
+        return false;
+    }
     if (core < 0 || core >= nproc)
     {
         logger.warn("cpu_affinity: core {} out of range [0, {})", core, nproc);
@@ -60,6 +65,11 @@ bool SetThreadAffinity(int core, spdlog::logger &logger)
 bool ClearThreadAffinity(spdlog::logger &logger)
 {
     long nproc = sysconf(_SC_NPROCESSORS_ONLN);
+    if (nproc < 1)
+    {
+        logger.warn("cpu_affinity: sysconf(_SC_NPROCESSORS_ONLN) failed: {}", std::strerror(errno));
+        return false;
+    }
     cpu_set_t mask;
     CPU_ZERO(&mask);
     for (long i = 0; i < nproc; ++i)

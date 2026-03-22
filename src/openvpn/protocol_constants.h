@@ -123,7 +123,7 @@ constexpr std::uint8_t IP_VERSION_4 = 4;
 constexpr std::uint8_t IP_VERSION_6 = 6;
 
 // ================================================================================================
-// TCP Framing Limits
+// Framing Limits
 // ================================================================================================
 
 /**
@@ -133,6 +133,14 @@ constexpr std::uint8_t IP_VERSION_6 = 6;
  *          to prevent memory-amplification attacks over TCP.
  */
 constexpr std::uint16_t MAX_TCP_FRAME_SIZE = 1600;
+
+/**
+ * @brief Receive buffer size for single-datagram UDP reads (bytes).
+ * @details Used by `UdpTransport::Receive()` for control-plane packets.
+ *          Sized above the link-MTU ceiling (jumbo frames aside) so that
+ *          any standards-compliant OpenVPN datagram fits without truncation.
+ */
+constexpr std::size_t MAX_UDP_RECEIVE_SIZE = 4096;
 
 } // namespace clv::vpn::openvpn
 
