@@ -228,3 +228,176 @@ TEST_F(RoutingTableTest, UpdateRoute)
     result = table.Lookup(IpToUint32("192.168.1.1"));
     EXPECT_EQ(*result, 2);
 }
+
+// ===========================================================================
+// IPv6 routing table tests
+// ===========================================================================
+
+using Ipv6Address = ipv6::Ipv6Address;
+
+// Helper to convert IPv6 string to Ipv6Address (network byte order)
+Ipv6Address Ipv6FromString(const char *ip_str)
+{
+    Ipv6Address addr{};
+    inet_pton(AF_INET6, ip_str, addr.data());
+    return addr;
+}
+
+class RoutingTableIpv6Test : public ::testing::Test
+{
+  protected:
+    RoutingTableIpv6 table;
+};
+
+TEST_F(RoutingTableIpv6Test, AddAndLookupExactMatch)
+{
+    auto network = Ipv6FromString("2001:db8:1::");
+    table.AddRoute(network, 48, 1);
+
+    auto dest = Ipv6FromString("2001:db8:1::42");
+    auto result = table.Lookup(dest);
+    EXPECT_TRUE(result.has_value());
+    EXPECT_EQ(*result, 1);
+}
+
+TEST_F(RoutingTableIpv6Test, LookupNoMatch)
+{
+    auto network = Ipv6FromString("2001:db8:1::");
+    table.AddRoute(network, 48, 1);
+
+    auto dest = Ipv6FromString("fd00::1");
+    auto result = table.Lookup(dest);
+    EXPECT_FALSE(result.has_value());
+}
+
+TEST_F(RoutingTableIpv6Test, LongestPrefixMatch)
+{
+    auto network1 = Ipv6FromString("2001:db8::");
+    auto network2 = Ipv6FromString("2001:db8:1::");
+
+    table.AddRoute(network1, 32, 1); // 2001:db8::/32
+    table.AddRoute(network2, 48, 2); // 2001:db8:1::/48 (more specific)
+
+    // Should match the /48
+    auto dest = Ipv6FromString("2001:db8:1::99");
+    auto result = table.Lookup(dest);
+    EXPECT_TRUE(result.has_value());
+    EXPECT_EQ(*result, 2);
+
+    // Should fall back to /32
+    dest = Ipv6FromString("2001:db8:ff::1");
+    result = table.Lookup(dest);
+    EXPECT_TRUE(result.has_value());
+    EXPECT_EQ(*result, 1);
+}
+
+TEST_F(RoutingTableIpv6Test, MultipleRoutes)
+{
+    table.AddRoute(Ipv6FromString("2001:db8:1::"), 48, 1);
+    table.AddRoute(Ipv6FromString("fd00::"), 16, 2);
+    table.AddRoute(Ipv6FromString("fe80::"), 10, 3);
+
+    EXPECT_EQ(table.GetRouteCount(), 3);
+
+    EXPECT_EQ(*table.Lookup(Ipv6FromString("2001:db8:1::abc")), 1);
+    EXPECT_EQ(*table.Lookup(Ipv6FromString("fd00::5")), 2);
+    EXPECT_EQ(*table.Lookup(Ipv6FromString("fe80::1")), 3);
+}
+
+TEST_F(RoutingTableIpv6Test, RemoveRoute)
+{
+    auto network = Ipv6FromString("2001:db8:1::");
+    table.AddRoute(network, 48, 1);
+
+    auto dest = Ipv6FromString("2001:db8:1::42");
+    EXPECT_TRUE(table.Lookup(dest).has_value());
+
+    EXPECT_TRUE(table.RemoveRoute(network, 48));
+    EXPECT_FALSE(table.Lookup(dest).has_value());
+}
+
+TEST_F(RoutingTableIpv6Test, RemoveNonexistentRoute)
+{
+    auto network = Ipv6FromString("2001:db8:1::");
+    EXPECT_FALSE(table.RemoveRoute(network, 48));
+}
+
+TEST_F(RoutingTableIpv6Test, GetRoutesForSession)
+{
+    table.AddRoute(Ipv6FromString("2001:db8:1::"), 48, 1);
+    table.AddRoute(Ipv6FromString("2001:db8:2::"), 48, 1);
+    table.AddRoute(Ipv6FromString("fd00::"), 16, 2);
+
+    EXPECT_EQ(table.GetRoutesForSession(1).size(), 2);
+    EXPECT_EQ(table.GetRoutesForSession(2).size(), 1);
+    EXPECT_EQ(table.GetRoutesForSession(3).size(), 0);
+}
+
+TEST_F(RoutingTableIpv6Test, RemoveSessionRoutes)
+{
+    table.AddRoute(Ipv6FromString("2001:db8:1::"), 48, 1);
+    table.AddRoute(Ipv6FromString("2001:db8:2::"), 48, 1);
+    table.AddRoute(Ipv6FromString("fd00::"), 16, 2);
+
+    size_t removed = table.RemoveSessionRoutes(1);
+    EXPECT_EQ(removed, 2);
+    EXPECT_EQ(table.GetRouteCount(), 1);
+
+    EXPECT_TRUE(table.Lookup(Ipv6FromString("fd00::5")).has_value());
+}
+
+TEST_F(RoutingTableIpv6Test, HostRoute)
+{
+    auto host = Ipv6FromString("2001:db8::1");
+    table.AddRoute(host, 128, 1);
+
+    EXPECT_TRUE(table.Lookup(host).has_value());
+    EXPECT_FALSE(table.Lookup(Ipv6FromString("2001:db8::2")).has_value());
+}
+
+TEST_F(RoutingTableIpv6Test, DefaultRoute)
+{
+    table.AddRoute(Ipv6FromString("::"), 0, 1);
+
+    EXPECT_EQ(*table.Lookup(Ipv6FromString("2001:db8::1")), 1);
+    EXPECT_EQ(*table.Lookup(Ipv6FromString("fe80::1")), 1);
+}
+
+TEST_F(RoutingTableIpv6Test, ClearAllRoutes)
+{
+    table.AddRoute(Ipv6FromString("2001:db8:1::"), 48, 1);
+    table.AddRoute(Ipv6FromString("fd00::"), 16, 2);
+
+    EXPECT_EQ(table.GetRouteCount(), 2);
+
+    table.Clear();
+    EXPECT_EQ(table.GetRouteCount(), 0);
+    EXPECT_FALSE(table.Lookup(Ipv6FromString("2001:db8:1::1")).has_value());
+}
+
+TEST_F(RoutingTableIpv6Test, InvalidPrefixLength)
+{
+    auto network = Ipv6FromString("2001:db8::");
+    EXPECT_FALSE(table.AddRoute(network, 129, 1));
+}
+
+TEST_F(RoutingTableIpv6Test, NetworkNormalization)
+{
+    // 2001:db8:1::ff/48 should normalize to 2001:db8:1::/48
+    auto network_with_host = Ipv6FromString("2001:db8:1::ff");
+    table.AddRoute(network_with_host, 48, 1);
+
+    auto result = table.Lookup(Ipv6FromString("2001:db8:1::42"));
+    EXPECT_TRUE(result.has_value());
+    EXPECT_EQ(*result, 1);
+}
+
+TEST_F(RoutingTableIpv6Test, UpdateRoute)
+{
+    auto network = Ipv6FromString("2001:db8:1::");
+    table.AddRoute(network, 48, 1);
+    EXPECT_EQ(*table.Lookup(Ipv6FromString("2001:db8:1::1")), 1);
+
+    table.AddRoute(network, 48, 2);
+    EXPECT_EQ(*table.Lookup(Ipv6FromString("2001:db8:1::1")), 2);
+}

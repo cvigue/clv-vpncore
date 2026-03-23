@@ -3,8 +3,10 @@
 #ifndef CLV_VPN_ROUTING_TABLE_H
 #define CLV_VPN_ROUTING_TABLE_H
 
+#include <util/ipv4_utils.h>
 #include <util/ipv6_utils.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -13,171 +15,126 @@
 
 namespace clv::vpn {
 
+// ---------------------------------------------------------------------------
+// Address-family traits — provide NormalizeNetwork, Matches, and MaxPrefix
+// ---------------------------------------------------------------------------
+
+struct Ipv4RoutingTraits
+{
+    using Address = std::uint32_t;
+    static constexpr std::uint8_t kMaxPrefix = 32;
+
+    static Address Normalize(const Address &addr, std::uint8_t prefix)
+    {
+        return ipv4::NormalizeNetwork(addr, prefix);
+    }
+
+    static bool Matches(const Address &addr, const Address &network, std::uint8_t prefix)
+    {
+        return ipv4::IpMatchesNetwork(addr, network, prefix);
+    }
+};
+
+struct Ipv6RoutingTraits
+{
+    using Address = ipv6::Ipv6Address;
+    static constexpr std::uint8_t kMaxPrefix = 128;
+
+    static Address Normalize(const Address &addr, std::uint8_t prefix)
+    {
+        return ipv6::NormalizeNetwork(addr, prefix);
+    }
+
+    static bool Matches(const Address &addr, const Address &network, std::uint8_t prefix)
+    {
+        return ipv6::Ipv6MatchesPrefix(addr, network, prefix);
+    }
+};
+
+// ---------------------------------------------------------------------------
+// RoutingTable<Traits> — longest-prefix-match routing table
+// ---------------------------------------------------------------------------
+
 /**
- * @brief Longest-prefix-match routing table for VPN traffic
+ * @brief Longest-prefix-match routing table for VPN traffic.
  *
- * Maintains a mapping of IPv4 CIDR blocks to client session IDs.
+ * Maintains a mapping of CIDR blocks to client session IDs.
  * Supports efficient longest-prefix-match lookups for routing decisions.
- */
-class RoutingTableIpv4
-{
-  public:
-    struct Route
-    {
-        uint32_t network;      // Network address (host-byte order)
-        uint8_t prefix_length; // CIDR prefix length (0-32)
-        uint64_t session_id;   // Associated session ID
-    };
-
-    /**
-     * @brief Add a route to the routing table
-     * @param network Network address
-     * @param prefix_length Prefix length in bits (0-32)
-     * @param session_id Session ID to route to
-     * @return True if added, false if invalid parameters
-     */
-    bool AddRoute(uint32_t network, uint8_t prefix_length, uint64_t session_id);
-
-    /**
-     * @brief Remove a route from the table
-     * @param network Network address
-     * @param prefix_length Prefix length
-     * @return True if removed, false if not found
-     */
-    bool RemoveRoute(uint32_t network, uint8_t prefix_length);
-
-    /**
-     * @brief Find the session ID for a destination IPv4 address
-     * Performs longest-prefix-match lookup
-     * @param dest_ipv4 Destination IPv4 address
-     * @return Session ID or nullopt if no match
-     */
-    std::optional<uint64_t> Lookup(uint32_t dest_ipv4) const;
-
-    /**
-     * @brief Get all routes for a given session
-     * @param session_id Session ID
-     * @return Vector of routes belonging to this session
-     */
-    std::vector<Route> GetRoutesForSession(uint64_t session_id) const;
-
-    /**
-     * @brief Remove all routes for a session
-     * @param session_id Session ID
-     * @return Number of routes removed
-     */
-    size_t RemoveSessionRoutes(uint64_t session_id);
-
-    /**
-     * @brief Get the total number of routes
-     */
-    size_t GetRouteCount() const
-    {
-        return routes_.size();
-    }
-
-    /**
-     * @brief Clear all routes
-     */
-    void Clear()
-    {
-        routes_.clear();
-    }
-
-  private:
-    // Internal representation: key is (network, prefix_length) pair, sorted by prefix_length descending
-    // This allows efficient longest-prefix-match iteration
-    // Using map with custom comparator to sort by prefix length (longest first)
-    struct RouteKey
-    {
-        uint32_t network;
-        uint8_t prefix_length;
-
-        bool operator<(const RouteKey &other) const
-        {
-            // Sort by prefix length descending (longer prefixes first)
-            if (prefix_length != other.prefix_length)
-                return prefix_length > other.prefix_length;
-            // Then by network address for deterministic ordering
-            return network < other.network;
-        }
-    };
-
-    std::map<RouteKey, uint64_t> routes_; // Maps route to session ID
-};
-
-// ---------------------------------------------------------------------------
-// RoutingTableIpv6 — longest-prefix-match routing for IPv6 tunnel traffic
-// ---------------------------------------------------------------------------
-
-/**
- * @brief Longest-prefix-match routing table for IPv6 VPN traffic
  *
- * Mirrors RoutingTableIpv4 but operates on 128-bit addresses stored as
- * std::array<uint8_t, 16> in network byte order.
+ * @tparam Traits  Address-family traits providing @c Address type,
+ *                 @c kMaxPrefix, @c Normalize(), and @c Matches().
  */
-class RoutingTableIpv6
+template <typename Traits>
+class RoutingTable
 {
   public:
-    using Ipv6Address = ipv6::Ipv6Address;
+    using Address = typename Traits::Address;
 
     struct Route
     {
-        Ipv6Address network;   ///< Network address (network byte order)
-        uint8_t prefix_length; ///< CIDR prefix length (0-128)
-        uint64_t session_id;   ///< Associated session ID
+        Address network;
+        std::uint8_t prefix_length;
+        std::uint64_t session_id;
     };
 
-    /**
-     * @brief Add an IPv6 route to the routing table
-     * @param network Network address (network byte order)
-     * @param prefix_length Prefix length in bits (0-128)
-     * @param session_id Session ID to route to
-     * @return True if added, false if invalid parameters
-     */
-    bool AddRoute(const Ipv6Address &network, uint8_t prefix_length, uint64_t session_id);
+    bool AddRoute(const Address &network, std::uint8_t prefix_length, std::uint64_t session_id)
+    {
+        if (prefix_length > Traits::kMaxPrefix)
+            return false;
 
-    /**
-     * @brief Remove an IPv6 route from the table
-     * @param network Network address (network byte order)
-     * @param prefix_length Prefix length
-     * @return True if removed, false if not found
-     */
-    bool RemoveRoute(const Ipv6Address &network, uint8_t prefix_length);
+        auto normalized = Traits::Normalize(network, prefix_length);
+        RouteKey key{normalized, prefix_length};
+        routes_[key] = session_id;
+        return true;
+    }
 
-    /**
-     * @brief Find the session ID for a destination IPv6 address
-     * Performs longest-prefix-match lookup
-     * @param dest_ipv6 Destination IPv6 address (network byte order)
-     * @return Session ID or nullopt if no match
-     */
-    std::optional<uint64_t> Lookup(const Ipv6Address &dest_ipv6) const;
+    bool RemoveRoute(const Address &network, std::uint8_t prefix_length)
+    {
+        if (prefix_length > Traits::kMaxPrefix)
+            return false;
 
-    /**
-     * @brief Get all routes for a given session
-     * @param session_id Session ID
-     * @return Vector of routes belonging to this session
-     */
-    std::vector<Route> GetRoutesForSession(uint64_t session_id) const;
+        auto normalized = Traits::Normalize(network, prefix_length);
+        RouteKey key{normalized, prefix_length};
+        return routes_.erase(key) > 0;
+    }
 
-    /**
-     * @brief Remove all routes for a session
-     * @param session_id Session ID
-     * @return Number of routes removed
-     */
-    size_t RemoveSessionRoutes(uint64_t session_id);
+    std::optional<std::uint64_t> Lookup(const Address &dest) const
+    {
+        auto it = std::ranges::find_if(routes_, [&dest](const auto &pair)
+        {
+            return Traits::Matches(dest, pair.first.network, pair.first.prefix_length);
+        });
 
-    /**
-     * @brief Get the total number of routes
-     */
-    size_t GetRouteCount() const
+        if (it != routes_.end())
+            return it->second;
+
+        return std::nullopt;
+    }
+
+    std::vector<Route> GetRoutesForSession(std::uint64_t session_id) const
+    {
+        std::vector<Route> result;
+        std::ranges::for_each(routes_, [&](const auto &pair)
+        {
+            if (pair.second == session_id)
+                result.push_back({pair.first.network, pair.first.prefix_length, pair.second});
+        });
+        return result;
+    }
+
+    std::size_t RemoveSessionRoutes(std::uint64_t session_id)
+    {
+        return std::erase_if(routes_, [session_id](const auto &pair)
+        {
+            return pair.second == session_id;
+        });
+    }
+
+    std::size_t GetRouteCount() const
     {
         return routes_.size();
     }
 
-    /**
-     * @brief Clear all routes
-     */
     void Clear()
     {
         routes_.clear();
@@ -186,21 +143,25 @@ class RoutingTableIpv6
   private:
     struct RouteKey
     {
-        Ipv6Address network;
-        uint8_t prefix_length;
+        Address network;
+        std::uint8_t prefix_length;
 
         bool operator<(const RouteKey &other) const
         {
-            // Sort by prefix length descending (longer prefixes first)
             if (prefix_length != other.prefix_length)
                 return prefix_length > other.prefix_length;
-            // Then by network address for deterministic ordering
             return network < other.network;
         }
     };
 
-    std::map<RouteKey, uint64_t> routes_;
+    std::map<RouteKey, std::uint64_t> routes_;
 };
+
+/// IPv4 routing table (host-byte-order uint32_t addresses, /0–/32)
+using RoutingTableIpv4 = RoutingTable<Ipv4RoutingTraits>;
+
+/// IPv6 routing table (network-byte-order 16-byte addresses, /0–/128)
+using RoutingTableIpv6 = RoutingTable<Ipv6RoutingTraits>;
 
 } // namespace clv::vpn
 
