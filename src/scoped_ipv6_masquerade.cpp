@@ -27,7 +27,7 @@ ScopedIpv6Masquerade::ScopedIpv6Masquerade(const std::string &source_cidr6, spdl
 
     // If our table already exists, someone else (or a previous run) created it.
     // Don't take ownership — we didn't create it.
-    if (nft_.Ipv6TableExists())
+    if (nft_.TableExists(NfTablesClient::kIPv6))
     {
         logger_->info("IPv6 masquerade table for {} already exists", source_cidr6_);
         owns_ = false;
@@ -35,7 +35,7 @@ ScopedIpv6Masquerade::ScopedIpv6Masquerade(const std::string &source_cidr6, spdl
     }
 
     // Create table + chain + rule via netlink batch
-    if (!nft_.EnsureIpv6Masquerade(network.data(), prefix_len))
+    if (!nft_.EnsureMasquerade(NfTablesClient::kIPv6, network.data(), prefix_len))
     {
         throw std::runtime_error("ScopedIpv6Masquerade: nftables transaction failed for " + source_cidr6_);
     }
@@ -53,7 +53,7 @@ ScopedIpv6Masquerade::~ScopedIpv6Masquerade() noexcept
 
     try
     {
-        if (nft_.RemoveIpv6Masquerade())
+        if (nft_.RemoveMasquerade(NfTablesClient::kIPv6))
         {
             logger_->info("Removed nftables IPv6 masquerade for {}", source_cidr6_);
         }
@@ -86,7 +86,7 @@ ScopedIpv6Masquerade &ScopedIpv6Masquerade::operator=(ScopedIpv6Masquerade &&oth
         {
             try
             {
-                nft_.RemoveIpv6Masquerade();
+                nft_.RemoveMasquerade(NfTablesClient::kIPv6);
             }
             catch (...)
             {

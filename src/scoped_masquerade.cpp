@@ -4,6 +4,8 @@
 
 #include <util/ipv4_utils.h>
 
+#include <arpa/inet.h>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -28,15 +30,20 @@ ScopedMasquerade::ScopedMasquerade(const std::string &source_cidr, spdlog::logge
 
     // If our table already exists, someone else (or a previous run) created it.
     // Don't take ownership — we didn't create it.
-    if (nft_.TableExists())
+    if (nft_.TableExists(NfTablesClient::kIPv4))
     {
         logger_->info("Masquerade table for {} already exists", source_cidr_);
         owns_ = false;
         return;
     }
 
+    // Convert host-order uint32_t to network-order bytes for the unified API
+    std::uint32_t net_order = htonl(network_);
+    std::uint8_t addr[4];
+    std::memcpy(addr, &net_order, 4);
+
     // Create table + chain + rule via netlink batch
-    if (!nft_.EnsureMasquerade(network_, prefix_len_))
+    if (!nft_.EnsureMasquerade(NfTablesClient::kIPv4, addr, prefix_len_))
     {
         throw std::runtime_error("ScopedMasquerade: nftables transaction failed for " + source_cidr_);
     }
@@ -54,7 +61,7 @@ ScopedMasquerade::~ScopedMasquerade() noexcept
 
     try
     {
-        if (nft_.RemoveMasquerade())
+        if (nft_.RemoveMasquerade(NfTablesClient::kIPv4))
         {
             logger_->info("Removed nftables masquerade for {}", source_cidr_);
         }
@@ -89,7 +96,7 @@ ScopedMasquerade &ScopedMasquerade::operator=(ScopedMasquerade &&other) noexcept
         {
             try
             {
-                nft_.RemoveMasquerade();
+                nft_.RemoveMasquerade(NfTablesClient::kIPv4);
             }
             catch (...)
             {
