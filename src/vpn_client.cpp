@@ -266,7 +266,30 @@ void VpnClient::Connect()
     logger_->info("Connecting to {}:{}", config_.client->server_host, config_.client->server_port);
     SetState(VpnClientState::Connecting);
 
-    // Create transport via connector (resolves address and opens socket)
+    InitializeTransport();
+    SetThreadAffinity(config_.process.cpu_affinity, *logger_);
+    InitializeDataPath();
+
+    local_session_id_ = openvpn::SessionId::Generate().value;
+    logger_->debug("Generated session ID: {:016x}", local_session_id_);
+
+    if (!LoadTlsCryptKey())
+        return;
+
+    if (!InitializeControlChannel())
+        return;
+
+    running_ = true;
+
+    // Initialize last-rx timestamp so the keepalive timeout doesn't fire
+    // immediately before any packets have arrived.
+    last_rx_time_ = std::chrono::steady_clock::now();
+
+    asio::co_spawn(io_context_, ConnectionLoop(), asio::detached);
+}
+
+void VpnClient::InitializeTransport()
+{
     // When DCO is enabled for UDP, open a native AF_INET socket so the
     // ovpn-dco kernel module can attach correctly (it cannot handle
     // v4-mapped IPv6 addresses on AF_INET6 sockets).
@@ -292,11 +315,10 @@ void VpnClient::Connect()
                                 config_.performance.socket_send_buffer,
                                 *logger_);
     }
+}
 
-    // Pin CPU if configured
-    SetThreadAffinity(config_.process.cpu_affinity, *logger_);
-
-    // Initialize data channel strategy
+void VpnClient::InitializeDataPath()
+{
     if (config_.performance.enable_dco && config_.client->protocol != "tcp" && dco::IsAvailable())
     {
         try
@@ -318,12 +340,11 @@ void VpnClient::Connect()
                       currentBatchSize_,
                       processQuanta_);
     }
+}
 
-    // Generate session ID
-    local_session_id_ = openvpn::SessionId::Generate().value;
-    logger_->debug("Generated session ID: {:016x}", local_session_id_);
-
-    // Load TLS-Crypt key (inline PEM takes priority over file path)
+bool VpnClient::LoadTlsCryptKey()
+{
+    // Inline PEM takes priority over file path
     if (!config_.client->tls_crypt_key_pem.empty())
     {
         auto tls_crypt_opt = openvpn::TlsCrypt::FromKeyString(config_.client->tls_crypt_key_pem, *logger_);
@@ -331,7 +352,7 @@ void VpnClient::Connect()
         {
             logger_->error("Failed to load inline TLS-Crypt key");
             SetState(VpnClientState::Error);
-            return;
+            return false;
         }
         tls_crypt_.emplace(std::move(*tls_crypt_opt));
         logger_->debug("Loaded TLS-Crypt key from inline content");
@@ -343,13 +364,16 @@ void VpnClient::Connect()
         {
             logger_->error("Failed to load TLS-Crypt key from: {}", config_.client->tls_crypt_key.string());
             SetState(VpnClientState::Error);
-            return;
+            return false;
         }
         tls_crypt_.emplace(std::move(*tls_crypt_opt));
         logger_->debug("Loaded TLS-Crypt key from: {}", config_.client->tls_crypt_key.string());
     }
+    return true;
+}
 
-    // Initialize ControlChannel with client TLS certificates
+bool VpnClient::InitializeControlChannel()
+{
     // Inline PEM fields take priority over file paths
     openvpn::TlsCertConfig cert_config{
         .ca_cert = config_.client->ca_cert.string(),
@@ -359,24 +383,15 @@ void VpnClient::Connect()
         .local_cert_pem = config_.client->cert_pem,
         .local_key_pem = config_.client->key_pem};
 
-    // Initialize as client (is_server = false)
     openvpn::SessionId session_id{local_session_id_};
     if (!control_channel_.Initialize(false, session_id, cert_config))
     {
         logger_->error("Failed to initialize control channel");
         SetState(VpnClientState::Error);
-        return;
+        return false;
     }
     logger_->debug("Initialized TLS control channel (client mode)");
-
-    running_ = true;
-
-    // Initialize last-rx timestamp so the keepalive timeout doesn't fire
-    // immediately before any packets have arrived.
-    last_rx_time_ = std::chrono::steady_clock::now();
-
-    // Start connection coroutine
-    asio::co_spawn(io_context_, ConnectionLoop(), asio::detached);
+    return true;
 }
 
 void VpnClient::Disconnect()

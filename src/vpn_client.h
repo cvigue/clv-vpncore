@@ -360,6 +360,30 @@ class VpnClient
      */
     asio::awaitable<void> KeepaliveLoop();
 
+    // ========== Connect() Helpers ==========
+
+    /**
+     * @brief Create transport (TCP or UDP), connect to server, apply socket buffers
+     */
+    void InitializeTransport();
+
+    /**
+     * @brief Select DCO or userspace data path (with DCO fallback)
+     */
+    void InitializeDataPath();
+
+    /**
+     * @brief Load TLS-Crypt key from inline PEM or file path
+     * @return true on success, false on error (state set to Error)
+     */
+    bool LoadTlsCryptKey();
+
+    /**
+     * @brief Initialize TLS control channel with client certificates
+     * @return true on success, false on error (state set to Error)
+     */
+    bool InitializeControlChannel();
+
     // ========== DCO (Data Channel Offload) ==========
 
 
