@@ -25,7 +25,6 @@
 #include <string>
 #include <vector>
 
-#include <linux/if.h>
 #include <linux/if_addr.h>
 #include <linux/ipv6.h>
 #include <linux/netlink.h>
