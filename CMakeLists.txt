@@ -32,6 +32,7 @@ add_library(clv_vpncore STATIC
     src/openvpn/client_config_generator.cpp
     src/openvpn/client_session.cpp
     src/openvpn/config_exchange.cpp
+    src/openvpn/connection.cpp
     src/openvpn/control_channel.cpp
     src/openvpn/control_plane_helpers.cpp
     src/openvpn/data_channel.cpp

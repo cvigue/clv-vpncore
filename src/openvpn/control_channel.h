@@ -133,9 +133,9 @@ class ControlChannel
 
     /**
      * @todo Consider adding a full constructor that takes (logger, is_server, session_id, cert_config)
-     * to allow single-step initialization for ClientSession. The current two-step pattern
+     * to allow single-step initialization for Connection. The current two-step pattern
      * (construct + Initialize()) is required by VpnClient which defers init until Connect(),
-     * but ClientSession always has all parameters available at construction time.
+     * but Connection always has all parameters available at construction time.
      */
     explicit ControlChannel(spdlog::logger &logger) : logger_(&logger)
     {

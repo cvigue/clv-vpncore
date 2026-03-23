@@ -7,7 +7,7 @@
 #include "cpu_affinity.h"
 #include "data_path_stats.h"
 #include "log_subsystems.h"
-#include "openvpn/client_session.h"
+#include "openvpn/connection.h"
 #include "openvpn/config_exchange.h"
 #include "openvpn/data_path_engine.h"
 #include "openvpn/packet.h"
@@ -183,7 +183,7 @@ class VpnServer
      * @param session Client session (provides transport handle)
      */
     asio::awaitable<void> SendWrappedPacket(std::vector<std::uint8_t> data,
-                                            ClientSession *session);
+                                            Connection *session);
 
     /**
      * @brief Encrypt data via a session's TLS tunnel and send
@@ -196,7 +196,7 @@ class VpnServer
      * @param description Human-readable label for log messages (e.g., "PUSH_REPLY")
      * @return true if at least one packet was sent
      */
-    asio::awaitable<bool> SendTlsControlData(ClientSession *session,
+    asio::awaitable<bool> SendTlsControlData(Connection *session,
                                              std::span<const std::uint8_t> data,
                                              std::string_view description);
 
@@ -205,31 +205,31 @@ class VpnServer
      * @param session Client session
      * @return true if keys were derived and installed successfully
      */
-    bool DeriveAndInstallKeys(ClientSession *session);
+    bool DeriveAndInstallKeys(Connection *session);
 
     /**
      * @brief Handle control packet dispatching and TLS handshake flow
      * @param session Session pointer (may be nullptr on entry)
      * @param packet Parsed OpenVPN control packet
      * @param sender Peer endpoint
-     * @param endpoint ClientSession endpoint
+     * @param endpoint Connection endpoint
      */
-    asio::awaitable<void> HandleControlPacket(ClientSession *session,
+    asio::awaitable<void> HandleControlPacket(Connection *session,
                                               const openvpn::OpenVpnPacket &packet,
                                               const transport::PeerEndpoint &sender,
-                                              const ClientSession::Endpoint &endpoint,
+                                              const Connection::Endpoint &endpoint,
                                               transport::TransportHandle transport);
 
     /**
      * @brief Handle hard reset (connection initiation)
      * @param packet Parsed OpenVPN packet
      * @param sender Peer endpoint
-     * @param endpoint ClientSession endpoint
+     * @param endpoint Connection endpoint
      * @return Session pointer (new or existing)
      */
-    asio::awaitable<ClientSession *> HandleHardReset(const openvpn::OpenVpnPacket &packet,
+    asio::awaitable<Connection *> HandleHardReset(const openvpn::OpenVpnPacket &packet,
                                                      const transport::PeerEndpoint &sender,
-                                                     const ClientSession::Endpoint &endpoint,
+                                                     const Connection::Endpoint &endpoint,
                                                      transport::TransportHandle transport);
 
     /**
@@ -237,7 +237,7 @@ class VpnServer
      * @param session Client session
      * @param packet Parsed OpenVPN packet
      */
-    asio::awaitable<void> HandleSoftReset(ClientSession *session,
+    asio::awaitable<void> HandleSoftReset(Connection *session,
                                           const openvpn::OpenVpnPacket &packet);
 
     /**
@@ -250,7 +250,7 @@ class VpnServer
      * @param session Client session
      * @param plaintext Decrypted plaintext from TLS engine
      */
-    asio::awaitable<void> ProcessPlaintext(ClientSession *session,
+    asio::awaitable<void> ProcessPlaintext(Connection *session,
                                            std::vector<std::uint8_t> plaintext);
 
     /**
@@ -258,14 +258,14 @@ class VpnServer
      * @param session Client session
      * @param plaintext Plaintext data from TLS
      */
-    asio::awaitable<void> HandleKeyMethod2(ClientSession *session,
+    asio::awaitable<void> HandleKeyMethod2(Connection *session,
                                            const std::vector<uint8_t> &plaintext);
 
     /**
      * @brief Handle PUSH_REQUEST
      * @param session Client session
      */
-    asio::awaitable<void> HandlePushRequest(ClientSession *session);
+    asio::awaitable<void> HandlePushRequest(Connection *session);
 
     /**
      * @brief Process a single inbound data-path slot from the UDP arena.
@@ -283,14 +283,14 @@ class VpnServer
      * @param session Client session
      * @param packet Parsed OpenVPN packet
      */
-    asio::awaitable<void> HandleDataPacket(ClientSession *session,
+    asio::awaitable<void> HandleDataPacket(Connection *session,
                                            const openvpn::OpenVpnPacket &packet);
 
     /**
      * @brief Ensure client has an IP address allocated
      * @param session Client session
      */
-    void EnsureIpAllocated(ClientSession *session);
+    void EnsureIpAllocated(Connection *session);
 
   private:                                                     // Data members
     asio::io_context &io_context_;                             ///< ASIO I/O context

@@ -1,7 +1,7 @@
 // Copyright (c) 2025- Charlie Vigue. All rights reserved.
 
 #include "ip_pool_manager.h"
-#include "openvpn/client_session.h"
+#include "openvpn/connection.h"
 #include "openvpn/control_channel.h"
 #include "openvpn/packet.h"
 #include "openvpn/session_manager.h"
@@ -45,7 +45,7 @@ class VpnServerIntegrationTest : public ::testing::Test
     RoutingTableIpv4 routing_table_;
     std::unique_ptr<spdlog::logger> logger_;
 
-    ClientSession::Endpoint CreateEndpoint(uint32_t ip = 0xC0A80001, uint16_t port = 1194)
+    Connection::Endpoint CreateEndpoint(uint32_t ip = 0xC0A80001, uint16_t port = 1194)
     {
         return {asio::ip::address_v4(ip), port};
     }
@@ -107,10 +107,10 @@ TEST_F(VpnServerIntegrationTest, SingleClientHardResetFlow)
 }
 
 // Test: Multiple clients with different session IDs
-TEST_F(VpnServerIntegrationTest, MultipleClientSessionCreation)
+TEST_F(VpnServerIntegrationTest, MultipleConnectionCreation)
 {
     std::vector<SessionId> session_ids;
-    std::vector<ClientSession::Endpoint> endpoints;
+    std::vector<Connection::Endpoint> endpoints;
 
     // Create 3 clients
     for (int i = 0; i < 3; ++i)
@@ -142,7 +142,7 @@ TEST_F(VpnServerIntegrationTest, MultipleClientSessionCreation)
 TEST_F(VpnServerIntegrationTest, MultipleClientEndpointLookup)
 {
     std::vector<SessionId> session_ids;
-    std::vector<ClientSession::Endpoint> endpoints;
+    std::vector<Connection::Endpoint> endpoints;
 
     // Create clients
     for (int i = 0; i < 3; ++i)
@@ -235,7 +235,7 @@ TEST_F(VpnServerIntegrationTest, RoutingTableLongestPrefixMatch)
 TEST_F(VpnServerIntegrationTest, MultipleClientActivityTracking)
 {
     std::vector<SessionId> session_ids;
-    std::vector<ClientSession *> sessions;
+    std::vector<Connection *> sessions;
 
     // Create clients
     for (int i = 0; i < 3; ++i)
@@ -320,7 +320,7 @@ TEST_F(VpnServerIntegrationTest, PacketIdSequencingPerSession)
 }
 
 // Test: Hard reset handling with session ID conflict resolution
-TEST_F(VpnServerIntegrationTest, ClientSessionIdGeneration)
+TEST_F(VpnServerIntegrationTest, ConnectionIdGeneration)
 {
     // Create multiple clients, verify they get unique session IDs
     std::unordered_set<uint64_t> session_ids_set;

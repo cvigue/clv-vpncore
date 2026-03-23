@@ -1,7 +1,7 @@
 // Copyright (c) 2025- Charlie Vigue. All rights reserved.
 
 #include "session_manager.h"
-#include "client_session.h"
+#include "connection.h"
 #include "openvpn/packet.h"
 #include "openvpn/tls_context.h"
 
@@ -17,8 +17,8 @@
 
 namespace clv::vpn {
 
-ClientSession &SessionManager::GetOrCreateSession(openvpn::SessionId session_id,
-                                                  const ClientSession::Endpoint &endpoint,
+Connection &SessionManager::GetOrCreateSession(openvpn::SessionId session_id,
+                                                  const Connection::Endpoint &endpoint,
                                                   bool is_server,
                                                   std::optional<openvpn::TlsCertConfig> cert_config,
                                                   spdlog::logger &logger)
@@ -35,13 +35,13 @@ ClientSession &SessionManager::GetOrCreateSession(openvpn::SessionId session_id,
     }
 
     // Create new session with certificate configuration
-    auto session = std::make_unique<ClientSession>(session_id, endpoint, is_server, cert_config, logger);
+    auto session = std::make_unique<Connection>(session_id, endpoint, is_server, cert_config, logger);
     auto &ref = *session;
     sessions_[key] = std::move(session);
     return ref;
 }
 
-ClientSession *SessionManager::FindSession(openvpn::SessionId session_id)
+Connection *SessionManager::FindSession(openvpn::SessionId session_id)
 {
     uint64_t key = HashSessionId(session_id);
     auto it = sessions_.find(key);
@@ -54,7 +54,7 @@ ClientSession *SessionManager::FindSession(openvpn::SessionId session_id)
     return nullptr;
 }
 
-ClientSession *SessionManager::FindSessionByEndpoint(const ClientSession::Endpoint &endpoint)
+Connection *SessionManager::FindSessionByEndpoint(const Connection::Endpoint &endpoint)
 {
     auto it = std::ranges::find_if(sessions_, [&](const auto &pair)
     {

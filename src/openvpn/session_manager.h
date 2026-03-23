@@ -3,7 +3,7 @@
 #ifndef CLV_VPN_SESSION_MANAGER_H
 #define CLV_VPN_SESSION_MANAGER_H
 
-#include "client_session.h"
+#include "connection.h"
 #include "openvpn/packet.h"
 #include "openvpn/tls_context.h"
 
@@ -39,8 +39,8 @@ class SessionManager
      * @param logger Structured logger (must remain valid for session lifetime)
      * @return Reference to the session (newly created or existing)
      */
-    ClientSession &GetOrCreateSession(openvpn::SessionId session_id,
-                                      const ClientSession::Endpoint &endpoint,
+    Connection &GetOrCreateSession(openvpn::SessionId session_id,
+                                      const Connection::Endpoint &endpoint,
                                       bool is_server,
                                       std::optional<openvpn::TlsCertConfig> cert_config,
                                       spdlog::logger &logger);
@@ -50,14 +50,14 @@ class SessionManager
      * @param session_id The session identifier
      * @return Pointer to the session or nullptr if not found
      */
-    ClientSession *FindSession(openvpn::SessionId session_id);
+    Connection *FindSession(openvpn::SessionId session_id);
 
     /**
      * @brief Get a session by remote endpoint
      * @param endpoint The remote endpoint
      * @return Pointer to the session or nullptr if not found
      */
-    ClientSession *FindSessionByEndpoint(const ClientSession::Endpoint &endpoint);
+    Connection *FindSessionByEndpoint(const Connection::Endpoint &endpoint);
 
     /**
      * @brief Remove a session
@@ -95,8 +95,8 @@ class SessionManager
     }
 
   private:
-    // Map from SessionId to ClientSession
-    std::unordered_map<uint64_t, std::unique_ptr<ClientSession>> sessions_;
+    // Map from SessionId to Connection
+    std::unordered_map<uint64_t, std::unique_ptr<Connection>> sessions_;
 
     // Helper: convert SessionId to uint64_t for hashing
     static uint64_t HashSessionId(openvpn::SessionId sid)

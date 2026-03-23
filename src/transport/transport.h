@@ -26,7 +26,7 @@ namespace clv::vpn::transport {
  *
  * Supports both IPv4 and IPv6 via asio::ip::address.
  *
- * Mirrors ClientSession::Endpoint layout for easy conversion.
+ * Mirrors Connection::Endpoint layout for easy conversion.
  */
 struct PeerEndpoint
 {

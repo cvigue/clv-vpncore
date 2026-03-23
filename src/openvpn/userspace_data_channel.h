@@ -3,7 +3,7 @@
 #ifndef CLV_VPN_USERSPACE_DATA_CHANNEL_H
 #define CLV_VPN_USERSPACE_DATA_CHANNEL_H
 
-#include "client_session.h"
+#include "connection.h"
 #include "openvpn/packet.h"
 #include "session_manager.h"
 #include "../routing_table.h"
@@ -88,7 +88,7 @@ class UserspaceDataChannel
      * @param session Client session
      * @param packet Parsed OpenVPN data packet
      */
-    asio::awaitable<void> ProcessIncomingDataPacket(ClientSession *session,
+    asio::awaitable<void> ProcessIncomingDataPacket(Connection *session,
                                                     const openvpn::OpenVpnPacket &packet);
 
     /**
@@ -106,7 +106,7 @@ class UserspaceDataChannel
      * @return Span over decrypted IP data within datagram, or empty on
      *         error / keepalive / too-small packet.
      */
-    std::span<std::uint8_t> DecryptAndStripInPlace(ClientSession *session,
+    std::span<std::uint8_t> DecryptAndStripInPlace(Connection *session,
                                                    std::span<std::uint8_t> datagram);
 
     /**
@@ -130,7 +130,7 @@ class UserspaceDataChannel
      * @param lame_duck_seconds Grace period for old keys
      * @return true if keys were installed successfully
      */
-    bool InstallKeys(ClientSession *session,
+    bool InstallKeys(Connection *session,
                      const std::vector<uint8_t> &key_material,
                      openvpn::CipherAlgorithm cipher_algo,
                      openvpn::HmacAlgorithm hmac_algo,
@@ -146,7 +146,7 @@ class UserspaceDataChannel
      *
      * @param session Client session (must have transport and valid keys)
      */
-    asio::awaitable<void> SendKeepAlivePing(ClientSession *session);
+    asio::awaitable<void> SendKeepAlivePing(Connection *session);
 
     /**
      * @brief Run the keepalive monitor coroutine
@@ -227,7 +227,7 @@ class UserspaceDataChannel
     struct EncryptedResult
     {
         std::vector<std::uint8_t> encrypted;
-        ClientSession *session; ///< Non-owning pointer; valid for lifetime of this event-loop tick
+        Connection *session; ///< Non-owning pointer; valid for lifetime of this event-loop tick
     };
 
     /**
@@ -305,7 +305,7 @@ class UserspaceDataChannel
         std::size_t wire_len = 0;         ///< Total wire packet length in arena slot
         transport::PeerEndpoint dest;     ///< UDP destination
         int socketFd = -1;                ///< Socket fd
-        ClientSession *session = nullptr; ///< For UpdateLastOutbound
+        Connection *session = nullptr; ///< For UpdateLastOutbound
     };
     std::vector<ArenaEntry> arena_entries_;
 };

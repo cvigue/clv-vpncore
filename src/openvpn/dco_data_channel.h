@@ -3,7 +3,7 @@
 #ifndef CLV_VPN_DCO_DATA_CHANNEL_H
 #define CLV_VPN_DCO_DATA_CHANNEL_H
 
-#include "client_session.h"
+#include "connection.h"
 #include "data_path_stats.h"
 #include <atomic>
 #include <cstddef>
@@ -109,7 +109,7 @@ class DcoDataChannel
      *
      * In DCO mode, this is a no-op since kernel handles decryption.
      */
-    asio::awaitable<void> ProcessIncomingDataPacket(ClientSession *session,
+    asio::awaitable<void> ProcessIncomingDataPacket(Connection *session,
                                                     const openvpn::OpenVpnPacket &packet);
 
     /**
@@ -117,7 +117,7 @@ class DcoDataChannel
      *
      * DCO handles decryption in kernel space. Returns empty span.
      */
-    std::span<std::uint8_t> DecryptAndStripInPlace(ClientSession * /*session*/,
+    std::span<std::uint8_t> DecryptAndStripInPlace(Connection * /*session*/,
                                                    std::span<std::uint8_t> /*datagram*/)
     {
         return {}; // no-op in DCO mode
@@ -182,7 +182,7 @@ class DcoDataChannel
      *
      * Uses netlink to push keys to ovpn-dco kernel module.
      */
-    bool InstallKeys(ClientSession *session,
+    bool InstallKeys(Connection *session,
                      const std::vector<uint8_t> &key_material,
                      openvpn::CipherAlgorithm cipher_algo,
                      openvpn::HmacAlgorithm hmac_algo,
@@ -198,7 +198,7 @@ class DcoDataChannel
      *
      * @param session Client session
      */
-    asio::awaitable<void> SendKeepAlivePing(ClientSession *session);
+    asio::awaitable<void> SendKeepAlivePing(Connection *session);
 
     /**
      * @brief Run the keepalive monitor coroutine (DCO mode)
@@ -243,13 +243,13 @@ class DcoDataChannel
      * @param session Client session
      * @return true if peer was created successfully
      */
-    bool CreateDcoPeer(ClientSession *session);
+    bool CreateDcoPeer(Connection *session);
 
     /**
      * @brief Remove DCO peer for client session
      * @param session Client session
      */
-    void RemoveDcoPeer(ClientSession *session);
+    void RemoveDcoPeer(Connection *session);
 
     /**
      * @brief Create DCO device via rtnetlink
@@ -278,7 +278,7 @@ class DcoDataChannel
      * @param key_id Key ID
      * @return true if keys were pushed successfully
      */
-    bool PushKeysToKernel(ClientSession *session,
+    bool PushKeysToKernel(Connection *session,
                           const std::vector<uint8_t> &key_material,
                           openvpn::CipherAlgorithm cipher_algo,
                           std::uint8_t key_id,
@@ -289,7 +289,7 @@ class DcoDataChannel
      * @param session Client session
      * @return true if swap succeeded
      */
-    bool SwapKeys(ClientSession *session);
+    bool SwapKeys(Connection *session);
 
     /**
      * @brief Configure kernel keepalive timers for a DCO peer
@@ -301,7 +301,7 @@ class DcoDataChannel
      * @param session Client session (peer must already exist)
      * @return true if the netlink command succeeded
      */
-    bool SetPeerKeepalive(ClientSession *session);
+    bool SetPeerKeepalive(Connection *session);
 
   public:
     /**
@@ -309,7 +309,7 @@ class DcoDataChannel
      * @param session Client session
      * @return Peer ID (derived from session ID)
      */
-    uint32_t GetPeerId(ClientSession *session) const;
+    uint32_t GetPeerId(Connection *session) const;
 
   private:
     asio::io_context &io_context_;

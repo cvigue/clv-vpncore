@@ -41,7 +41,7 @@
 
 namespace clv::vpn {
 
-class ClientSession;
+class Connection;
 
 /**
  * @brief Variant-dispatched data-path engine.
@@ -139,11 +139,11 @@ class DataPathEngine
     void StopTunReceiver();
 
     /** @brief Process incoming data packet from network */
-    asio::awaitable<void> ProcessIncomingDataPacket(ClientSession *session,
+    asio::awaitable<void> ProcessIncomingDataPacket(Connection *session,
                                                     const openvpn::OpenVpnPacket &packet);
 
     /** @brief Synchronous in-place decrypt + compress strip (no TUN write) */
-    std::span<std::uint8_t> DecryptAndStripInPlace(ClientSession *session,
+    std::span<std::uint8_t> DecryptAndStripInPlace(Connection *session,
                                                    std::span<std::uint8_t> datagram);
 
     /** @brief Set batch size at runtime (delegates to active strategy) */
@@ -162,7 +162,7 @@ class DataPathEngine
      * @param lame_duck_seconds Grace period for old keys (0 = no expiry)
      * @return true if keys were installed successfully
      */
-    bool InstallKeys(ClientSession *session,
+    bool InstallKeys(Connection *session,
                      const std::vector<uint8_t> &key_material,
                      openvpn::CipherAlgorithm cipher_algo,
                      openvpn::HmacAlgorithm hmac_algo,
@@ -170,7 +170,7 @@ class DataPathEngine
                      int lame_duck_seconds);
 
     /** @brief Send encrypted keepalive PING packet (polymorphic) */
-    asio::awaitable<void> SendKeepAlivePing(ClientSession *session);
+    asio::awaitable<void> SendKeepAlivePing(Connection *session);
 
     /** @brief Callback invoked when a peer is considered dead */
     using DeadPeerCallback = std::function<void(openvpn::SessionId)>;
@@ -218,7 +218,7 @@ inline void DataPathEngine::StopTunReceiver()
 }
 
 inline asio::awaitable<void> DataPathEngine::ProcessIncomingDataPacket(
-    ClientSession *session, const openvpn::OpenVpnPacket &packet)
+    Connection *session, const openvpn::OpenVpnPacket &packet)
 {
     return std::visit([session, &packet](auto &s)
     { return s.ProcessIncomingDataPacket(session, packet); },
@@ -226,7 +226,7 @@ inline asio::awaitable<void> DataPathEngine::ProcessIncomingDataPacket(
 }
 
 inline std::span<std::uint8_t> DataPathEngine::DecryptAndStripInPlace(
-    ClientSession *session, std::span<std::uint8_t> datagram)
+    Connection *session, std::span<std::uint8_t> datagram)
 {
     return std::visit([session, datagram](auto &s)
     { return s.DecryptAndStripInPlace(session, datagram); },
@@ -247,7 +247,7 @@ inline std::size_t DataPathEngine::GetBatchSize() const
                       impl_);
 }
 
-inline bool DataPathEngine::InstallKeys(ClientSession *session,
+inline bool DataPathEngine::InstallKeys(Connection *session,
                                         const std::vector<uint8_t> &key_material,
                                         openvpn::CipherAlgorithm cipher_algo,
                                         openvpn::HmacAlgorithm hmac_algo,
@@ -261,7 +261,7 @@ inline bool DataPathEngine::InstallKeys(ClientSession *session,
                       impl_);
 }
 
-inline asio::awaitable<void> DataPathEngine::SendKeepAlivePing(ClientSession *session)
+inline asio::awaitable<void> DataPathEngine::SendKeepAlivePing(Connection *session)
 {
     return std::visit([session](auto &s)
     { return s.SendKeepAlivePing(session); },

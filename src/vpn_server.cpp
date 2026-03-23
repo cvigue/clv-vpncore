@@ -12,7 +12,7 @@
 #include "transport/transport.h"
 #include <algorithm>
 #include <log_utils.h>
-#include "openvpn/client_session.h"
+#include "openvpn/connection.h"
 #include "openvpn/config_exchange.h"
 #include "openvpn/control_channel.h"
 #include "openvpn/control_plane_helpers.h"
@@ -471,7 +471,7 @@ asio::awaitable<void> VpnServer::UdpReceiveLoop()
 
 std::span<std::uint8_t> VpnServer::ProcessInboundDataSlot(transport::IncomingSlot &slot)
 {
-    ClientSession::Endpoint ep{
+    Connection::Endpoint ep{
         .addr = slot.sender.addr,
         .port = slot.sender.port};
     auto *session = session_manager_.FindSessionByEndpoint(ep);
@@ -596,7 +596,7 @@ asio::awaitable<void> VpnServer::TcpClientReceiveLoop(transport::TcpTransport tc
     }
 
     // Clean up session on disconnect
-    ClientSession::Endpoint ep{.addr = peer.addr, .port = peer.port};
+    Connection::Endpoint ep{.addr = peer.addr, .port = peer.port};
     auto *session = session_manager_.FindSessionByEndpoint(ep);
     if (session)
     {
@@ -799,10 +799,10 @@ asio::awaitable<void> VpnServer::KeepAliveLoop()
     co_await data_channel_strategy_.RunKeepaliveMonitor(on_dead_peer);
 }
 
-asio::awaitable<void> VpnServer::HandleControlPacket(ClientSession *session,
+asio::awaitable<void> VpnServer::HandleControlPacket(Connection *session,
                                                      const openvpn::OpenVpnPacket &packet,
                                                      const transport::PeerEndpoint &sender,
-                                                     const ClientSession::Endpoint &endpoint,
+                                                     const Connection::Endpoint &endpoint,
                                                      transport::TransportHandle transport)
 {
     logger_->debug("Received control packet (opcode {})", static_cast<int>(packet.opcode_));
@@ -850,9 +850,9 @@ asio::awaitable<void> VpnServer::HandleControlPacket(ClientSession *session,
     co_return;
 }
 
-asio::awaitable<ClientSession *> VpnServer::HandleHardReset(const openvpn::OpenVpnPacket &packet,
+asio::awaitable<Connection *> VpnServer::HandleHardReset(const openvpn::OpenVpnPacket &packet,
                                                             const transport::PeerEndpoint &sender,
-                                                            const ClientSession::Endpoint &endpoint,
+                                                            const Connection::Endpoint &endpoint,
                                                             transport::TransportHandle transport)
 {
     logger_->info("Client initiating handshake from {}:{}",
@@ -869,7 +869,7 @@ asio::awaitable<ClientSession *> VpnServer::HandleHardReset(const openvpn::OpenV
     openvpn::SessionId client_session_id{packet.session_id_.value()};
 
     // Check if we already have a session for this endpoint (retransmission handling)
-    ClientSession *session = session_manager_.FindSessionByEndpoint(endpoint);
+    Connection *session = session_manager_.FindSessionByEndpoint(endpoint);
     if (session)
     {
         // Check if this is the same client session ID
@@ -931,7 +931,7 @@ asio::awaitable<ClientSession *> VpnServer::HandleHardReset(const openvpn::OpenV
     co_return session;
 }
 
-asio::awaitable<void> VpnServer::HandleSoftReset(ClientSession *session,
+asio::awaitable<void> VpnServer::HandleSoftReset(Connection *session,
                                                  const openvpn::OpenVpnPacket &packet)
 {
     logger_->info("Received soft reset (key renegotiation) request");
@@ -967,7 +967,7 @@ asio::awaitable<void> VpnServer::HandleSoftReset(ClientSession *session,
     co_return;
 }
 
-asio::awaitable<void> VpnServer::ProcessPlaintext(ClientSession *session,
+asio::awaitable<void> VpnServer::ProcessPlaintext(Connection *session,
                                                   std::vector<std::uint8_t> plaintext)
 {
     logger_->debug("Received plaintext from client: {} bytes", plaintext.size());
@@ -1003,7 +1003,7 @@ asio::awaitable<void> VpnServer::ProcessPlaintext(ClientSession *session,
     co_return;
 }
 
-asio::awaitable<void> VpnServer::HandleKeyMethod2(ClientSession *session,
+asio::awaitable<void> VpnServer::HandleKeyMethod2(Connection *session,
                                                   const std::vector<uint8_t> &plaintext)
 {
     // Parse client's key-method 2 message
@@ -1094,7 +1094,7 @@ asio::awaitable<void> VpnServer::HandleKeyMethod2(ClientSession *session,
     co_return;
 }
 
-asio::awaitable<void> VpnServer::HandlePushRequest(ClientSession *session)
+asio::awaitable<void> VpnServer::HandlePushRequest(Connection *session)
 {
     logger_->info("Client sent PUSH_REQUEST, sending PUSH_REPLY");
 
@@ -1212,7 +1212,7 @@ asio::awaitable<void> VpnServer::HandlePushRequest(ClientSession *session)
     co_return;
 }
 
-asio::awaitable<void> VpnServer::HandleDataPacket(ClientSession *session,
+asio::awaitable<void> VpnServer::HandleDataPacket(Connection *session,
                                                   const openvpn::OpenVpnPacket &packet)
 {
     // Update session activity
@@ -1236,7 +1236,7 @@ asio::awaitable<void> VpnServer::HandleDataPacket(ClientSession *session,
     co_return;
 }
 
-void VpnServer::EnsureIpAllocated(ClientSession *session)
+void VpnServer::EnsureIpAllocated(Connection *session)
 {
     // Allocate IPv4 if not already assigned
     if (!session->GetAssignedIpv4())
@@ -1295,15 +1295,15 @@ asio::awaitable<void> VpnServer::ProcessNetworkPacket(std::vector<std::uint8_t> 
 
     auto &packet = *packet_opt;
 
-    // Convert PeerEndpoint to ClientSession::Endpoint
-    ClientSession::Endpoint endpoint{
+    // Convert PeerEndpoint to Connection::Endpoint
+    Connection::Endpoint endpoint{
         .addr = sender.addr,
         .port = sender.port};
 
     // Find or create session based on endpoint
     // Note: packet.session_id_ is the CLIENT's session ID, not ours
     // We store sessions by SERVER session ID, so look up by endpoint
-    ClientSession *session = session_manager_.FindSessionByEndpoint(endpoint);
+    Connection *session = session_manager_.FindSessionByEndpoint(endpoint);
 
     // Ensure session has a transport handle (may be missing if session was just
     // created without one, e.g., on reconnect edge cases)
@@ -1338,7 +1338,7 @@ asio::awaitable<void> VpnServer::ProcessNetworkPacket(std::vector<std::uint8_t> 
 }
 
 asio::awaitable<void> VpnServer::SendWrappedPacket(std::vector<std::uint8_t> data,
-                                                   ClientSession *session)
+                                                   Connection *session)
 {
     if (!session || !session->HasTransport())
     {
@@ -1351,7 +1351,7 @@ asio::awaitable<void> VpnServer::SendWrappedPacket(std::vector<std::uint8_t> dat
     session->UpdateLastOutbound();
 }
 
-asio::awaitable<bool> VpnServer::SendTlsControlData(ClientSession *session,
+asio::awaitable<bool> VpnServer::SendTlsControlData(Connection *session,
                                                     std::span<const std::uint8_t> data,
                                                     std::string_view description)
 {
@@ -1375,7 +1375,7 @@ asio::awaitable<bool> VpnServer::SendTlsControlData(ClientSession *session,
     co_return ok;
 }
 
-bool VpnServer::DeriveAndInstallKeys(ClientSession *session)
+bool VpnServer::DeriveAndInstallKeys(Connection *session)
 {
     const auto &client_random = session->GetClientRandom();
     const auto &server_random = session->GetServerRandom();

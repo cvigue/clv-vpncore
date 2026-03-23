@@ -73,7 +73,7 @@ UserspaceDataChannel::UserspaceDataChannel(asio::io_context &io_context,
 }
 
 asio::awaitable<void>
-UserspaceDataChannel::ProcessIncomingDataPacket(ClientSession *session,
+UserspaceDataChannel::ProcessIncomingDataPacket(Connection *session,
                                                 const openvpn::OpenVpnPacket &packet)
 {
     // Decrypt data packet
@@ -148,7 +148,7 @@ UserspaceDataChannel::ProcessIncomingDataPacket(ClientSession *session,
 // ---------------------------------------------------------------------------
 
 std::span<std::uint8_t>
-UserspaceDataChannel::DecryptAndStripInPlace(ClientSession *session,
+UserspaceDataChannel::DecryptAndStripInPlace(Connection *session,
                                              std::span<std::uint8_t> datagram)
 {
     auto plaintext = session->GetDataChannel().DecryptPacketInPlace(datagram);
@@ -583,7 +583,7 @@ asio::awaitable<void> UserspaceDataChannel::StartTunReceiver()
     co_return;
 }
 
-bool UserspaceDataChannel::InstallKeys(ClientSession *session,
+bool UserspaceDataChannel::InstallKeys(Connection *session,
                                        const std::vector<uint8_t> &key_material,
                                        openvpn::CipherAlgorithm cipher_algo,
                                        openvpn::HmacAlgorithm hmac_algo,
@@ -612,7 +612,7 @@ bool UserspaceDataChannel::InstallKeys(ClientSession *session,
     return keys_installed;
 }
 
-asio::awaitable<void> UserspaceDataChannel::SendKeepAlivePing(ClientSession *session)
+asio::awaitable<void> UserspaceDataChannel::SendKeepAlivePing(Connection *session)
 {
     if (!session || !session->HasTransport())
     {

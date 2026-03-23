@@ -78,7 +78,7 @@ DcoDataChannel::~DcoDataChannel()
 }
 
 asio::awaitable<void> DcoDataChannel::ProcessIncomingDataPacket(
-    [[maybe_unused]] ClientSession *session,
+    [[maybe_unused]] Connection *session,
     [[maybe_unused]] const openvpn::OpenVpnPacket &packet)
 {
     // In DCO mode, kernel handles decryption - userspace should not see data packets
@@ -101,7 +101,7 @@ asio::awaitable<void> DcoDataChannel::StartTunReceiver()
     co_return;
 }
 
-bool DcoDataChannel::InstallKeys(ClientSession *session,
+bool DcoDataChannel::InstallKeys(Connection *session,
                                  const std::vector<uint8_t> &key_material,
                                  openvpn::CipherAlgorithm cipher_algo,
                                  [[maybe_unused]] openvpn::HmacAlgorithm hmac_algo,
@@ -300,13 +300,13 @@ void DcoDataChannel::ConfigureDcoInterface()
     }
 }
 
-uint32_t DcoDataChannel::GetPeerId(ClientSession *session) const
+uint32_t DcoDataChannel::GetPeerId(Connection *session) const
 {
     // Use lower 24 bits of session ID as peer ID (matches OpenVPN peer-id format)
     return static_cast<uint32_t>(session->GetSessionId().value & openvpn::PEER_ID_MASK);
 }
 
-bool DcoDataChannel::CreateDcoPeer(ClientSession *session)
+bool DcoDataChannel::CreateDcoPeer(Connection *session)
 {
     if (!dco_initialized_ || !netlink_helper_.IsOpen())
     {
@@ -446,7 +446,7 @@ bool DcoDataChannel::CreateDcoPeer(ClientSession *session)
     return true;
 }
 
-void DcoDataChannel::RemoveDcoPeer(ClientSession *session)
+void DcoDataChannel::RemoveDcoPeer(Connection *session)
 {
     if (!dco_initialized_ || !netlink_helper_.IsOpen())
     {
@@ -504,7 +504,7 @@ void DcoDataChannel::RemoveDcoPeer(ClientSession *session)
     logger_->debug("DCO: Peer {} removal requested", peer_id);
 }
 
-bool DcoDataChannel::SwapKeys(ClientSession *session)
+bool DcoDataChannel::SwapKeys(Connection *session)
 {
     if (!dco_initialized_ || !netlink_helper_.IsOpen())
     {
@@ -515,7 +515,7 @@ bool DcoDataChannel::SwapKeys(ClientSession *session)
     return dco::SwapDcoKeys(dco_ifindex_, genl_family_id_, GetPeerId(session), netlink_helper_, *logger_);
 }
 
-bool DcoDataChannel::PushKeysToKernel(ClientSession *session,
+bool DcoDataChannel::PushKeysToKernel(Connection *session,
                                       const std::vector<uint8_t> &key_material,
                                       openvpn::CipherAlgorithm cipher_algo,
                                       std::uint8_t key_id,
@@ -530,7 +530,7 @@ bool DcoDataChannel::PushKeysToKernel(ClientSession *session,
     return dco::PushKeysToKernel(dco_ifindex_, genl_family_id_, GetPeerId(session), key_material, cipher_algo, key_id, key_slot, openvpn::PeerRole::Server, netlink_helper_, *logger_);
 }
 
-bool DcoDataChannel::SetPeerKeepalive(ClientSession *session)
+bool DcoDataChannel::SetPeerKeepalive(Connection *session)
 {
     if (!dco_initialized_ || !netlink_helper_.IsOpen())
     {
@@ -547,7 +547,7 @@ bool DcoDataChannel::SetPeerKeepalive(ClientSession *session)
     return dco::SetDcoPeerKeepalive(dco_ifindex_, genl_family_id_, GetPeerId(session), network_config_.keepalive_interval, network_config_.keepalive_timeout, netlink_helper_, *logger_);
 }
 
-asio::awaitable<void> DcoDataChannel::SendKeepAlivePing(ClientSession *session)
+asio::awaitable<void> DcoDataChannel::SendKeepAlivePing(Connection *session)
 {
     // In DCO mode the kernel sends PINGs autonomously via the timers
     // configured by SetPeerKeepalive() during key installation.

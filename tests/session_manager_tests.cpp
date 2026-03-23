@@ -1,6 +1,6 @@
 // Copyright (c) 2025- Charlie Vigue. All rights reserved.
 
-#include "openvpn/client_session.h"
+#include "openvpn/connection.h"
 #include "openvpn/packet.h"
 #include "openvpn/session_manager.h"
 
@@ -17,7 +17,7 @@
 
 using namespace clv::vpn;
 
-class ClientSessionTest : public ::testing::Test
+class ConnectionTest : public ::testing::Test
 {
   protected:
     void SetUp() override
@@ -26,7 +26,7 @@ class ClientSessionTest : public ::testing::Test
         logger_ = std::make_unique<spdlog::logger>("test_session", null_sink);
     }
 
-    ClientSession::Endpoint CreateEndpoint(uint32_t ip = 0xC0A80001, uint16_t port = 1194)
+    Connection::Endpoint CreateEndpoint(uint32_t ip = 0xC0A80001, uint16_t port = 1194)
     {
         return {asio::ip::address_v4(ip), port};
     }
@@ -34,32 +34,32 @@ class ClientSessionTest : public ::testing::Test
     std::unique_ptr<spdlog::logger> logger_;
 };
 
-TEST_F(ClientSessionTest, ConstructionServerMode)
+TEST_F(ConnectionTest, ConstructionServerMode)
 {
     auto session_id = openvpn::SessionId::Generate();
     auto endpoint = CreateEndpoint();
-    ClientSession session(session_id, endpoint, true, std::nullopt, *logger_); // true = server mode
+    Connection session(session_id, endpoint, true, std::nullopt, *logger_); // true = server mode
 
     EXPECT_EQ(session.GetSessionId().value, session_id.value);
     EXPECT_EQ(session.GetEndpoint().addr, endpoint.addr);
     EXPECT_EQ(session.GetEndpoint().port, endpoint.port);
 }
 
-TEST_F(ClientSessionTest, ConstructionClientMode)
+TEST_F(ConnectionTest, ConstructionClientMode)
 {
     auto session_id = openvpn::SessionId::Generate();
     auto endpoint = CreateEndpoint();
-    ClientSession session(session_id, endpoint, false, std::nullopt, *logger_); // false = client mode
+    Connection session(session_id, endpoint, false, std::nullopt, *logger_); // false = client mode
 
     EXPECT_EQ(session.GetSessionId().value, session_id.value);
     EXPECT_FALSE(session.IsEstablished());
 }
 
-TEST_F(ClientSessionTest, LastActivityUpdates)
+TEST_F(ConnectionTest, LastActivityUpdates)
 {
     auto session_id = openvpn::SessionId::Generate();
     auto endpoint = CreateEndpoint();
-    ClientSession session(session_id, endpoint, true, std::nullopt, *logger_);
+    Connection session(session_id, endpoint, true, std::nullopt, *logger_);
 
     auto time1 = session.GetLastActivity();
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -69,21 +69,21 @@ TEST_F(ClientSessionTest, LastActivityUpdates)
     EXPECT_LT(time1, time2);
 }
 
-TEST_F(ClientSessionTest, ControlChannelAccess)
+TEST_F(ConnectionTest, ControlChannelAccess)
 {
     auto session_id = openvpn::SessionId::Generate();
     auto endpoint = CreateEndpoint();
-    ClientSession session(session_id, endpoint, true, std::nullopt, *logger_);
+    Connection session(session_id, endpoint, true, std::nullopt, *logger_);
 
     auto &control = session.GetControlChannel();
     EXPECT_EQ(control.GetSessionId().value, session_id.value);
 }
 
-TEST_F(ClientSessionTest, DataChannelAccess)
+TEST_F(ConnectionTest, DataChannelAccess)
 {
     auto session_id = openvpn::SessionId::Generate();
     auto endpoint = CreateEndpoint();
-    ClientSession session(session_id, endpoint, true, std::nullopt, *logger_);
+    Connection session(session_id, endpoint, true, std::nullopt, *logger_);
 
     auto &data = session.GetDataChannel();
     (void)data; // Use variable to suppress warning
@@ -91,11 +91,11 @@ TEST_F(ClientSessionTest, DataChannelAccess)
     EXPECT_TRUE(true);
 }
 
-TEST_F(ClientSessionTest, GetCipherSuite)
+TEST_F(ConnectionTest, GetCipherSuite)
 {
     auto session_id = openvpn::SessionId::Generate();
     auto endpoint = CreateEndpoint();
-    ClientSession session(session_id, endpoint, true, std::nullopt, *logger_);
+    Connection session(session_id, endpoint, true, std::nullopt, *logger_);
 
     // Cipher suite should be empty until negotiated
     auto cipher = session.GetCipherSuite();
@@ -114,7 +114,7 @@ class SessionManagerTest : public ::testing::Test
     SessionManager manager;
     std::unique_ptr<spdlog::logger> logger_;
 
-    ClientSession::Endpoint CreateEndpoint(uint32_t ip = 0xC0A80001, uint16_t port = 1194)
+    Connection::Endpoint CreateEndpoint(uint32_t ip = 0xC0A80001, uint16_t port = 1194)
     {
         return {asio::ip::address_v4(ip), port};
     }
