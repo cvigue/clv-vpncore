@@ -332,3 +332,202 @@ TEST_F(IpPoolManagerTest, MaxClientsIpv6CapsPool)
     EXPECT_EQ(pool.TotalCount(), 10);
     EXPECT_EQ(pool.Ipv6AvailableCount(), 10);
 }
+
+// ===========================================================================
+// IPv6 IP pool tests
+// ===========================================================================
+
+using Ipv6Address = ipv6::Ipv6Address;
+
+// Helper to build an expected IPv6 address from fd00:: prefix with a host byte
+static Ipv6Address MakeIpv6(std::uint8_t host_hi, std::uint8_t host_lo)
+{
+    Ipv6Address addr{};
+    addr[0] = 0xfd; // fd00::
+    addr[14] = host_hi;
+    addr[15] = host_lo;
+    return addr;
+}
+
+TEST_F(IpPoolManagerTest, Ipv6EnablePoolValid)
+{
+    IpPoolManager pool("10.8.0.0/24");
+    EXPECT_FALSE(pool.HasIpv6Pool());
+
+    EXPECT_NO_THROW(pool.EnableIpv6Pool("fd00::/112", true));
+    EXPECT_TRUE(pool.HasIpv6Pool());
+}
+
+TEST_F(IpPoolManagerTest, Ipv6EnablePoolInvalidCidr)
+{
+    IpPoolManager pool("10.8.0.0/24");
+
+    EXPECT_THROW(pool.EnableIpv6Pool("invalid"), std::invalid_argument);
+    EXPECT_THROW(pool.EnableIpv6Pool("fd00::/128"), std::invalid_argument); // no host bits
+    EXPECT_THROW(pool.EnableIpv6Pool("fd00::/64"), std::invalid_argument);  // too wide (< /112)
+}
+
+TEST_F(IpPoolManagerTest, Ipv6PoolSize112Network)
+{
+    IpPoolManager pool("10.8.0.0/24");
+    pool.EnableIpv6Pool("fd00::/112", true);
+
+    // /112: 65536 addrs - network - all-ones - gateway = 65533
+    EXPECT_EQ(pool.Ipv6AvailableCount(), 65533);
+}
+
+TEST_F(IpPoolManagerTest, Ipv6PoolSize112NoGateway)
+{
+    IpPoolManager pool("10.8.0.0/24");
+    pool.EnableIpv6Pool("fd00::/112", false);
+
+    // /112: 65536 addrs - network - all-ones = 65534, start from ::1
+    EXPECT_EQ(pool.Ipv6AvailableCount(), 65534);
+}
+
+TEST_F(IpPoolManagerTest, Ipv6AllocateBasic)
+{
+    IpPoolManager pool("10.8.0.0/24");
+    pool.EnableIpv6Pool("fd00::/120", true, 50);
+
+    auto ip = pool.AllocateIpv6(1001);
+    ASSERT_TRUE(ip.has_value());
+
+    // Should be fd00::2 .. fd00::fe (skip ::0, ::1 gateway, ::ff broadcast)
+    EXPECT_EQ((*ip)[0], 0xfd);
+    EXPECT_GT((*ip)[15], 1);   // past gateway
+    EXPECT_LT((*ip)[15], 255); // before broadcast
+}
+
+TEST_F(IpPoolManagerTest, Ipv6AllocateMultiple)
+{
+    IpPoolManager pool("10.8.0.0/24");
+    pool.EnableIpv6Pool("fd00::/120", true, 50);
+
+    auto ip1 = pool.AllocateIpv6(1001);
+    auto ip2 = pool.AllocateIpv6(1002);
+
+    ASSERT_TRUE(ip1.has_value());
+    ASSERT_TRUE(ip2.has_value());
+    EXPECT_NE(*ip1, *ip2);
+}
+
+TEST_F(IpPoolManagerTest, Ipv6AllocateIdempotent)
+{
+    IpPoolManager pool("10.8.0.0/24");
+    pool.EnableIpv6Pool("fd00::/120", true);
+
+    auto ip1 = pool.AllocateIpv6(1001);
+    auto ip2 = pool.AllocateIpv6(1001); // Same session
+
+    ASSERT_TRUE(ip1.has_value());
+    ASSERT_TRUE(ip2.has_value());
+    EXPECT_EQ(*ip1, *ip2);
+}
+
+TEST_F(IpPoolManagerTest, Ipv6AllocateExhaustion)
+{
+    IpPoolManager pool("10.8.0.0/24");
+    pool.EnableIpv6Pool("fd00::/120", true, 2); // cap to 2
+
+    auto ip1 = pool.AllocateIpv6(1);
+    auto ip2 = pool.AllocateIpv6(2);
+    auto ip3 = pool.AllocateIpv6(3);
+
+    EXPECT_TRUE(ip1.has_value());
+    EXPECT_TRUE(ip2.has_value());
+    EXPECT_FALSE(ip3.has_value());
+}
+
+TEST_F(IpPoolManagerTest, Ipv6AllocateWithoutPool)
+{
+    IpPoolManager pool("10.8.0.0/24");
+    // IPv6 pool not enabled
+    auto ip = pool.AllocateIpv6(1001);
+    EXPECT_FALSE(ip.has_value());
+}
+
+TEST_F(IpPoolManagerTest, Ipv6ReleaseBasic)
+{
+    IpPoolManager pool("10.8.0.0/24");
+    pool.EnableIpv6Pool("fd00::/120", true);
+
+    auto ip = pool.AllocateIpv6(1001);
+    ASSERT_TRUE(ip.has_value());
+
+    EXPECT_TRUE(pool.ReleaseIpv6(1001));
+    EXPECT_FALSE(pool.GetAssignedIpv6(1001).has_value());
+}
+
+TEST_F(IpPoolManagerTest, Ipv6ReleaseNotAllocated)
+{
+    IpPoolManager pool("10.8.0.0/24");
+    pool.EnableIpv6Pool("fd00::/120", true);
+
+    EXPECT_FALSE(pool.ReleaseIpv6(9999));
+}
+
+TEST_F(IpPoolManagerTest, Ipv6ReleaseAndReallocate)
+{
+    IpPoolManager pool("10.8.0.0/24");
+    pool.EnableIpv6Pool("fd00::/120", true, 2);
+
+    auto ip1 = pool.AllocateIpv6(1);
+    auto ip2 = pool.AllocateIpv6(2);
+    EXPECT_FALSE(pool.AllocateIpv6(3).has_value()); // exhausted
+
+    pool.ReleaseIpv6(1);
+    auto ip3 = pool.AllocateIpv6(3);
+    EXPECT_TRUE(ip3.has_value());
+}
+
+TEST_F(IpPoolManagerTest, Ipv6GetAssigned)
+{
+    IpPoolManager pool("10.8.0.0/24");
+    pool.EnableIpv6Pool("fd00::/120", true);
+
+    EXPECT_FALSE(pool.GetAssignedIpv6(1001).has_value());
+
+    auto ip = pool.AllocateIpv6(1001);
+    ASSERT_TRUE(ip.has_value());
+
+    auto assigned = pool.GetAssignedIpv6(1001);
+    ASSERT_TRUE(assigned.has_value());
+    EXPECT_EQ(*assigned, *ip);
+}
+
+TEST_F(IpPoolManagerTest, Ipv6IsAllocated)
+{
+    IpPoolManager pool("10.8.0.0/24");
+    pool.EnableIpv6Pool("fd00::/120", true);
+
+    auto ip = pool.AllocateIpv6(1001);
+    ASSERT_TRUE(ip.has_value());
+
+    EXPECT_TRUE(pool.IsIpv6Allocated(*ip));
+    EXPECT_FALSE(pool.IsIpv6Allocated(MakeIpv6(0, 0x99))); // unallocated
+}
+
+TEST_F(IpPoolManagerTest, Ipv6DualStackRoundTrip)
+{
+    IpPoolManager pool("10.8.0.0/24");
+    pool.EnableIpv6Pool("fd00::/120", true);
+
+    // Allocate both v4 and v6 for same session
+    auto v4 = pool.AllocateIpv4(1001);
+    auto v6 = pool.AllocateIpv6(1001);
+
+    ASSERT_TRUE(v4.has_value());
+    ASSERT_TRUE(v6.has_value());
+
+    // Both assigned
+    EXPECT_TRUE(pool.GetAssignedIpv4(1001).has_value());
+    EXPECT_TRUE(pool.GetAssignedIpv6(1001).has_value());
+
+    // Release both
+    EXPECT_TRUE(pool.ReleaseIpv4(1001));
+    EXPECT_TRUE(pool.ReleaseIpv6(1001));
+
+    EXPECT_FALSE(pool.GetAssignedIpv4(1001).has_value());
+    EXPECT_FALSE(pool.GetAssignedIpv6(1001).has_value());
+}

@@ -850,11 +850,13 @@ asio::awaitable<void> VpnClient::ProcessTlsHandshake()
             throw std::runtime_error("RAND_bytes failed generating client random");
 
         // Map transport protocol to OpenVPN wire-format proto string.
-        std::string proto_str = "UDPv4";
+        std::string proto_str;
         if (config_.client->protocol == "tcp")
             proto_str = "TCPv4_CLIENT";
         else if (config_.client->protocol == "udp6")
             proto_str = "UDPv6";
+        else
+            proto_str = "UDPv4"; // "udp" and any future default
 
         std::string options = "V4,dev-type tun,link-mtu 1549,tun-mtu 1500,proto " + proto_str;
         if (!config_.client->cipher.empty())
