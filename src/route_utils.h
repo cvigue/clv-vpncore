@@ -23,6 +23,7 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <vector>
 
 #include <util/netlink_helper.h>
 
@@ -220,6 +221,131 @@ inline void ReplaceRoute6(const std::string &ifname,
     auto sock = NetlinkHelper::CreateRtnetlinkSocket();
     NetlinkHelper::SendNetlinkMessage(sock.get(), &req, req.nlh.nlmsg_len, "RTM_NEWROUTE (IPv6)");
     NetlinkHelper::ReceiveNetlinkAck(sock.get(), "RTM_NEWROUTE (IPv6)");
+}
+
+/**
+ * @brief Query the main routing table via RTM_GETROUTE dump.
+ *
+ * @details Sends a netlink dump request for the specified address family and
+ * formats each route as a human-readable string, suitable for diagnostic
+ * logging.
+ *
+ * @param family AF_INET for IPv4 routes, AF_INET6 for IPv6 routes
+ * @return Vector of formatted route strings (e.g. "10.8.0.0/24 dev tun0",
+ *         "default dev eth0 via 10.0.0.1").  Empty on failure.
+ */
+inline std::vector<std::string> QueryRoutes(int family)
+{
+    struct
+    {
+        struct nlmsghdr nlh;
+        struct rtmsg rtm;
+    } req{};
+
+    req.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(struct rtmsg));
+    req.nlh.nlmsg_type = RTM_GETROUTE;
+    req.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+    req.nlh.nlmsg_seq = 1;
+    req.rtm.rtm_family = static_cast<unsigned char>(family);
+
+    auto sock = NetlinkHelper::CreateRtnetlinkSocket();
+    NetlinkHelper::SendNetlinkMessage(sock.get(), &req, req.nlh.nlmsg_len, family == AF_INET ? "RTM_GETROUTE (IPv4 dump)" : "RTM_GETROUTE (IPv6 dump)");
+
+    std::vector<std::string> results;
+    char buf[16384];
+
+    for (;;)
+    {
+        ssize_t nbytes = ::recv(sock.get(), buf, sizeof(buf), 0);
+        if (nbytes <= 0)
+            break;
+
+        int remaining = static_cast<int>(nbytes);
+        bool done = false;
+
+        for (auto *nlh = reinterpret_cast<struct nlmsghdr *>(buf);
+             NLMSG_OK(nlh, remaining);
+             nlh = NLMSG_NEXT(nlh, remaining))
+        {
+            if (nlh->nlmsg_type == NLMSG_DONE || nlh->nlmsg_type == NLMSG_ERROR)
+            {
+                done = true;
+                break;
+            }
+            if (nlh->nlmsg_type != RTM_NEWROUTE)
+                continue;
+
+            auto *rtm = reinterpret_cast<struct rtmsg *>(NLMSG_DATA(nlh));
+            if (rtm->rtm_table != RT_TABLE_MAIN)
+                continue;
+
+            // Parse route attributes
+            char dst_buf[sizeof(struct in6_addr)]{};
+            char gw_buf[sizeof(struct in6_addr)]{};
+            bool has_dst = false;
+            bool has_gw = false;
+            unsigned int oif = 0;
+
+            auto *rta = reinterpret_cast<struct rtattr *>(RTM_RTA(rtm));
+            int rta_len = static_cast<int>(RTM_PAYLOAD(nlh));
+
+            for (; RTA_OK(rta, rta_len); rta = RTA_NEXT(rta, rta_len))
+            {
+                auto plen = RTA_PAYLOAD(rta);
+                switch (rta->rta_type)
+                {
+                case RTA_DST:
+                    if (plen > 0 && static_cast<std::size_t>(plen) <= sizeof(dst_buf))
+                        std::memcpy(dst_buf, RTA_DATA(rta), static_cast<std::size_t>(plen));
+                    has_dst = true;
+                    break;
+                case RTA_GATEWAY:
+                    if (plen > 0 && static_cast<std::size_t>(plen) <= sizeof(gw_buf))
+                        std::memcpy(gw_buf, RTA_DATA(rta), static_cast<std::size_t>(plen));
+                    has_gw = true;
+                    break;
+                case RTA_OIF:
+                    if (plen == sizeof(oif))
+                        std::memcpy(&oif, RTA_DATA(rta), sizeof(oif));
+                    break;
+                }
+            }
+
+            // Format: "<dst>/<prefix> dev <ifname> [via <gw>]"
+            char addr_str[INET6_ADDRSTRLEN];
+            std::string line;
+
+            if (has_dst && rtm->rtm_dst_len > 0)
+            {
+                inet_ntop(family, dst_buf, addr_str, sizeof(addr_str));
+                line = std::string(addr_str) + "/" + std::to_string(rtm->rtm_dst_len);
+            }
+            else
+            {
+                line = "default";
+            }
+
+            if (oif != 0)
+            {
+                char ifname[IF_NAMESIZE];
+                if (if_indextoname(oif, ifname))
+                    line += " dev " + std::string(ifname);
+            }
+
+            if (has_gw)
+            {
+                inet_ntop(family, gw_buf, addr_str, sizeof(addr_str));
+                line += " via " + std::string(addr_str);
+            }
+
+            results.push_back(std::move(line));
+        }
+
+        if (done)
+            break;
+    }
+
+    return results;
 }
 
 } // namespace clv::vpn::route

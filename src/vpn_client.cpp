@@ -31,7 +31,6 @@
 #include <array>
 #include <cctype>
 #include <cerrno>
-#include <initializer_list>
 #include <memory>
 #include <span>
 #include <stdio.h>
@@ -1204,62 +1203,21 @@ void VpnClient::ConfigureTunDevice()
         // Install pushed routes
         InstallRoutes();
 
-        // Dump TUN interface and routing state for diagnostics.
-        // Uses fork/execvp (no shell) to avoid command-injection risk from popen().
-        auto exec_and_log = [&](const std::string &label,
-                                std::initializer_list<const char *>
-                                    argv_init)
+        // Log TUN interface addresses and routing state for diagnostics (via netlink).
+        try
         {
-            int pipe_fd[2];
-            if (::pipe(pipe_fd) != 0)
-                return;
-
-            pid_t pid = ::fork();
-            if (pid < 0)
-            {
-                ::close(pipe_fd[0]);
-                ::close(pipe_fd[1]);
-                return;
-            }
-            if (pid == 0)
-            {
-                // Child: redirect stdout+stderr into the pipe, exec.
-                ::close(pipe_fd[0]);
-                ::dup2(pipe_fd[1], STDOUT_FILENO);
-                ::dup2(pipe_fd[1], STDERR_FILENO);
-                ::close(pipe_fd[1]);
-                std::vector<const char *> argv(argv_init);
-                argv.push_back(nullptr);
-                ::execvp(argv[0], const_cast<char *const *>(argv.data()));
-                ::_exit(127);
-            }
-            // Parent: read child output, then reap.
-            ::close(pipe_fd[1]);
-            FILE *fp = ::fdopen(pipe_fd[0], "r");
-            if (fp)
-            {
-                char line[256];
-                while (::fgets(line, sizeof(line), fp))
-                {
-                    auto len = std::strlen(line);
-                    if (len > 0 && line[len - 1] == '\n')
-                        line[len - 1] = '\0';
-                    logger_->debug("[{}] {}", label, line);
-                }
-                ::fclose(fp); // also closes pipe_fd[0]
-            }
-            else
-            {
-                ::close(pipe_fd[0]);
-            }
-            int status;
-            ::waitpid(pid, &status, 0);
-        };
-
-        std::string dev_name = tun_device_->GetName();
-        exec_and_log("iface", {"ip", "addr", "show", "dev", dev_name.c_str()});
-        exec_and_log("route4", {"ip", "route", "show", "table", "main"});
-        exec_and_log("route6", {"ip", "-6", "route", "show", "table", "main"});
+            std::string dev_name = tun_device_->GetName();
+            for (const auto &addr : iface::QueryInterfaceAddresses(dev_name))
+                logger_->debug("[iface] {} {}", dev_name, addr);
+            for (const auto &rt : route::QueryRoutes(AF_INET))
+                logger_->debug("[route4] {}", rt);
+            for (const auto &rt : route::QueryRoutes(AF_INET6))
+                logger_->debug("[route6] {}", rt);
+        }
+        catch (const std::exception &e)
+        {
+            logger_->debug("Could not query interface diagnostics: {}", e.what());
+        }
     }
     catch (const std::exception &e)
     {

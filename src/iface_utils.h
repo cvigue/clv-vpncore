@@ -16,21 +16,28 @@
  */
 
 #include "unique_fd.h"
+
 #include <arpa/inet.h>
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
-#include <linux/if.h>
-#include <linux/ipv6.h>
-#include <net/if.h>
-#include <netinet/in.h>
 #include <stdexcept>
 #include <string>
+#include <vector>
+
+#include <linux/if.h>
+#include <linux/if_addr.h>
+#include <linux/ipv6.h>
+#include <linux/netlink.h>
+#include <linux/rtnetlink.h>
+#include <net/if.h>
+#include <netinet/in.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <system_error>
 
 #include <scope_guard.h>
+#include <util/netlink_helper.h>
 
 namespace clv::vpn::iface {
 
@@ -179,6 +186,95 @@ inline void AddIpv6Address(const char *ifname,
     clv::UniqueFd sock6(::socket(AF_INET6, SOCK_DGRAM, 0));
     if (ioctl(sock6.get(), SIOCSIFADDR, &ifr6) < 0)
         throw std::system_error(errno, std::system_category(), "Failed to set IPv6 address " + addr_str);
+}
+
+/**
+ * @brief Query addresses assigned to an interface via RTM_GETADDR.
+ *
+ * @details Sends a netlink dump request and filters responses by the given
+ * interface name.  Returns both IPv4 and IPv6 addresses as formatted strings,
+ * suitable for diagnostic logging.
+ *
+ * @param ifname Interface name (e.g. "tun0")
+ * @return Vector of formatted address strings (e.g. "10.8.0.2/24", "fd00::2/64").
+ *         Empty if the interface doesn't exist or has no addresses.
+ */
+inline std::vector<std::string> QueryInterfaceAddresses(const std::string &ifname)
+{
+    unsigned int target_ifindex = if_nametoindex(ifname.c_str());
+    if (target_ifindex == 0)
+        return {};
+
+    struct
+    {
+        struct nlmsghdr nlh;
+        struct ifaddrmsg ifa;
+    } req{};
+
+    req.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(struct ifaddrmsg));
+    req.nlh.nlmsg_type = RTM_GETADDR;
+    req.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+    req.nlh.nlmsg_seq = 1;
+    req.ifa.ifa_family = AF_UNSPEC;
+
+    auto sock = NetlinkHelper::CreateRtnetlinkSocket();
+    NetlinkHelper::SendNetlinkMessage(sock.get(), &req, req.nlh.nlmsg_len, "RTM_GETADDR");
+
+    std::vector<std::string> results;
+    char buf[16384];
+
+    for (;;)
+    {
+        ssize_t nbytes = ::recv(sock.get(), buf, sizeof(buf), 0);
+        if (nbytes <= 0)
+            break;
+
+        int remaining = static_cast<int>(nbytes);
+        bool done = false;
+
+        for (auto *nlh = reinterpret_cast<struct nlmsghdr *>(buf);
+             NLMSG_OK(nlh, remaining);
+             nlh = NLMSG_NEXT(nlh, remaining))
+        {
+            if (nlh->nlmsg_type == NLMSG_DONE || nlh->nlmsg_type == NLMSG_ERROR)
+            {
+                done = true;
+                break;
+            }
+            if (nlh->nlmsg_type != RTM_NEWADDR)
+                continue;
+
+            auto *ifa = reinterpret_cast<struct ifaddrmsg *>(NLMSG_DATA(nlh));
+            if (ifa->ifa_index != target_ifindex)
+                continue;
+
+            // For IPv4 point-to-point links, IFA_LOCAL is the configured address
+            // while IFA_ADDRESS may be the peer address.  Prefer IFA_LOCAL.
+            const void *addr_data = nullptr;
+            auto *rta = reinterpret_cast<struct rtattr *>(IFA_RTA(ifa));
+            int rta_len = static_cast<int>(IFA_PAYLOAD(nlh));
+
+            for (; RTA_OK(rta, rta_len); rta = RTA_NEXT(rta, rta_len))
+            {
+                if (rta->rta_type == IFA_LOCAL && ifa->ifa_family == AF_INET)
+                    addr_data = RTA_DATA(rta);
+                else if (rta->rta_type == IFA_ADDRESS && addr_data == nullptr)
+                    addr_data = RTA_DATA(rta);
+            }
+
+            if (addr_data)
+            {
+                char addr_str[INET6_ADDRSTRLEN];
+                if (inet_ntop(ifa->ifa_family, addr_data, addr_str, sizeof(addr_str)))
+                    results.emplace_back(std::string(addr_str) + "/" + std::to_string(ifa->ifa_prefixlen));
+            }
+        }
+
+        if (done)
+            break;
+    }
+
+    return results;
 }
 
 } // namespace clv::vpn::iface
