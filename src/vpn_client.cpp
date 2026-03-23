@@ -7,6 +7,7 @@
 #include "dco_netlink_ops.h"
 #include "dco_utils.h"
 #include "iface_utils.h"
+#include "nlohmann/json_fwd.hpp"
 #include "openvpn/vpn_config.h"
 #include "route_utils.h"
 #include "udp_receive_loop.h"

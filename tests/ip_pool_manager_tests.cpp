@@ -1,6 +1,7 @@
 // Copyright (c) 2026- Charlie Vigue. All rights reserved.
 
 #include "ip_pool_manager.h"
+#include "util/ipv6_utils.h"
 #include <cstdint>
 #include <gtest/gtest.h>
 #include <arpa/inet.h>

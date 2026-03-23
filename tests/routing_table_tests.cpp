@@ -1,6 +1,7 @@
 // Copyright (c) 2025- Charlie Vigue. All rights reserved.
 
 #include "routing_table.h"
+#include "util/ipv6_utils.h"
 #include <cstddef>
 #include <cstdint>
 #include <gtest/gtest.h>

@@ -3,6 +3,7 @@
 #ifndef CLV_VPN_VPN_CLIENT_H
 #define CLV_VPN_VPN_CLIENT_H
 
+#include "nlohmann/json_fwd.hpp"
 #include "openvpn/crypto_algorithms.h"
 #include "openvpn/vpn_config.h"
 #include "openvpn/control_channel.h"

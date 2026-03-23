@@ -224,7 +224,7 @@ inline std::vector<std::string> QueryInterfaceAddresses(const std::string &ifnam
 
     for (;;)
     {
-        ssize_t nbytes = ::recv(sock.get(), buf, sizeof(buf), 0);
+        auto nbytes = ::recv(sock.get(), buf, sizeof(buf), 0);
         if (nbytes <= 0)
             break;
 
