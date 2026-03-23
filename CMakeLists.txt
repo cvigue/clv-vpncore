@@ -54,7 +54,6 @@ add_library(clv_vpncore STATIC
     src/log_subsystems.cpp
     src/ip_pool_manager.cpp
     src/routing_table.cpp
-    src/scoped_ipv6_masquerade.cpp
     src/scoped_masquerade.cpp
 )
 

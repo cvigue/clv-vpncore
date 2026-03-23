@@ -12,6 +12,7 @@ add_executable(test_vpncore
     openvpn_packet_tests.cpp
     ovpn_config_parser_tests.cpp
     routing_table_tests.cpp
+    scoped_masquerade_tests.cpp
     session_manager_tests.cpp
     tls_context_tests.cpp
     tun_device_tests.cpp
