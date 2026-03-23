@@ -67,9 +67,16 @@ std::pair<int, int> UdpListener::GetSocketBufferSizes() const
 // ---------------------------------------------------------------------------
 
 TcpListener::TcpListener(asio::io_context &ctx, std::uint16_t port)
-    : acceptor_(ctx, asio::ip::tcp::endpoint(asio::ip::tcp::v4(), port))
+    : acceptor_(ctx)
 {
+    // Dual-stack: bind an IPv6 socket that also accepts IPv4 clients,
+    // mirroring the UdpListener pattern.  IPv4 peers appear as
+    // v4-mapped addresses (::ffff:x.x.x.x).
+    acceptor_.open(asio::ip::tcp::v6());
+    acceptor_.set_option(asio::ip::v6_only(false));
     acceptor_.set_option(asio::ip::tcp::acceptor::reuse_address(true));
+    acceptor_.bind(asio::ip::tcp::endpoint(asio::ip::tcp::v6(), port));
+    acceptor_.listen();
 }
 
 asio::awaitable<TcpTransport> TcpListener::AcceptNext()

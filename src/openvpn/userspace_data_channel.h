@@ -171,12 +171,16 @@ class UserspaceDataChannel
     /**
      * @brief Stop the TUN receiver loop
      *
-     * Sets internal flag to break the receive loop started by StartTunReceiver().
+     * Sets internal flag and closes the TUN device to interrupt any
+     * pending async read, causing the StartTunReceiver coroutine to
+     * observe operation_aborted and exit cleanly.
      * Safe to call multiple times.
      */
     void StopTunReceiver()
     {
         tun_running_ = false;
+        if (tun_device_)
+            tun_device_->Close();
     }
 
     /**

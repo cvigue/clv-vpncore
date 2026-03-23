@@ -487,16 +487,13 @@ asio::awaitable<void> UserspaceDataChannel::StartTunReceiver()
                     // Check if batchable (transport supports sendmmsg)
                     if (!session->HasTransport() || !session->GetTransport().IsBatchingSupported())
                     {
-                        // Fallback — copy IP data to IpPacket for coroutine path
+                        // Non-batching fallback (TCP).  Inline the co_await so
+                        // the send is serialized within this coroutine — avoids
+                        // a detached co_spawn that would capture `this` without
+                        // any lifetime guarantee.
                         tun::IpPacket pkt;
                         pkt.data.assign(ip_data, ip_data + ip_len);
-                        asio::co_spawn(
-                            io_context_,
-                            [this, p = std::move(pkt)]() mutable -> asio::awaitable<void>
-                        {
-                            co_await ProcessOutgoingTunPacket(std::move(p));
-                        },
-                            asio::detached);
+                        co_await ProcessOutgoingTunPacket(std::move(pkt));
                         continue;
                     }
 

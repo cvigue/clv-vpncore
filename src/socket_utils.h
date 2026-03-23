@@ -45,8 +45,10 @@ inline void ApplySocketBuffer(int fd, int force_opt, int regular_opt,
 
     int actual = 0;
     socklen_t len = sizeof(actual);
-    getsockopt(fd, SOL_SOCKET, regular_opt, &actual, &len);
-    logger.info("UDP {}: requested={} actual={}", label, requested, actual);
+    if (getsockopt(fd, SOL_SOCKET, regular_opt, &actual, &len) != 0)
+        logger.info("{}: requested={} actual=<unknown> (getsockopt failed)", label, requested);
+    else
+        logger.info("{}: requested={} actual={}", label, requested, actual);
 }
 
 } // namespace clv::vpn
