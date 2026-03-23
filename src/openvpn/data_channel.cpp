@@ -32,70 +32,52 @@ namespace clv::vpn::openvpn {
 // ============================================================================
 
 /**
- * @brief Encrypt using AEAD cipher selected at runtime
- * @param algo Cipher algorithm from key
- * @param key Encryption key
- * @param nonce 12-byte nonce
- * @param plaintext Data to encrypt
- * @param aad Additional authenticated data
- * @return Ciphertext with 16-byte tag appended, or empty on unsupported cipher
+ * @brief Map a CipherAlgorithm to its OpenSSL AEAD traits
+ * @return Pointer to traits, or nullptr for unsupported ciphers
  */
+static const OpenSSL::AeadCipherTraits *GetAeadTraits(CipherAlgorithm algo)
+{
+    switch (algo)
+    {
+    case CipherAlgorithm::AES_128_GCM:
+        return &OpenSSL::AES_128_GCM_TRAITS;
+    case CipherAlgorithm::AES_256_GCM:
+        return &OpenSSL::AES_256_GCM_TRAITS;
+    case CipherAlgorithm::CHACHA20_POLY1305:
+        return &OpenSSL::CHACHA20_POLY1305_TRAITS;
+    default:
+        return nullptr;
+    }
+}
+
 static std::vector<std::uint8_t> EncryptAeadDispatch(CipherAlgorithm algo,
                                                      std::span<const std::uint8_t> key,
                                                      std::span<const std::uint8_t> nonce,
                                                      std::span<const std::uint8_t> plaintext,
                                                      std::span<const std::uint8_t> aad)
 {
-    switch (algo)
-    {
-    case CipherAlgorithm::AES_128_GCM:
-        return OpenSSL::EncryptAead(OpenSSL::AES_128_GCM_TRAITS, key, nonce, plaintext, aad);
-    case CipherAlgorithm::AES_256_GCM:
-        return OpenSSL::EncryptAead(OpenSSL::AES_256_GCM_TRAITS, key, nonce, plaintext, aad);
-    case CipherAlgorithm::CHACHA20_POLY1305:
-        return OpenSSL::EncryptAead(OpenSSL::CHACHA20_POLY1305_TRAITS, key, nonce, plaintext, aad);
-    default:
-        return {}; // Unsupported cipher
-    }
+    const auto *traits = GetAeadTraits(algo);
+    if (!traits)
+        return {};
+    return OpenSSL::EncryptAead(*traits, key, nonce, plaintext, aad);
 }
 
-/**
- * @brief Decrypt using AEAD cipher selected at runtime
- * @param algo Cipher algorithm from key
- * @param key Decryption key
- * @param nonce 12-byte nonce
- * @param ciphertext_with_tag Ciphertext with 16-byte tag appended
- * @param aad Additional authenticated data
- * @return Plaintext, or empty on unsupported cipher
- * @throws OpenSSL::SslException on authentication failure
- */
 static std::vector<std::uint8_t> DecryptAeadDispatch(CipherAlgorithm algo,
                                                      std::span<const std::uint8_t> key,
                                                      std::span<const std::uint8_t> nonce,
                                                      std::span<const std::uint8_t> ciphertext_with_tag,
                                                      std::span<const std::uint8_t> aad)
 {
-    switch (algo)
-    {
-    case CipherAlgorithm::AES_128_GCM:
-        return OpenSSL::DecryptAead(OpenSSL::AES_128_GCM_TRAITS, key, nonce, ciphertext_with_tag, aad);
-    case CipherAlgorithm::AES_256_GCM:
-        return OpenSSL::DecryptAead(OpenSSL::AES_256_GCM_TRAITS, key, nonce, ciphertext_with_tag, aad);
-    case CipherAlgorithm::CHACHA20_POLY1305:
-        return OpenSSL::DecryptAead(OpenSSL::CHACHA20_POLY1305_TRAITS, key, nonce, ciphertext_with_tag, aad);
-    default:
-        return {}; // Unsupported cipher
-    }
+    const auto *traits = GetAeadTraits(algo);
+    if (!traits)
+        return {};
+    return OpenSSL::DecryptAead(*traits, key, nonce, ciphertext_with_tag, aad);
 }
 
 // ============================================================================
 // In-place AEAD Cipher Dispatch (zero-copy, runtime algorithm selection)
 // ============================================================================
 
-/**
- * @brief Encrypt in-place using AEAD cipher selected at runtime
- * @return 16-byte authentication tag, or empty array on unsupported cipher
- */
 static std::array<std::uint8_t, OpenSSL::AEAD_TAG_LENGTH>
 EncryptAeadInPlaceDispatch(CipherAlgorithm algo,
                            std::span<const std::uint8_t> key,
@@ -103,23 +85,12 @@ EncryptAeadInPlaceDispatch(CipherAlgorithm algo,
                            std::span<std::uint8_t> data,
                            std::span<const std::uint8_t> aad)
 {
-    switch (algo)
-    {
-    case CipherAlgorithm::AES_128_GCM:
-        return OpenSSL::EncryptAeadInPlace(OpenSSL::AES_128_GCM_TRAITS, key, nonce, data, aad);
-    case CipherAlgorithm::AES_256_GCM:
-        return OpenSSL::EncryptAeadInPlace(OpenSSL::AES_256_GCM_TRAITS, key, nonce, data, aad);
-    case CipherAlgorithm::CHACHA20_POLY1305:
-        return OpenSSL::EncryptAeadInPlace(OpenSSL::CHACHA20_POLY1305_TRAITS, key, nonce, data, aad);
-    default:
-        return {}; // Unsupported cipher
-    }
+    const auto *traits = GetAeadTraits(algo);
+    if (!traits)
+        return {};
+    return OpenSSL::EncryptAeadInPlace(*traits, key, nonce, data, aad);
 }
 
-/**
- * @brief Decrypt in-place using AEAD cipher selected at runtime
- * @return true if decryption and tag verification succeeded
- */
 static bool DecryptAeadInPlaceDispatch(CipherAlgorithm algo,
                                        std::span<const std::uint8_t> key,
                                        std::span<const std::uint8_t> nonce,
@@ -127,33 +98,15 @@ static bool DecryptAeadInPlaceDispatch(CipherAlgorithm algo,
                                        std::span<const std::uint8_t, OpenSSL::AEAD_TAG_LENGTH> tag,
                                        std::span<const std::uint8_t> aad)
 {
-    switch (algo)
-    {
-    case CipherAlgorithm::AES_128_GCM:
-        return OpenSSL::DecryptAeadInPlace(OpenSSL::AES_128_GCM_TRAITS, key, nonce, data, tag, aad);
-    case CipherAlgorithm::AES_256_GCM:
-        return OpenSSL::DecryptAeadInPlace(OpenSSL::AES_256_GCM_TRAITS, key, nonce, data, tag, aad);
-    case CipherAlgorithm::CHACHA20_POLY1305:
-        return OpenSSL::DecryptAeadInPlace(OpenSSL::CHACHA20_POLY1305_TRAITS, key, nonce, data, tag, aad);
-    default:
-        return false; // Unsupported cipher
-    }
+    const auto *traits = GetAeadTraits(algo);
+    if (!traits)
+        return false;
+    return OpenSSL::DecryptAeadInPlace(*traits, key, nonce, data, tag, aad);
 }
 
-/**
- * @brief Check if cipher algorithm is a supported AEAD cipher
- */
 static bool IsSupportedAead(CipherAlgorithm algo)
 {
-    switch (algo)
-    {
-    case CipherAlgorithm::AES_128_GCM:
-    case CipherAlgorithm::AES_256_GCM:
-    case CipherAlgorithm::CHACHA20_POLY1305:
-        return true;
-    default:
-        return false;
-    }
+    return GetAeadTraits(algo) != nullptr;
 }
 
 // ============================================================================
@@ -165,34 +118,15 @@ static bool IsSupportedAead(CipherAlgorithm algo)
  * @details Dispatches to the correct cipher traits at initialization time.  After this
  *          call only per-packet nonce updates are needed (SetEncryptNonce / SetDecryptNonce).
  *          The OpenSSL key schedule is cached, eliminating ~250-400 ns of per-packet overhead.
- * @param ctx   Cipher context to initialize (must be freshly constructed)
- * @param algo  Cipher algorithm to use
- * @param key   Cipher key material
- * @param encrypt true for encryption context, false for decryption
- * @throws std::invalid_argument if algo is not a supported AEAD cipher
- * @throws OpenSSL::SslException on OpenSSL initialization failure
  */
 static void InitPersistentAeadCtx(OpenSSL::SslCipherCtx &ctx,
                                   CipherAlgorithm algo,
                                   std::span<const std::uint8_t> key,
                                   bool encrypt)
 {
-    // Map algorithm to traits
-    const OpenSSL::AeadCipherTraits *traits = nullptr;
-    switch (algo)
-    {
-    case CipherAlgorithm::AES_128_GCM:
-        traits = &OpenSSL::AES_128_GCM_TRAITS;
-        break;
-    case CipherAlgorithm::AES_256_GCM:
-        traits = &OpenSSL::AES_256_GCM_TRAITS;
-        break;
-    case CipherAlgorithm::CHACHA20_POLY1305:
-        traits = &OpenSSL::CHACHA20_POLY1305_TRAITS;
-        break;
-    default:
+    const auto *traits = GetAeadTraits(algo);
+    if (!traits)
         throw std::invalid_argument("Unsupported AEAD cipher for persistent context");
-    }
 
     if (encrypt)
         ctx.InitAeadEncrypt(*traits);
