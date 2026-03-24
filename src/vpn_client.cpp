@@ -51,7 +51,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
-#include <limits>
 #include <nlohmann/json.hpp>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <filesystem>
@@ -201,10 +200,7 @@ const char *VpnClientStateToString(VpnClientState state)
 
 std::size_t VpnClient::EffectiveBatchSize() const
 {
-    if (config_.performance.batch_size <= 0)
-        return transport::kDefaultBatchSize;
-    return std::min(static_cast<std::size_t>(config_.performance.batch_size),
-                    transport::kMaxBatchSize);
+    return transport::EffectiveBatchSize(config_.performance.batch_size);
 }
 
 VpnClient::VpnClient(asio::io_context &io_context, const VpnConfig &config)
@@ -850,21 +846,11 @@ asio::awaitable<void> VpnClient::ProcessTlsHandshake()
         if (RAND_bytes(client_random_.data(), static_cast<int>(client_random_.size())) != 1)
             throw std::runtime_error("RAND_bytes failed generating client random");
 
-        // Map transport protocol to OpenVPN wire-format proto string.
-        std::string proto_str;
-        if (config_.client->protocol == "tcp")
-            proto_str = "TCPv4_CLIENT";
-        else if (config_.client->protocol == "udp6")
-            proto_str = "UDPv6";
-        else
-            proto_str = "UDPv4"; // "udp" and any future default
-
-        std::string options = "V4,dev-type tun,link-mtu 1549,tun-mtu 1500,proto " + proto_str;
-        if (!config_.client->cipher.empty())
-        {
-            options += ",cipher " + config_.client->cipher;
-        }
-        options += ",key-method 2,tls-client";
+        // Build options string for key-method 2
+        std::string options = BuildKeyMethod2Options(
+            /*is_server=*/false,
+            config_.client->protocol,
+            config_.client->cipher);
 
         auto key_method_msg = openvpn::BuildKeyMethod2Message(client_random_, options, "", "");
 
@@ -2211,15 +2197,7 @@ asio::awaitable<void> VpnClient::StatsLoop()
                                   : DataPathStats{};
 
         double elapsed = static_cast<double>(config_.performance.stats_interval_seconds);
-        double rxBps = elapsed > 0 ? static_cast<double>(delta.bytesReceived) / elapsed : 0;
-        double txBps = elapsed > 0 ? static_cast<double>(delta.bytesSent) / elapsed : 0;
-        double rxMbps = rxBps * 8.0 / 1e6;
-        double txMbps = txBps * 8.0 / 1e6;
-
-        double rxBufMs = rxBps > 0 ? static_cast<double>(actualRcvBuf) / rxBps * 1000.0
-                                   : std::numeric_limits<double>::infinity();
-        double txBufMs = txBps > 0 ? static_cast<double>(actualSndBuf) / txBps * 1000.0
-                                   : std::numeric_limits<double>::infinity();
+        auto rates = ComputeStatsRates(delta, elapsed, actualRcvBuf, actualSndBuf);
 
         if (IsDco())
         {
@@ -2229,11 +2207,11 @@ asio::awaitable<void> VpnClient::StatsLoop()
                           "buf={:.0f}/{:.0f}ms",
                           elapsed,
                           delta.packetsReceived,
-                          rxMbps,
+                          rates.rxMbps,
                           delta.packetsSent,
-                          txMbps,
-                          rxBufMs,
-                          txBufMs);
+                          rates.txMbps,
+                          rates.rxBufMs,
+                          rates.txBufMs);
         }
         else
         {
@@ -2248,13 +2226,13 @@ asio::awaitable<void> VpnClient::StatsLoop()
                           "dec={}/{} tun=r{}/w{} serr={}",
                           elapsed,
                           delta.packetsReceived,
-                          rxMbps,
+                          rates.rxMbps,
                           delta.packetsSent,
-                          txMbps,
+                          rates.txMbps,
                           rxH,
                           txH,
-                          rxBufMs,
-                          txBufMs,
+                          rates.rxBufMs,
+                          rates.txBufMs,
                           delta.packetsDecrypted,
                           delta.decryptFailures,
                           delta.tunReads,

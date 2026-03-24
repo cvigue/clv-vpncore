@@ -7,6 +7,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string>
 
 namespace clv::vpn {
@@ -173,6 +174,44 @@ class StatsObserver
     /// Per-window TX batch histogram (reset on each Elapsed() call)
     std::array<std::uint64_t, DataPathStats::kBatchHistBins> windowTxBatchHist_{};
 };
+
+// ---------------------------------------------------------------------------
+// StatsRates — computed throughput rates and socket buffer headroom
+// ---------------------------------------------------------------------------
+
+struct StatsRates
+{
+    double rxMbps;  ///< Receive rate in megabits per second
+    double txMbps;  ///< Transmit rate in megabits per second
+    double rxBufMs; ///< Receive buffer headroom in milliseconds
+    double txBufMs; ///< Transmit buffer headroom in milliseconds
+};
+
+/**
+ * @brief Compute throughput rates (Mbps) and socket buffer headroom (ms)
+ *        from a DataPathStats delta.
+ *
+ * @param delta      Per-interval delta counters.
+ * @param elapsedSec Stats interval in seconds.
+ * @param rcvBuf     Actual kernel SO_RCVBUF size in bytes.
+ * @param sndBuf     Actual kernel SO_SNDBUF size in bytes.
+ */
+inline StatsRates ComputeStatsRates(const DataPathStats &delta,
+                                    double elapsedSec,
+                                    int rcvBuf,
+                                    int sndBuf)
+{
+    double rxBps = elapsedSec > 0 ? static_cast<double>(delta.bytesReceived) / elapsedSec : 0;
+    double txBps = elapsedSec > 0 ? static_cast<double>(delta.bytesSent) / elapsedSec : 0;
+    return {
+        .rxMbps = rxBps * 8.0 / 1e6,
+        .txMbps = txBps * 8.0 / 1e6,
+        .rxBufMs = rxBps > 0 ? static_cast<double>(rcvBuf) / rxBps * 1000.0
+                              : std::numeric_limits<double>::infinity(),
+        .txBufMs = txBps > 0 ? static_cast<double>(sndBuf) / txBps * 1000.0
+                              : std::numeric_limits<double>::infinity(),
+    };
+}
 
 // ---------------------------------------------------------------------------
 // FormatBatchHist — format a batch-size histogram for log output

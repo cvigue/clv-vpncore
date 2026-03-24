@@ -131,14 +131,14 @@ VpnServer::VpnServer(asio::io_context &io_context, const VpnConfig &config)
               : DataPathEngine(std::in_place_type<UserspaceDataChannel>, io_context_,
                                routing_table_, routing_table_v6_, session_manager_, *logger_manager_.GetLogger(logging::Subsystem::dataio), stats_,
                                stats_observer_,
-                               EffectiveBatchSize(config.performance.batch_size),
+                               transport::EffectiveBatchSize(config.performance.batch_size),
                                static_cast<std::size_t>(std::max(0, config.performance.process_quanta)),
                                config.server->keepalive.first,
                                config.server->keepalive.second,
                                running_)),
       inbound_arena_(config.performance.enable_dco
                          ? 16 // DCO: small buffer for TLS control packets only
-                         : EffectiveBatchSize(config.performance.batch_size)),
+                         : transport::EffectiveBatchSize(config.performance.batch_size)),
       cleanup_timer_(io_context),
       stats_timer_(io_context)
 {
@@ -711,15 +711,7 @@ asio::awaitable<void> VpnServer::StatsLoop()
         previousSnapshot = currentSnapshot;
 
         double elapsedSec = static_cast<double>(config_.performance.stats_interval_seconds);
-        double rxBytesPerSec = elapsedSec > 0 ? static_cast<double>(delta.bytesReceived) / elapsedSec : 0;
-        double txBytesPerSec = elapsedSec > 0 ? static_cast<double>(delta.bytesSent) / elapsedSec : 0;
-        double rxRate = rxBytesPerSec * 8.0 / 1e6;
-        double txRate = txBytesPerSec * 8.0 / 1e6;
-
-        // Socket buffer headroom: how many ms of current throughput the buffer can absorb
-        // Infinity when throughput is zero (buffer can hold infinite time of zero traffic)
-        double rxBufMs = rxBytesPerSec > 0 ? static_cast<double>(actualRcvBuf) / rxBytesPerSec * 1000.0 : std::numeric_limits<double>::infinity();
-        double txBufMs = txBytesPerSec > 0 ? static_cast<double>(actualSndBuf) / txBytesPerSec * 1000.0 : std::numeric_limits<double>::infinity();
+        auto rates = ComputeStatsRates(delta, elapsedSec, actualRcvBuf, actualSndBuf);
 
         if (isDco)
         {
@@ -731,11 +723,11 @@ asio::awaitable<void> VpnServer::StatsLoop()
                           "peers={}",
                           elapsedSec,
                           delta.packetsReceived,
-                          rxRate,
+                          rates.rxMbps,
                           delta.packetsSent,
-                          txRate,
-                          rxBufMs,
-                          txBufMs,
+                          rates.txMbps,
+                          rates.rxBufMs,
+                          rates.txBufMs,
                           session_manager_.GetSessionCount());
         }
         else
@@ -753,13 +745,13 @@ asio::awaitable<void> VpnServer::StatsLoop()
                           "dec={}/{} rmiss={} serr={}",
                           elapsedSec,
                           delta.packetsReceived,
-                          rxRate,
+                          rates.rxMbps,
                           delta.packetsSent,
-                          txRate,
+                          rates.txMbps,
                           rxHistStr,
                           txHistStr,
-                          rxBufMs,
-                          txBufMs,
+                          rates.rxBufMs,
+                          rates.txBufMs,
                           delta.packetsDecrypted,
                           delta.decryptFailures,
                           delta.routeLookupMisses,
@@ -1040,21 +1032,11 @@ asio::awaitable<void> VpnServer::HandleKeyMethod2(Connection *session,
         throw std::runtime_error("RAND_bytes failed generating server random");
 
     // Build options string for key-method 2
-    // link-mtu = tun-mtu + 28 (IP+UDP headers) + 21 (OpenVPN AEAD overhead)
-    std::string proto_str = (config_.server->proto == "tcp") ? "TCPv4_SERVER" : "UDPv4";
-    int tunMtu = config_.server->tun_mtu;
-    int linkMtu = tunMtu + 49;
-    std::string options = "V4,dev-type tun,link-mtu " + std::to_string(linkMtu)
-                          + ",tun-mtu " + std::to_string(tunMtu) + ",proto " + proto_str;
-    if (!config_.server->cipher.empty())
-    {
-        options += ",cipher " + config_.server->cipher;
-    }
-    else
-    {
-        options += ",cipher AES-256-GCM";
-    }
-    options += ",auth [null-digest],keysize 256,key-method 2,tls-server";
+    std::string options = BuildKeyMethod2Options(
+        /*is_server=*/true,
+        config_.server->proto,
+        config_.server->cipher,
+        config_.server->tun_mtu);
 
     // Build and send key-method 2 message
     auto key_method_msg = openvpn::BuildKeyMethod2Message(server_random, options, "", "");

@@ -3,6 +3,7 @@
 #ifndef CLV_VPN_TRANSPORT_BATCH_CONSTANTS_H
 #define CLV_VPN_TRANSPORT_BATCH_CONSTANTS_H
 
+#include <algorithm>
 #include <cstddef>
 
 namespace clv::vpn::transport {
@@ -24,6 +25,16 @@ inline constexpr std::size_t kMaxDatagram = 2048;
 /// Default packets processed per event-loop yield in the receive loop.
 /// A value of 0 disables chunking — the entire batch is processed before yielding.
 inline constexpr std::size_t kDefaultProcessQuanta = 128;
+
+/// Compute the effective batch size from a raw config value.
+/// Returns the configured value clamped to kMaxBatchSize,
+/// or kDefaultBatchSize if the value is 0 or negative.
+inline std::size_t EffectiveBatchSize(int configValue)
+{
+    if (configValue <= 0)
+        return kDefaultBatchSize;
+    return std::min(static_cast<std::size_t>(configValue), kMaxBatchSize);
+}
 
 } // namespace clv::vpn::transport
 

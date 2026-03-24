@@ -30,7 +30,6 @@ set(ASIO_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/clv-base/extern/asio/asio/incl
 # VpnCore library
 add_library(clv_vpncore STATIC
     src/openvpn/client_config_generator.cpp
-    src/openvpn/client_session.cpp
     src/openvpn/config_exchange.cpp
     src/openvpn/connection.cpp
     src/openvpn/control_channel.cpp

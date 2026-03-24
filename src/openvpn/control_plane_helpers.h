@@ -27,6 +27,7 @@
 #include <functional>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -256,6 +257,55 @@ asio::awaitable<void> DispatchSessionControlPacket(
     const openvpn::OpenVpnPacket &packet,
     spdlog::logger &logger,
     const SessionControlCallbacks &callbacks);
+
+/**
+ * @brief Build the OpenVPN key-method 2 options string.
+ *
+ * Assembles the comma-separated options string exchanged during the
+ * key-method 2 handshake.  The format is shared between client and server
+ * with small role-specific differences:
+ *   - TCP proto suffix: TCPv4_SERVER vs TCPv4_CLIENT
+ *   - Server includes ,auth [null-digest],keysize 256
+ *   - Server defaults cipher to AES-256-GCM when not specified
+ *   - Trailing role tag: tls-server vs tls-client
+ *
+ * @param is_server    true for server role (tls-server), false for client.
+ * @param configProto  Transport protocol from config ("tcp", "udp", "udp6").
+ * @param cipher       Cipher name (e.g. "AES-256-GCM"); empty to use default.
+ * @param tunMtu       TUN MTU (link-mtu is derived as tunMtu + 49).
+ */
+inline std::string BuildKeyMethod2Options(bool is_server,
+                                          std::string_view configProto,
+                                          std::string_view cipher,
+                                          int tunMtu = 1500)
+{
+    // Map transport protocol → OpenVPN wire-format proto string
+    std::string proto_str;
+    if (configProto == "tcp")
+        proto_str = is_server ? "TCPv4_SERVER" : "TCPv4_CLIENT";
+    else if (configProto == "udp6")
+        proto_str = "UDPv6";
+    else
+        proto_str = "UDPv4";
+
+    int linkMtu = tunMtu + 49; // IP+UDP (28) + OpenVPN AEAD overhead (21)
+
+    std::string opts = "V4,dev-type tun,link-mtu " + std::to_string(linkMtu)
+                       + ",tun-mtu " + std::to_string(tunMtu)
+                       + ",proto " + proto_str;
+
+    if (!cipher.empty())
+        opts += ",cipher " + std::string(cipher);
+    else if (is_server)
+        opts += ",cipher AES-256-GCM";
+
+    if (is_server)
+        opts += ",auth [null-digest],keysize 256";
+
+    opts += ",key-method 2,tls-";
+    opts += is_server ? "server" : "client";
+    return opts;
+}
 
 } // namespace clv::vpn
 

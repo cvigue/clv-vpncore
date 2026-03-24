@@ -14,11 +14,7 @@
 #include "openvpn/session_manager.h"
 #include "openvpn/tls_crypt.h"
 #include "openvpn/vpn_config.h"
-#include <algorithm>
-#include <atomic>
-#include <cstddef>
-#include <span>
-#include <string_view>
+
 #include <transport/udp_batch.h>
 #include "routing_table.h"
 #include "scoped_proc_toggle.h"
@@ -35,6 +31,10 @@
 #include <asio/ip/udp.hpp>
 #include <spdlog/spdlog.h>
 
+#include <atomic>
+#include <cstddef>
+#include <span>
+#include <string_view>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -109,21 +109,7 @@ class VpnServer
     }
 
   private:
-    /**
-     * @brief Compute the effective batch size from a raw config value.
-     *
-     * Returns the configured batch_size clamped to kMaxBatchSize,
-     * or kDefaultBatchSize if the value is 0 or negative.
-     * Static so it can be used in the constructor initializer list.
-     */
-    static std::size_t EffectiveBatchSize(int configValue)
-    {
-        if (configValue <= 0)
-            return transport::kDefaultBatchSize;
-        return std::min(static_cast<std::size_t>(configValue), transport::kMaxBatchSize);
-    }
-
-    /// @brief Convenience overload returning the current batch depth.
+    /// @brief Convenience accessor returning the current batch depth.
     std::size_t EffectiveBatchSize() const
     {
         return currentBatchSize_;
@@ -228,9 +214,9 @@ class VpnServer
      * @return Session pointer (new or existing)
      */
     asio::awaitable<Connection *> HandleHardReset(const openvpn::OpenVpnPacket &packet,
-                                                     const transport::PeerEndpoint &sender,
-                                                     const Connection::Endpoint &endpoint,
-                                                     transport::TransportHandle transport);
+                                                  const transport::PeerEndpoint &sender,
+                                                  const Connection::Endpoint &endpoint,
+                                                  transport::TransportHandle transport);
 
     /**
      * @brief Handle soft reset (key renegotiation)

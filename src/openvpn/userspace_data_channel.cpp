@@ -1,7 +1,7 @@
 // Copyright (c) 2025- Charlie Vigue. All rights reserved.
 
 #include "userspace_data_channel.h"
-#include "client_session.h"
+#include "connection.h"
 #include "control_channel.h"
 #include "data_channel.h"
 #include "data_path_stats.h"

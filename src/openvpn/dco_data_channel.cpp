@@ -3,7 +3,7 @@
 #include "dco_data_channel.h"
 #include "dco_netlink_ops.h"
 #include "iface_utils.h"
-#include "client_session.h"
+#include "connection.h"
 #include "data_channel.h"
 #include "data_path_stats.h"
 #include "openvpn/protocol_constants.h"
