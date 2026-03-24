@@ -320,7 +320,7 @@ void VpnClient::InitializeDataPath()
     {
         try
         {
-            data_channel_strategy_.emplace(DcoDataPath{this});
+            data_channel_strategy_.emplace(DcoDataPath{this, false, -1, "ovpn-client" + std::to_string(next_dco_index_++)});
             InitializeDco();
             logger_->info("Data channel mode: DCO (kernel offload) - ovpn-dco-v2 P2P");
         }

@@ -495,6 +495,7 @@ class VpnClient
 
   private:
     // Configuration
+    static inline std::atomic<int> next_dco_index_{0};
     asio::io_context &io_context_;
     VpnConfig config_;
 
@@ -603,7 +604,7 @@ class VpnClient
         // DCO kernel state
         bool initialized_ = false;
         int ifindex_ = -1;
-        std::string ifname_ = "ovpn-client0";    ///< DCO network interface name
+        std::string ifname_;                     ///< DCO network interface name
         std::uint16_t genl_family_id_ = 0;       ///< Generic netlink family ID
         NetlinkHelper netlink_helper_;           ///< Generic netlink helper
         bool peer_created_ = false;              ///< Whether kernel peer exists
