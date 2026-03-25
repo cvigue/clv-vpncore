@@ -362,6 +362,9 @@ VpnConfig::ProcessConfig VpnConfigParser::ParseProcessConfig(const nlohmann::jso
             proc.cpu_affinity = val.get<int>();
     }
 
+    if (json.contains("transit_routing"))
+        proc.transit_routing = json["transit_routing"].get<bool>();
+
     return proc;
 }
 

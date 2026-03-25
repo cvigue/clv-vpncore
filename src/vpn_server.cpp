@@ -278,11 +278,6 @@ void VpnServer::Start()
     config_exchange_ = std::make_unique<openvpn::ConfigExchange>();
 
     // Configure host networking (RAII — reverted on shutdown/destruction)
-    ip_forward_guard_.emplace(*logger_);
-    if (!config_.server->network_v6.empty())
-    {
-        ip6_forward_guard_.emplace(*logger_);
-    }
     masquerade_guard_.emplace(config_.server->network, *logger_);
     if (!config_.server->network_v6.empty())
     {
@@ -368,8 +363,6 @@ void VpnServer::Stop()
     // Revert host networking changes (reverse order of setup)
     masquerade6_guard_.reset();
     masquerade_guard_.reset();
-    ip6_forward_guard_.reset();
-    ip_forward_guard_.reset();
 
     // Close TUN device
     data_channel_strategy_.CloseTunDevice();

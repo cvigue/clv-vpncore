@@ -18,11 +18,14 @@
 #include "vpn_server.h"
 #include "vpn_client.h"
 #include "openvpn/vpn_config.h"
+#include "scoped_proc_toggle.h"
 #include "asan_notify.h"
 
 #include <asio.hpp>
 #include <exception>
 #include <nlohmann/json.hpp>
+#include <optional>
+#include <spdlog/spdlog.h>
 
 #include <csignal>
 #include <filesystem>
@@ -194,6 +197,21 @@ int main(int argc, char *argv[])
         {
             std::cerr << "Error: Config contains no server section and no clients array.\n";
             return 1;
+        }
+
+        // ── IP forwarding (process-level, RAII) ──
+        // Default: on for server role, off for client-only.
+        // Explicit "transit_routing" in process config overrides.
+        bool enable_forward = base_config.process.transit_routing.value_or(
+            base_config.HasServerRole());
+
+        std::optional<clv::vpn::ScopedIpForward> ip_fwd_guard;
+        std::optional<clv::vpn::ScopedIpv6Forward> ip6_fwd_guard;
+        if (enable_forward)
+        {
+            auto &proc_logger = *spdlog::default_logger();
+            ip_fwd_guard.emplace(proc_logger);
+            ip6_fwd_guard.emplace(proc_logger);
         }
 
         // ── Start roles and spawn threads ──

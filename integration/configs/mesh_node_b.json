@@ -23,7 +23,7 @@
         "client_dns": [
             "8.8.8.8"
         ],
-        "routes": [],
+        "routes": ["10.8.0.0/24"],
         "push_routes": true,
         "client_to_client": true,
         "tun_mtu": 1400,

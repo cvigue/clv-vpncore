@@ -14,7 +14,7 @@
 #   [7]   Client-to-client through Server A (B ↔ C)
 #   [8]   Client-to-client through Server B (C ↔ D)
 #   [9]   Transit: D → Server A tunnel (10.8.0.1) through B
-#          (expected to fail — requires inter-tunnel forwarding)
+#          (B's server pushes 10.8.0.0/24 route; kernel forwards between TUNs)
 #
 # Prerequisites:
 #   - Root / CAP_NET_ADMIN
@@ -337,13 +337,12 @@ fi
 # ── [9/9] Transit: D → Server A tunnel through B ────────────────────
 
 echo "[9/9] Transit routing: D → Server A tunnel (${SERVER_A_TUNNEL}) through B..."
-echo "      (requires B to forward between its client TUN and server TUN)"
+echo "      (B forwards between its server TUN and client-of-A TUN via kernel ip_forward)"
 
 if ns_ping ns-mesh-d "${SERVER_A_TUNNEL}"; then
     step_pass "D → A tunnel through B (transit)"
 else
-    # Expected failure — transit routing not yet implemented
-    step_xfail "D → A tunnel through B (transit)"
+    step_fail "D → A tunnel through B (transit)"
 fi
 
 # ── [10] Negative validation: tunnel requires VPN ────────────────────

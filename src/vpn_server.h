@@ -17,7 +17,6 @@
 
 #include <transport/udp_batch.h>
 #include "routing_table.h"
-#include "scoped_proc_toggle.h"
 #include "scoped_masquerade.h"
 #include "transport/batch_constants.h"
 #include "transport/listener.h"
@@ -308,8 +307,6 @@ class VpnServer
     // RAII network configuration guards (order matters: destroyed in reverse)
     std::optional<ScopedMasquerade> masquerade_guard_;   ///< IPv4 NAT masquerade rule
     std::optional<ScopedMasquerade> masquerade6_guard_;  ///< IPv6 NAT masquerade rule
-    std::optional<ScopedIpForward> ip_forward_guard_;    ///< IPv4 forwarding
-    std::optional<ScopedIpv6Forward> ip6_forward_guard_; ///< IPv6 forwarding
 
     // Timers for periodic coroutines (members so Stop() can cancel them)
     asio::steady_timer cleanup_timer_; ///< Timer for SessionCleanupLoop
