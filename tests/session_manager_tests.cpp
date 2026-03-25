@@ -86,9 +86,9 @@ TEST_F(ConnectionTest, DataChannelAccess)
     Connection session(session_id, endpoint, true, std::nullopt, *logger_);
 
     auto &data = session.GetDataChannel();
-    (void)data; // Use variable to suppress warning
-    // DataChannel should be accessible
-    EXPECT_TRUE(true);
+    EXPECT_EQ(data.GetOutboundPacketId(), 1);
+    EXPECT_FALSE(data.HasValidKeys());
+    EXPECT_EQ(data.GetReplayedPacketCount(), 0);
 }
 
 TEST_F(ConnectionTest, GetCipherSuite)

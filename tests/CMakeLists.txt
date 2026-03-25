@@ -16,6 +16,7 @@ add_executable(test_vpncore
     scoped_masquerade_tests.cpp
     session_manager_tests.cpp
     tls_context_tests.cpp
+    tls_crypt_tests.cpp
     tun_device_tests.cpp
     udp_batch_tests.cpp
     vpn_client_tests.cpp
