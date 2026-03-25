@@ -90,6 +90,18 @@ std::string DeriveServerIp(const VpnConfig::ServerConfig &srv)
     return ipv4::Ipv4ToString(gateway_ip);
 }
 
+std::string DeriveServerIpv6(const VpnConfig::ServerConfig &srv)
+{
+    auto parsed = ipv6::ParseCidr6(srv.network_v6);
+    if (!parsed)
+        throw std::invalid_argument("Invalid server IPv6 network CIDR: " + srv.network_v6);
+
+    auto [net_v6, prefix_v6] = *parsed;
+    ipv6::Ipv6Address server_v6 = net_v6;
+    server_v6[15] += 1;
+    return ipv6::Ipv6ToString(server_v6);
+}
+
 /// Parse a log level string: accepts spdlog names ("trace","debug","info","warn",
 /// "err","critical","off") or numeric strings ("0"=trace .. "6"=off).
 spdlog::level::level_enum ParseLogLevel(const std::string &str)
@@ -409,11 +421,8 @@ void VpnServer::InitializeTunDevice()
         auto parsed_v6 = ipv6::ParseCidr6(config_.server->network_v6);
         if (parsed_v6)
         {
-            auto [net_v6, prefix_v6] = *parsed_v6;
-            // Server address = network + 1 (e.g. fd00::1)
-            ipv6::Ipv6Address server_v6 = net_v6;
-            server_v6[15] += 1;
-            std::string server_v6_str = ipv6::Ipv6ToString(server_v6);
+            auto prefix_v6 = parsed_v6->second;
+            std::string server_v6_str = DeriveServerIpv6(*config_.server);
             tun->AddIpv6Address(server_v6_str, prefix_v6);
             logger_->info("Set TUN IPv6 address: {}/{}", server_v6_str, prefix_v6);
         }
@@ -1118,12 +1127,9 @@ asio::awaitable<void> VpnServer::HandlePushRequest(Connection *session)
         auto parsed_v6 = ipv6::ParseCidr6(config_.server->network_v6);
         if (parsed_v6)
         {
-            auto [net_v6, prefix_v6] = *parsed_v6;
-            ipv6::Ipv6Address server_v6 = net_v6;
-            server_v6[15] += 1;
-
+            auto prefix_v6 = parsed_v6->second;
             std::string ipv6_str = ipv6::Ipv6ToString(session->GetAssignedIpv6().value());
-            std::string server_v6_str = ipv6::Ipv6ToString(server_v6);
+            std::string server_v6_str = DeriveServerIpv6(*config_.server);
             push_config.ifconfig_ipv6 = {ipv6_str + "/" + std::to_string(prefix_v6)
                                              + " " + server_v6_str,
                                          0};

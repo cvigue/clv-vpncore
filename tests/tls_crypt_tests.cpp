@@ -3,17 +3,19 @@
 #include "openvpn/tls_crypt.h"
 #include "openvpn/packet.h"
 
-#include <algorithm>
-#include <array>
+#include <cctype>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <memory>
 #include <numeric>
 #include <optional>
 #include <spdlog/sinks/null_sink.h>
 #include <spdlog/spdlog.h>
 #include <span>
+#include <sstream>
 #include <string>
 #include <vector>
 
