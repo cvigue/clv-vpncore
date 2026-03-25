@@ -14,21 +14,24 @@
  * Requires root/CAP_NET_ADMIN when a server section is present.
  */
 
+#include "nlohmann/json_fwd.hpp"
 #include "vpn_server.h"
 #include "vpn_client.h"
 #include "openvpn/vpn_config.h"
 #include "asan_notify.h"
 
 #include <asio.hpp>
-#include <asio/signal_set.hpp>
 #include <exception>
 #include <nlohmann/json.hpp>
 
+#include <csignal>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <signal.h>
 #include <string>
+#include <thread>
 #include <vector>
 #include <unistd.h>
 
@@ -106,14 +109,27 @@ int main(int argc, char *argv[])
             return 1;
         }
 
-        // ── Prepare I/O ──
-        asio::io_context io_context;
+        // ── Block signals before spawning any threads ──
+        sigset_t mask;
+        sigemptyset(&mask);
+        sigaddset(&mask, SIGINT);
+        sigaddset(&mask, SIGTERM);
+        pthread_sigmask(SIG_BLOCK, &mask, nullptr);
+
+        // ── Per-role reactor + thread ──
+        struct Role
+        {
+            asio::io_context ctx;
+            std::jthread thread;
+        };
+        std::vector<std::unique_ptr<Role>> roles;
 
         // ── Server (optional) ──
         std::unique_ptr<vpn::VpnServer> server;
         if (base_config.HasServerRole())
         {
-            server = std::make_unique<vpn::VpnServer>(io_context, base_config);
+            auto &role = roles.emplace_back(std::make_unique<Role>());
+            server = std::make_unique<vpn::VpnServer>(role->ctx, base_config);
         }
 
         // ── Clients (optional) ──
@@ -142,9 +158,10 @@ int main(int argc, char *argv[])
                     continue;
                 }
 
+                auto &role = roles.emplace_back(std::make_unique<Role>());
                 auto idx = clients.size() + 1;
                 auto &client = clients.emplace_back(
-                    std::make_unique<vpn::VpnClient>(io_context, client_config));
+                    std::make_unique<vpn::VpnClient>(role->ctx, client_config));
 
                 client->SetStateCallback(
                     [idx](auto /*old*/, auto new_state)
@@ -159,8 +176,9 @@ int main(int argc, char *argv[])
         else if (base_config.HasClientRole())
         {
             // Single "client" section — use base_config directly
+            auto &role = roles.emplace_back(std::make_unique<Role>());
             auto &client = clients.emplace_back(
-                std::make_unique<vpn::VpnClient>(io_context, base_config));
+                std::make_unique<vpn::VpnClient>(role->ctx, base_config));
 
             client->SetStateCallback(
                 [](auto /*old*/, auto new_state)
@@ -178,21 +196,7 @@ int main(int argc, char *argv[])
             return 1;
         }
 
-        // ── Signal handling ──
-        asio::signal_set signals(io_context, SIGINT, SIGTERM);
-        signals.async_wait(
-            [&](const asio::error_code &ec, int signum)
-        {
-            if (ec)
-                return;
-            std::cout << "\nSignal " << signum << " — shutting down...\n";
-            for (auto &c : clients)
-                c->Disconnect();
-            if (server)
-                server->Stop();
-        });
-
-        // ── Start ──
+        // ── Start roles and spawn threads ──
         if (server)
         {
             server->Start();
@@ -202,6 +206,10 @@ int main(int argc, char *argv[])
         }
         for (auto &c : clients)
             c->Connect();
+
+        for (auto &role : roles)
+            role->thread = std::jthread([&role]
+            { role->ctx.run(); });
 
         if (server && !clients.empty())
             std::cout << "\n=== VPN Node (server + "
@@ -213,9 +221,27 @@ int main(int argc, char *argv[])
 
         std::cout << "Press Ctrl+C to stop\n\n";
 
-        io_context.run();
+        // ── Supervisor: park until signal ──
+        int sig = 0;
+        sigwait(&mask, &sig);
+        std::cout << "\nSignal " << sig << " — shutting down...\n";
 
-        std::cout << "\nStopped\n";
+        // ── Ordered teardown: clients first, then server ──
+        for (auto &c : clients)
+            c->Disconnect();
+        if (server)
+            server->Stop();
+
+        // Stop all reactors — unblocks ctx.run() in each thread
+        for (auto &role : roles)
+            role->ctx.stop();
+
+        // ~jthread joins automatically when roles vector is cleared
+        roles.clear();
+        clients.clear();
+        server.reset();
+
+        std::cout << "Stopped\n";
         return 0;
     }
     catch (const std::exception &e)

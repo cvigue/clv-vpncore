@@ -2,8 +2,6 @@
 
 OpenVPN-compatible VPN server and client built with C++23, ASIO coroutines, and a zero-copy data path.
 
-At this point it is all still very new and not well tested, even though it tests as functional on a reasonably new Linux with a reasonably new (clang 21.x or GCC 14.x) compiler.
-
 ## Overview
 
 clv-vpncore is a from-scratch OpenVPN implementation providing both a **server** and a **client**. The server is tested against stock OpenVPN 2.6.14 clients; the client connects to the clv-vpncore server (and should interoperate with stock OpenVPN servers). Both support a **userspace data path** (batched `recvmmsg`/`sendmmsg` with an in-place encryption arena) and **DCO kernel offload** via the Linux `ovpn-dco` module.
@@ -20,7 +18,7 @@ Key capabilities:
 - Full client: auto-reconnect with back-off, keepalive timeout detection, .ovpn config parsing
 - Periodic stats reporting with throughput, batch depth, and buffer headroom
 - Per-subsystem structured logging with config and environment variable overrides
-- 580+ unit tests (GoogleTest)
+- 669 unit tests + 3 integration tests (GoogleTest, network-namespace harness)
 
 ## Dependencies
 
@@ -48,30 +46,101 @@ ctest -j$(nproc)
 clv-vpncore/
 ├── clv-base/           Submodule: Core, SslHelp, NetCore, extern (ASIO, quictls, …)
 ├── src/
-│   ├── openvpn/        OpenVPN protocol: control channel, data channel, TLS,
-│   │                   session manager, config parser, DCO integration
-│   ├── transport/      UDP/TCP transport, recvmmsg/sendmmsg batching, arena
-│   ├── vpn_server.{h,cpp}
-│   ├── vpn_client.{h,cpp}
-│   ├── ip_pool_manager.{h,cpp}
-│   ├── routing_table.{h,cpp}
-│   ├── log_subsystems.{h,cpp}    Subsystem logger manager
-│   ├── scoped_ip_forward.{h,cpp}  RAII IPv4 forwarding guard
-│   ├── scoped_ip6_forward.{h,cpp} RAII IPv6 forwarding guard
-│   ├── scoped_masquerade.{h,cpp}  RAII nftables IPv4 masquerade
-│   ├── scoped_ipv6_masquerade.{h,cpp} RAII nftables IPv6 masquerade
-│   └── …
-├── tests/              Unit tests (GoogleTest)
-├── demos/              Runnable demos: simple_vpn (unified node), config generator, .ovpn parser
-├── configs/            Server and client JSON configs, sample .ovpn profile
-├── scripts/            Helper scripts (test_handshake.sh, test_large_certs.sh)
-└── test_data/          Test certificates, .ovpn files
+│   ├── openvpn/        OpenVPN protocol implementation
+│   ├── transport/      UDP/TCP transport layer
+│   ├── vpn_server              Multi-client server orchestration
+│   ├── vpn_client              Single-connection client with reconnect
+│   ├── ip_pool_manager         Dual-stack IPv4/IPv6 address allocation
+│   ├── routing_table           Longest-prefix-match routing (IPv4 + IPv6)
+│   ├── log_subsystems          Per-subsystem structured logging
+│   ├── scoped_masquerade       RAII nftables masquerade (IPv4 + IPv6)
+│   ├── scoped_proc_toggle      RAII sysctl toggle (ip_forward, etc.)
+│   ├── cpu_affinity            Core pinning helpers
+│   ├── data_path_stats         Throughput/batch/buffer statistics
+│   ├── dco_netlink_ops         DCO netlink request helpers
+│   ├── dco_utils               DCO device setup utilities
+│   ├── iface_utils             Network interface helpers
+│   ├── route_utils             ip-route / ip-rule helpers
+│   ├── socket_utils            Socket option helpers
+│   └── udp_receive_loop        Templated coroutine receive loop
+├── tests/              669 unit tests (GoogleTest)
+├── integration/        Network-namespace integration tests (IT1–IT3)
+│   ├── configs/        Per-test server/client JSON configs
+│   └── netns/          Namespace setup/teardown scripts
+├── demos/              simple_vpn, config generator, .ovpn parser
+├── configs/            Sample server/client JSON configs, .ovpn profile
+├── scripts/            Deployment and test helper scripts
+└── test_data/          Test certificates and .ovpn files
 ```
+
+## Architecture
+
+### System Structure
+
+```
+simple_vpn (unified binary, role from config)
+  ├── VpnServer (optional, 0-1)
+  │     ├── ServerListener (variant: UDP | TCP)
+  │     ├── SessionManager → Connection* (per-peer state)
+  │     ├── DataPathEngine (variant: Userspace | DCO)
+  │     ├── IpPoolManager, RoutingTable, masquerade
+  │     └── Shared helpers (control_plane_helpers, stats, batch)
+  ├── VpnClient (0-N, one per outbound connection)
+  │     ├── ClientConnector (variant: UDP | TCP)
+  │     ├── ControlChannel, DataChannel (own members)
+  │     ├── DataChannelStrategy (variant: Userspace | DCO)
+  │     ├── TunDevice (per-client, userspace only)
+  │     └── Shared helpers (same free functions as server)
+  └── Shared protocol layer (stateless free functions)
+        ├── control_plane_helpers (10 functions)
+        ├── ComputeStatsRates, FormatBatchHist
+        ├── EffectiveBatchSize, BuildKeyMethod2Options
+        └── ConfigExchange (typed PUSH_REPLY serialize/parse)
+```
+
+A single executable whose role is determined entirely by configuration.
+The library layer is composable: embedding `VpnClient` or `VpnServer`
+independently in other applications is a first-class use case.
+
+`VpnClient` and `VpnServer` remain separate classes because orchestration is
+genuinely asymmetric — multi-peer session management vs single-connection
+lifecycle with reconnect — but the shared protocol layer captures the real
+common behavior as stateless free functions.
+
+### Design Principles
+
+- **Thread-per-role event loop** — each role (server, client) gets its own `asio::io_context` on a dedicated `std::jthread`; C++20 coroutines run cooperatively within each thread. No mutexes in the data path.
+- **No virtual functions in the hot path** — `std::variant` + `std::visit` for transport (`UdpTransport | TcpTransport`) and data channel (`UserspaceDataChannel | DcoDataChannel`). Same pattern for `DataPathEngine` and `DataChannelStrategy`.
+- **Value semantics, minimal allocation** — `std::optional` over heap pointers, arena-based packet buffers, RAII for all host-networking side effects.
+- **Enforcement-plane architecture** — this process enforces VPN policy (TLS auth, IP assignment, routing) but does not decide it. User management, certificate generation, and policy configuration belong to an external management plane.
+
+### Server
+
+Multi-client session manager, IP pool allocation, longest-prefix-match routing, and RAII host networking (forwarding, masquerade). Coroutines: `UdpReceiveLoop`, `TunToServerBatch`, `SessionCleanupLoop`, `StatsLoop`, `KeepaliveMonitor`.
+
+### Client
+
+Connection state machine (`Disconnected` → `Connecting` → `TlsHandshake` → `Authenticating` → `Connected` → `Reconnecting` → …) driven by `ConnectionLoop`. On connect: TLS handshake with retransmit timer, key-method-2 exchange, PUSH_REPLY processing, TUN/DCO device setup, then delegate to the data path strategy. On disconnect: all per-session state is reset (control channel, TLS-crypt, key material, config exchange, pushed config) so reconnection starts from a clean slate. Coroutines: `ConnectionLoop`, `ReconnectLoop`, `UdpReceiveLoop`, `TunToServerBatch`, `KeepaliveLoop`, `StatsLoop`, `DcoKeepaliveMonitor`, `DcoReceiveLoop`.
+
+Multiple `VpnClient` instances compose naturally — each runs on its own `io_context` and thread, fully self-contained with its own transport, control channel, and TLS state.
+
+### Data Path: Userspace
+
+A pre-allocated arena of `batch_size × 2048` byte slots. `recvmmsg(2)` writes datagrams directly into arena slots; AEAD decrypt operates in-place; plaintext is written to the TUN fd via `writev(2)`. Outbound follows the reverse: `read(tun_fd)` into arena slots, in-place encrypt, `sendmmsg(2)`. Zero heap allocations per packet.
+
+### Data Path: DCO (Kernel Offload)
+
+The kernel `ovpn-dco` module handles encrypt/decrypt. The server uses a single multi-peer device (`ovpn-dco0`) and manages sessions and keys via generic netlink, monitors peer health via multicast netlink events, and queries per-peer stats via `OVPN_CMD_GET_PEER`. Clients use one P2P-mode device per connection (`ovpn-clientN`).
+
+### IPv6
+
+Dual-stack support throughout. The server assigns IPv6 addresses from a configurable pool (`network_v6`), adds the address to the TUN/DCO interface, enables IPv6 forwarding and ip6 masquerade via RAII guards, pushes `ifconfig-ipv6` and `route-ipv6` directives to clients, and maintains a separate `RoutingTableIpv6` for data-plane routing. Both userspace and DCO modes register the peer's IPv6 address.
 
 ## Running
 
 `simple_vpn` is a unified VPN node that supports 0‑1 server instances and 0‑N
-client connections in a single process, sharing one `io_context`.
+client connections in a single process, each on a dedicated thread with its own
+`io_context`.
 
 ```bash
 # Server-only (requires root for TUN device)
@@ -107,18 +176,6 @@ or string paths to `.json`/`.ovpn` files (self-contained):
 ```
 
 See `demos/README.md` for full configuration details.
-
-## Client
-
-The VPN client implements the full OpenVPN connection lifecycle:
-
-**State machine**: `Disconnected` → `Connecting` → `TlsHandshake` → `Authenticating` → `Connected` → (on failure) `Reconnecting` → …
-
-**Reconnection**: On peer death (DCO kernel notification or userspace keepalive timeout), the client tears down the session, waits `reconnect_delay_seconds`, and re-runs the full handshake. The TLS handshake phase has a 30-second deadline — if the server doesn't respond, the attempt fails and the next retry begins. Retries continue up to `max_reconnect_attempts` (0 = unlimited).
-
-**Keepalive**: The client sends PING every `keepalive_interval` seconds. In userspace mode, it also monitors inbound traffic: if no packet arrives within `keepalive_timeout` seconds, the server is considered dead and reconnection begins. In DCO mode, the kernel delivers peer-death notifications via netlink instead.
-
-**Data path modes**: Same as the server — userspace (batched, zero-copy arena) or DCO (kernel offload). Selected via `performance.enable_dco` in the config.
 
 ## Configuration Reference
 
@@ -272,24 +329,13 @@ The `buf_rx` and `buf_tx` values indicate how many milliseconds of traffic the k
 ```bash
 cd build
 ctest -j$(nproc)                                          # all tests
+ctest --exclude-regex "IT[123]"                            # unit tests only
 ./tests/test_vpncore --gtest_filter="DataChannel*"        # specific suite
 ```
 
-Coverage includes protocol parsing, TLS handshake, key derivation, AEAD encrypt/decrypt, replay protection, config validation, IP pool management, routing, UDP batching, and session lifecycle.
+**Unit tests** (669): protocol parsing, TLS handshake, TLS-Crypt (key loading, wrap/unwrap, tamper detection, replay protection), key derivation, AEAD encrypt/decrypt, replay protection, config validation, IP pool management (IPv4 + IPv6), routing (IPv4 + IPv6), UDP batching, session lifecycle, and config exchange round-trip.
 
-## Architecture
-
-Single-threaded `asio::io_context` event loop with C++20 coroutines (both server and client). The data channel is a `std::variant<Userspace, DCO>` dispatched via `std::visit` — no virtual functions in the hot path.
-
-**Server**: Multi-client session manager, IP pool allocation, longest-prefix-match routing, and RAII host networking (forwarding, masquerade). Coroutines: `UdpReceiveLoop`, `TunToServerBatch`, `SessionCleanupLoop`, `StatsLoop`, `KeepaliveMonitor`.
-
-**Client**: Connection state machine (`Disconnected` → `Connected`) driven by `ConnectionLoop`. On connect: TLS handshake with retransmit timer, key-method-2 exchange, PUSH_REPLY processing, TUN/DCO device setup, then delegate to the data path strategy. On disconnect: all per-session state is reset (control channel, TLS-crypt, key material, config exchange, pushed config) so reconnection starts from a clean slate. Coroutines: `ConnectionLoop`, `ReconnectLoop`, `UdpReceiveLoop`, `TunToServerBatch`, `KeepaliveLoop`, `StatsLoop`, `DcoKeepaliveMonitor`, `DcoReceiveLoop`.
-
-**Userspace data path**: A pre-allocated arena of `batch_size × 2048` byte slots. `recvmmsg(2)` writes datagrams directly into arena slots; AEAD decrypt operates in-place; plaintext is written to the TUN fd via `writev(2)`. Outbound follows the reverse: `read(tun_fd)` into arena slots, in-place encrypt, `sendmmsg(2)`. Zero heap allocations per packet.
-
-**DCO data path**: The kernel `ovpn-dco` module handles encrypt/decrypt. The server manages sessions and keys via generic netlink, monitors peer health via multicast netlink events, and queries per-peer stats via `OVPN_CMD_GET_PEER`.
-
-**IPv6**: Dual-stack support throughout. The server assigns IPv6 addresses from a configurable pool (`network_v6`), adds the address to the TUN/DCO interface, enables IPv6 forwarding and ip6 masquerade via RAII guards, pushes `ifconfig-ipv6` and `route-ipv6` directives to clients, and maintains a separate `RoutingTableIpv6` for data-plane routing. Both userspace and DCO modes register the peer's IPv6 address.
+**Integration tests** (3, require root): full-stack VPN connectivity using Linux network namespaces with real TUN devices, kernel routing, and iptables. IT1 — single client handshake and data path. IT2 — multi-client concurrent sessions. IT3 — 4-node mesh topology with client-to-client routing. All include negative validation (traffic blocked after teardown).
 
 ## License
 
