@@ -8,6 +8,7 @@ add_executable(test_vpncore
     ip_pool_manager_tests.cpp
     ipv4_utils_tests.cpp
     key_derivation_tests.cpp
+    log_subsystems_tests.cpp
     log_utils_tests.cpp
     openvpn_packet_tests.cpp
     ovpn_config_parser_tests.cpp

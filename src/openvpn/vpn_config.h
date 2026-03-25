@@ -62,8 +62,9 @@ struct VpnConfig
         std::vector<std::string> routes;
         std::vector<std::string> routes_v6;
         bool push_routes = true;
-        int tun_mtu = 1500;     ///< TUN device MTU
-        int tun_txqueuelen = 0; ///< TUN TX queue length (0 = OS default)
+        bool client_to_client = false; ///< Push tunnel subnet route so clients can reach each other
+        int tun_mtu = 1500;            ///< TUN device MTU
+        int tun_txqueuelen = 0;        ///< TUN TX queue length (0 = OS default)
 
         // Authentication
         bool client_cert_required = true;

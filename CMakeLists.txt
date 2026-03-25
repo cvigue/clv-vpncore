@@ -86,6 +86,29 @@ add_library(clv::vpncore ALIAS clv_vpncore)
 if(BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
+
+    # Integration tests — run via:  ctest -L integration
+    # Requires root / CAP_NET_ADMIN and network namespace support.
+    # Self-contained: each test wrapper handles namespace setup + teardown.
+    add_test(
+        NAME integration_it1_handshake
+        COMMAND bash "${CMAKE_SOURCE_DIR}/integration/ctest_it1.sh" "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(integration_it1_handshake PROPERTIES
+        LABELS "integration"
+        TIMEOUT 90
+        RESOURCE_LOCK "netns"
+    )
+
+    add_test(
+        NAME integration_it2_multi_client
+        COMMAND bash "${CMAKE_SOURCE_DIR}/integration/ctest_it2.sh" "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(integration_it2_multi_client PROPERTIES
+        LABELS "integration"
+        TIMEOUT 120
+        RESOURCE_LOCK "netns"
+    )
 endif()
 
 # Demos

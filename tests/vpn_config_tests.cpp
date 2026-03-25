@@ -456,4 +456,58 @@ TEST_F(VpnConfigTest, NegativeBatchSizeClampedToZero)
     EXPECT_EQ(config.performance.batch_size, 0);
 }
 
+// ============================================================================
+// client_to_client option
+// ============================================================================
+
+TEST_F(VpnConfigTest, ClientToClientDefaultsFalse)
+{
+    std::string json_str = R"(
+    {
+        "server": {
+            "port": 1194,
+            "cert": "/server.crt",
+            "key": "/server.key",
+            "ca_cert": "/ca.crt"
+        }
+    })";
+
+    OpenVpnConfig config = OpenVpnConfigParser::ParseString(json_str);
+    EXPECT_FALSE(config.server->client_to_client);
+}
+
+TEST_F(VpnConfigTest, ClientToClientParsedWhenTrue)
+{
+    std::string json_str = R"(
+    {
+        "server": {
+            "port": 1194,
+            "cert": "/server.crt",
+            "key": "/server.key",
+            "ca_cert": "/ca.crt",
+            "client_to_client": true
+        }
+    })";
+
+    OpenVpnConfig config = OpenVpnConfigParser::ParseString(json_str);
+    EXPECT_TRUE(config.server->client_to_client);
+}
+
+TEST_F(VpnConfigTest, ClientToClientParsedWhenFalse)
+{
+    std::string json_str = R"(
+    {
+        "server": {
+            "port": 1194,
+            "cert": "/server.crt",
+            "key": "/server.key",
+            "ca_cert": "/ca.crt",
+            "client_to_client": false
+        }
+    })";
+
+    OpenVpnConfig config = OpenVpnConfigParser::ParseString(json_str);
+    EXPECT_FALSE(config.server->client_to_client);
+}
+
 } // namespace clv::vpn

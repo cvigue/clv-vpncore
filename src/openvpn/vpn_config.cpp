@@ -249,6 +249,8 @@ VpnConfig::ServerConfig VpnConfigParser::ParseServerConfig(const nlohmann::json 
     }
     if (json.contains("push_routes"))
         s.push_routes = json["push_routes"];
+    if (json.contains("client_to_client"))
+        s.client_to_client = json["client_to_client"];
     if (json.contains("tun_mtu"))
         s.tun_mtu = json["tun_mtu"];
     if (json.contains("tun_txqueuelen"))

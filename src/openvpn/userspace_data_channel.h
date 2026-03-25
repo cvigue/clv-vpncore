@@ -302,9 +302,9 @@ class UserspaceDataChannel
     // Per-slot metadata for the outbound arena batch (tracks wire length + dest)
     struct ArenaEntry
     {
-        std::size_t wire_len = 0;         ///< Total wire packet length in arena slot
-        transport::PeerEndpoint dest;     ///< UDP destination
-        int socketFd = -1;                ///< Socket fd
+        std::size_t wire_len = 0;      ///< Total wire packet length in arena slot
+        transport::PeerEndpoint dest;  ///< UDP destination
+        int socketFd = -1;             ///< Socket fd
         Connection *session = nullptr; ///< For UpdateLastOutbound
     };
     std::vector<ArenaEntry> arena_entries_;

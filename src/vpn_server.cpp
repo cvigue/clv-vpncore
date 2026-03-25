@@ -843,9 +843,9 @@ asio::awaitable<void> VpnServer::HandleControlPacket(Connection *session,
 }
 
 asio::awaitable<Connection *> VpnServer::HandleHardReset(const openvpn::OpenVpnPacket &packet,
-                                                            const transport::PeerEndpoint &sender,
-                                                            const Connection::Endpoint &endpoint,
-                                                            transport::TransportHandle transport)
+                                                         const transport::PeerEndpoint &sender,
+                                                         const Connection::Endpoint &endpoint,
+                                                         transport::TransportHandle transport)
 {
     logger_->info("Client initiating handshake from {}:{}",
                   sender.addr.to_string(),
@@ -1133,6 +1133,21 @@ asio::awaitable<void> VpnServer::HandlePushRequest(Connection *session)
 
     push_config.topology = "net30";
     push_config.route_gateway = server_ip;
+
+    // When client_to_client is enabled, inject the tunnel subnet as a pushed route
+    // so clients can reach each other directly through the VPN.
+    if (config_.server->client_to_client && config_.server->push_routes)
+    {
+        auto parsed_net = ipv4::ParseCidr(config_.server->network);
+        if (parsed_net)
+        {
+            auto [net_addr, prefix_len] = *parsed_net;
+            std::string net_str = ipv4::Ipv4ToString(net_addr);
+            std::string mask_str = ipv4::Ipv4ToString(ipv4::CreateMask(prefix_len));
+            push_config.routes.push_back({net_str, mask_str, 0});
+            logger_->debug("Pushing tunnel subnet route (client_to_client): {} {}", net_str, mask_str);
+        }
+    }
 
     // Push routes from config
     if (config_.server->push_routes)

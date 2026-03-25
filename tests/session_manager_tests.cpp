@@ -62,7 +62,7 @@ TEST_F(ConnectionTest, LastActivityUpdates)
     Connection session(session_id, endpoint, true, std::nullopt, *logger_);
 
     auto time1 = session.GetLastActivity();
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
     session.UpdateLastActivity();
     auto time2 = session.GetLastActivity();
 
@@ -195,13 +195,13 @@ TEST_F(SessionManagerTest, CleanupStaleSession)
     auto id2 = openvpn::SessionId::Generate();
 
     manager.GetOrCreateSession(id1, CreateEndpoint(0xC0A80001, 1194), true, std::nullopt, *logger_);
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
     manager.GetOrCreateSession(id2, CreateEndpoint(0xC0A80002, 1195), true, std::nullopt, *logger_);
 
     EXPECT_EQ(manager.GetSessionCount(), 2);
 
-    // Clean up sessions inactive for 30ms
-    size_t removed = manager.CleanupStaleSession(std::chrono::milliseconds(30));
+    // Clean up sessions inactive for 100ms — id1 slept 200ms so it qualifies
+    size_t removed = manager.CleanupStaleSession(std::chrono::milliseconds(100));
     EXPECT_EQ(removed, 1); // id1 should be removed
 
     // id2 should still be there

@@ -18,10 +18,10 @@
 namespace clv::vpn {
 
 Connection &SessionManager::GetOrCreateSession(openvpn::SessionId session_id,
-                                                  const Connection::Endpoint &endpoint,
-                                                  bool is_server,
-                                                  std::optional<openvpn::TlsCertConfig> cert_config,
-                                                  spdlog::logger &logger)
+                                               const Connection::Endpoint &endpoint,
+                                               bool is_server,
+                                               std::optional<openvpn::TlsCertConfig> cert_config,
+                                               spdlog::logger &logger)
 {
     uint64_t key = HashSessionId(session_id);
 

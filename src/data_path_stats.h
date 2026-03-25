@@ -207,9 +207,9 @@ inline StatsRates ComputeStatsRates(const DataPathStats &delta,
         .rxMbps = rxBps * 8.0 / 1e6,
         .txMbps = txBps * 8.0 / 1e6,
         .rxBufMs = rxBps > 0 ? static_cast<double>(rcvBuf) / rxBps * 1000.0
-                              : std::numeric_limits<double>::infinity(),
+                             : std::numeric_limits<double>::infinity(),
         .txBufMs = txBps > 0 ? static_cast<double>(sndBuf) / txBps * 1000.0
-                              : std::numeric_limits<double>::infinity(),
+                             : std::numeric_limits<double>::infinity(),
     };
 }
 

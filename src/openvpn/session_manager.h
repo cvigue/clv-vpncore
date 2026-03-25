@@ -40,10 +40,10 @@ class SessionManager
      * @return Reference to the session (newly created or existing)
      */
     Connection &GetOrCreateSession(openvpn::SessionId session_id,
-                                      const Connection::Endpoint &endpoint,
-                                      bool is_server,
-                                      std::optional<openvpn::TlsCertConfig> cert_config,
-                                      spdlog::logger &logger);
+                                   const Connection::Endpoint &endpoint,
+                                   bool is_server,
+                                   std::optional<openvpn::TlsCertConfig> cert_config,
+                                   spdlog::logger &logger);
 
     /**
      * @brief Retrieve an existing session
