@@ -194,13 +194,13 @@ class UserspaceDataChannel
         batchSize_ = std::min(newSize, transport::kMaxBatchSize);
     }
 
-    /// @brief Get the current batch size.
+    /** @brief Get the current batch size. */
     std::size_t GetBatchSize() const
     {
         return batchSize_;
     }
 
-    /// @brief Return a point-in-time copy of the live stats counters.
+    /** @brief Return a point-in-time copy of the live stats counters. */
     DataPathStats SnapshotStats() const
     {
         return stats_; // copy of the monotonic counters
@@ -215,7 +215,7 @@ class UserspaceDataChannel
     }
 
   private:
-    /// @brief Result of encrypting a TUN packet for outbound UDP sending.
+    /** @brief Result of encrypting a TUN packet for outbound UDP sending. */
     struct PreparedPacket
     {
         std::vector<std::uint8_t> encrypted; ///< Encrypted OpenVPN datagram
@@ -223,7 +223,7 @@ class UserspaceDataChannel
         int socketFd = -1;                   ///< Socket fd for sendmmsg
     };
 
-    /// @brief Intermediate result from EncryptTunPacket — encrypted data + owning session.
+    /** @brief Intermediate result from EncryptTunPacket — encrypted data + owning session. */
     struct EncryptedResult
     {
         std::vector<std::uint8_t> encrypted;

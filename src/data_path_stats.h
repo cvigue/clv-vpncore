@@ -27,7 +27,7 @@ struct DataPathStats
     static constexpr std::size_t kBatchHistBins = 8;
     static constexpr std::size_t kBinWidth = 512;
 
-    /// Compute histogram bin index for a batch size (linear, width=512).
+    /** Compute histogram bin index for a batch size (linear, width=512). */
     static unsigned BatchBin(std::size_t n)
     {
         return static_cast<unsigned>(
@@ -55,7 +55,7 @@ struct DataPathStats
     // --- Routing ---
     std::uint64_t routeLookupMisses = 0;
 
-    /// @brief Record a batch receive (call after each recvmmsg).
+    /** @brief Record a batch receive (call after each recvmmsg). */
     void RecordRecvBatch(std::size_t n, std::size_t batchCapacity)
     {
         batchHist[BatchBin(n)]++;
@@ -63,7 +63,7 @@ struct DataPathStats
             ++batchSaturations;
     }
 
-    /// @brief Record a TUN read batch (call after each readv from TUN).
+    /** @brief Record a TUN read batch (call after each readv from TUN). */
     void RecordTunReadBatch(std::size_t n, std::size_t batchCapacity)
     {
         txBatchHist[BatchBin(n)]++;
@@ -169,9 +169,9 @@ class StatsObserver
     const DataPathStats &source_; ///< Live monotonic counters (single-thread)
     DataPathStats previous_;      ///< Snapshot taken on last Elapsed() call
 
-    /// Per-window RX batch histogram (reset on each Elapsed() call)
+    /** Per-window RX batch histogram (reset on each Elapsed() call) */
     std::array<std::uint64_t, DataPathStats::kBatchHistBins> windowRxBatchHist_{};
-    /// Per-window TX batch histogram (reset on each Elapsed() call)
+    /** Per-window TX batch histogram (reset on each Elapsed() call) */
     std::array<std::uint64_t, DataPathStats::kBatchHistBins> windowTxBatchHist_{};
 };
 

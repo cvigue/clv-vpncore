@@ -31,41 +31,41 @@ struct ClientConnectionConfig
         std::string proto = "udp"; // "udp" or "tcp"
     };
 
-    /// Remote server endpoint
+    /** Remote server endpoint */
     RemoteServer remote;
 
-    /// Device type ("tun" or "tap")
+    /** Device type ("tun" or "tap") */
     std::string dev = "tun";
 
-    /// Device node path (Linux-specific)
+    /** Device node path (Linux-specific) */
     std::string dev_node = "/dev/net/tun";
 
-    /// Cipher algorithm (e.g., "AES-256-GCM")
+    /** Cipher algorithm (e.g., "AES-256-GCM") */
     std::string cipher;
 
-    /// Authentication algorithm (e.g., "SHA256")
+    /** Authentication algorithm (e.g., "SHA256") */
     std::string auth;
 
-    /// TLS cipher suite
+    /** TLS cipher suite */
     std::string tls_cipher;
 
-    /// Connection behavior flags
+    /** Connection behavior flags */
     bool persist_key = true;
     bool persist_tun = true;
     bool nobind = true;
     bool resolv_retry_infinite = true;
 
-    /// Keepalive settings (interval, timeout in seconds)
+    /** Keepalive settings (interval, timeout in seconds) */
     int keepalive_interval = 0;
     int keepalive_timeout = 0;
 
-    /// Renegotiation settings
+    /** Renegotiation settings */
     int reneg_seconds = 0;
 
-    /// Compression algorithm ("lz4-v2", "lz4", "comp-lzo", "")
+    /** Compression algorithm ("lz4-v2", "lz4", "comp-lzo", "") */
     std::string compression;
 
-    /// Logging verbosity (0-11)
+    /** Logging verbosity (0-11) */
     int verbosity = 3;
 
     /**
@@ -83,36 +83,36 @@ struct ClientConnectionConfig
     std::variant<std::monostate, std::string> tls_auth;
     std::variant<std::monostate, std::string> tls_crypt; ///< tls-crypt key content (inline or loaded from file)
 
-    /// Routes to be added
+    /** Routes to be added */
     std::vector<std::string> routes;
 
-    /// DNS servers
+    /** DNS servers */
     std::vector<std::string> dns_servers;
 
-    /// DNS domain
+    /** DNS domain */
     std::string dns_domain;
 
-    /// Whether running in client mode
+    /** Whether running in client mode */
     bool client_mode = true;
 
-    /// Connection timeout (seconds)
+    /** Connection timeout (seconds) */
     int connect_timeout = 120;
 
-    /// Connection retry settings
+    /** Connection retry settings */
     int connect_retry_max = 0; // 0 = infinite
     int connect_retry_delay = 5;
 
-    /// DCO control (OpenVPN 2.6+ enables DCO by default; disable-dco opts out)
+    /** DCO control (OpenVPN 2.6+ enables DCO by default; disable-dco opts out) */
     bool disable_dco = false;
 
-    /// Socket buffer sizes (OpenVPN sndbuf/rcvbuf directives, 0 = not set)
+    /** Socket buffer sizes (OpenVPN sndbuf/rcvbuf directives, 0 = not set) */
     int sndbuf = 0;
     int rcvbuf = 0;
 
-    /// Non-standard: process-quanta <N> (number of packets per batch chunk, 0 = no chunking, -1 = not set)
+    /** Non-standard: process-quanta <N> (number of packets per batch chunk, 0 = no chunking, -1 = not set) */
     int process_quanta = -1;
 
-    /// Non-standard: stats-interval <seconds> (periodic stats log, 0 = disabled, -1 = not set)
+    /** Non-standard: stats-interval <seconds> (periodic stats log, 0 = disabled, -1 = not set) */
     int stats_interval = -1;
 };
 

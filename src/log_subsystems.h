@@ -1,4 +1,5 @@
-#pragma once
+#ifndef CLV_VPN_LOG_SUBSYSTEMS_H
+#define CLV_VPN_LOG_SUBSYSTEMS_H
 
 #include <array>
 #include <memory>
@@ -36,11 +37,13 @@ class SubsystemLoggerManager
   public:
     SubsystemLoggerManager();
 
-    /// Set the default log level for all subsystem loggers that don't have
-    /// a per-subsystem environment variable override.
+    /**
+     * Set the default log level for all subsystem loggers that don't have
+     * a per-subsystem environment variable override.
+     */
     void SetDefaultLevel(spdlog::level::level_enum level);
 
-    /// Set the level for a single subsystem logger.
+    /** Set the level for a single subsystem logger. */
     void SetSubsystemLevel(Subsystem subsystem, spdlog::level::level_enum level);
 
     std::shared_ptr<spdlog::logger> GetLogger(Subsystem subsystem) const
@@ -56,3 +59,5 @@ Subsystem SubsystemFromString(const std::string &name);
 std::string SubsystemToString(Subsystem subsystem);
 
 } // namespace clv::vpn::logging
+
+#endif // CLV_VPN_LOG_SUBSYSTEMS_H

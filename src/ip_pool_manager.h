@@ -157,7 +157,7 @@ class IpPoolManager
     std::size_t PopulateIpv6Pool(const std::string &network_cidr6, bool reserve_gateway,
                                  std::size_t max_clients);
 
-    /// Protected data structure for thread-safe access
+    /** Protected data structure for thread-safe access */
     struct PoolData
     {
         // ----- IPv4 -----

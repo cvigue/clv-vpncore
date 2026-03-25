@@ -120,7 +120,7 @@ inline bool IsKeepalivePing(const std::uint8_t *data, std::size_t len) noexcept
            && std::memcmp(data, KEEPALIVE_PING_PAYLOAD, KEEPALIVE_PING_SIZE) == 0;
 }
 
-/// @overload Accepts a std::span.
+/** @overload Accepts a std::span. */
 inline bool IsKeepalivePing(std::span<const std::uint8_t> buf) noexcept
 {
     return IsKeepalivePing(buf.data(), buf.size());

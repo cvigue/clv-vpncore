@@ -36,16 +36,16 @@ struct PeerEndpoint
     bool operator==(const PeerEndpoint &) const = default;
 };
 
-/// @brief Convert ASIO UDP endpoint to PeerEndpoint.
+/** @brief Convert ASIO UDP endpoint to PeerEndpoint. */
 PeerEndpoint FromAsioEndpoint(const asio::ip::udp::endpoint &ep);
 
-/// @brief Convert ASIO TCP endpoint to PeerEndpoint.
+/** @brief Convert ASIO TCP endpoint to PeerEndpoint. */
 PeerEndpoint FromAsioEndpoint(const asio::ip::tcp::endpoint &ep);
 
-/// @brief Convert PeerEndpoint to ASIO UDP endpoint.
+/** @brief Convert PeerEndpoint to ASIO UDP endpoint. */
 asio::ip::udp::endpoint ToUdpEndpoint(const PeerEndpoint &ep);
 
-/// @brief Convert PeerEndpoint to ASIO TCP endpoint.
+/** @brief Convert PeerEndpoint to ASIO TCP endpoint. */
 asio::ip::tcp::endpoint ToTcpEndpoint(const PeerEndpoint &ep);
 
 // ---------------------------------------------------------------------------
@@ -88,20 +88,22 @@ class UdpTransport
      */
     asio::awaitable<std::vector<std::uint8_t>> Receive();
 
-    /// @brief Get the remote peer identity.
+    /** @brief Get the remote peer identity. */
     PeerEndpoint GetPeer() const;
 
-    /// @brief Access the underlying ASIO socket (e.g., for DcoDataChannel FD extraction).
+    /** @brief Access the underlying ASIO socket (e.g., for DcoDataChannel FD extraction). */
     asio::ip::udp::socket &RawSocket()
     {
         return *socket_;
     }
 
-    /// @brief Apply SO_RCVBUF/SO_SNDBUF (with FORCE fallback) to the socket.
+    /** @brief Apply SO_RCVBUF/SO_SNDBUF (with FORCE fallback) to the socket. */
     void ApplySocketBuffers(int recv_buf, int send_buf, spdlog::logger &logger);
 
-    /// @brief Query actual kernel socket buffer sizes.
-    /// @return {recv_buf, send_buf} as reported by getsockopt.
+    /**
+     * @brief Query actual kernel socket buffer sizes.
+     * @return {recv_buf, send_buf} as reported by getsockopt.
+     */
     std::pair<int, int> GetSocketBufferSizes() const;
 
   private:
@@ -150,13 +152,13 @@ class TcpTransport
      */
     asio::awaitable<std::vector<std::uint8_t>> Receive();
 
-    /// @brief Get the remote peer identity.
+    /** @brief Get the remote peer identity. */
     PeerEndpoint GetPeer() const;
 
-    /// @brief Check if the underlying socket is open.
+    /** @brief Check if the underlying socket is open. */
     bool IsOpen() const;
 
-    /// @brief Close the connection gracefully.
+    /** @brief Close the connection gracefully. */
     void Close();
 
   private:
@@ -178,28 +180,28 @@ struct TransportHandle : std::variant<UdpTransport, TcpTransport>
 {
     using std::variant<UdpTransport, TcpTransport>::variant;
 
-    /// @brief Send data via the underlying transport.
+    /** @brief Send data via the underlying transport. */
     asio::awaitable<void> Send(std::span<const std::uint8_t> data);
 
-    /// @brief Receive one message via the underlying transport.
+    /** @brief Receive one message via the underlying transport. */
     asio::awaitable<std::vector<std::uint8_t>> Receive();
 
-    /// @brief Get the remote peer identity.
+    /** @brief Get the remote peer identity. */
     PeerEndpoint GetPeer() const;
 
-    /// @brief Check if the underlying transport is TCP.
+    /** @brief Check if the underlying transport is TCP. */
     bool IsTcp() const
     {
         return std::holds_alternative<TcpTransport>(*this);
     }
 
-    /// @brief Check if the underlying transport is UDP.
+    /** @brief Check if the underlying transport is UDP. */
     bool IsUdp() const
     {
         return std::holds_alternative<UdpTransport>(*this);
     }
 
-    /// @brief Whether this transport supports batched I/O (sendmmsg/recvmmsg).
+    /** @brief Whether this transport supports batched I/O (sendmmsg/recvmmsg). */
     bool IsBatchingSupported() const
     {
         return IsUdp();

@@ -1,6 +1,7 @@
 // Copyright (c) 2025- Charlie Vigue. All rights reserved.
 
-#pragma once
+#ifndef CLV_VPN_CPU_AFFINITY_H
+#define CLV_VPN_CPU_AFFINITY_H
 
 #include <string>
 
@@ -8,9 +9,9 @@ namespace spdlog {
 class logger;
 }
 
-/// Sentinel: no CPU pinning (default).
+/** Sentinel: no CPU pinning (default). */
 constexpr int kAffinityOff = -1;
-/// Sentinel: auto-pin to the core the scheduler already chose.
+/** Sentinel: auto-pin to the core the scheduler already chose. */
 constexpr int kAffinityAuto = -2;
 
 /**
@@ -41,3 +42,5 @@ int GetCurrentCpu();
  * Used for startup logging.
  */
 std::string AffinityModeString(int value);
+
+#endif // CLV_VPN_CPU_AFFINITY_H

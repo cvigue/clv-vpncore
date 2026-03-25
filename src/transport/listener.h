@@ -52,20 +52,22 @@ class UdpListener
      */
     UdpTransport TransportFor(const PeerEndpoint &ep);
 
-    /// @brief Access the raw ASIO socket (e.g., for DcoDataChannel FD extraction).
+    /** @brief Access the raw ASIO socket (e.g., for DcoDataChannel FD extraction). */
     asio::ip::udp::socket &RawSocket()
     {
         return *socket_;
     }
 
-    /// @brief Apply SO_RCVBUF/SO_SNDBUF (with FORCE fallback) to the socket.
+    /** @brief Apply SO_RCVBUF/SO_SNDBUF (with FORCE fallback) to the socket. */
     void ApplySocketBuffers(int recv_buf, int send_buf, spdlog::logger &logger);
 
-    /// @brief Query actual kernel socket buffer sizes.
-    /// @return {recv_buf, send_buf} as reported by getsockopt.
+    /**
+     * @brief Query actual kernel socket buffer sizes.
+     * @return {recv_buf, send_buf} as reported by getsockopt.
+     */
     std::pair<int, int> GetSocketBufferSizes() const;
 
-    /// @brief Get the local port the listener is bound to.
+    /** @brief Get the local port the listener is bound to. */
     std::uint16_t LocalPort() const
     {
         return socket_->local_endpoint().port();
@@ -102,10 +104,10 @@ class TcpListener
      */
     asio::awaitable<TcpTransport> AcceptNext();
 
-    /// @brief Close the acceptor (cancels pending AcceptNext).
+    /** @brief Close the acceptor (cancels pending AcceptNext). */
     void Close();
 
-    /// @brief Get the local port the listener is bound to.
+    /** @brief Get the local port the listener is bound to. */
     std::uint16_t LocalPort() const
     {
         return acceptor_.local_endpoint().port();
@@ -129,10 +131,10 @@ struct ServerListener : std::variant<UdpListener, TcpListener>
 {
     using std::variant<UdpListener, TcpListener>::variant;
 
-    /// @brief Get the local port the listener is bound to.
+    /** @brief Get the local port the listener is bound to. */
     std::uint16_t LocalPort() const;
 
-    /// @brief Close the underlying listener (cancels pending operations).
+    /** @brief Close the underlying listener (cancels pending operations). */
     void Close();
 };
 

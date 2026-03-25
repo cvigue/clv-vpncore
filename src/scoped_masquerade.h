@@ -15,7 +15,7 @@
 
 namespace clv::vpn {
 
-/// Parsed CIDR for masquerade rule creation (exposed for unit testing)
+/** Parsed CIDR for masquerade rule creation (exposed for unit testing) */
 struct MasqueradeTarget
 {
     std::uint8_t family;                  ///< NfTablesClient::kIPv4 or kIPv6

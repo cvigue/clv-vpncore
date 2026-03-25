@@ -18,7 +18,7 @@ namespace clv::vpn::openvpn {
 /**
  * @brief Configuration option types from config/push directives
  */
-/// Thrown when a config option cannot be parsed or applied.
+/** Thrown when a config option cannot be parsed or applied. */
 struct ConfigParseError : std::runtime_error
 {
     using std::runtime_error::runtime_error;
@@ -60,16 +60,16 @@ enum class ConfigOptionType
  */
 struct ConfigOption
 {
-    /// Type of configuration option
+    /** Type of configuration option */
     ConfigOptionType type = ConfigOptionType::UNKNOWN;
 
-    /// Option arguments (e.g., ["AES-256-GCM"] for cipher)
+    /** Option arguments (e.g., ["AES-256-GCM"] for cipher) */
     std::vector<std::string> args;
 
-    /// Raw unparsed option string (for UNKNOWN types)
+    /** Raw unparsed option string (for UNKNOWN types) */
     std::string raw;
 
-    /// Whether this option should be applied
+    /** Whether this option should be applied */
     bool enabled = true;
 };
 
@@ -85,70 +85,70 @@ struct ConfigOption
  */
 struct NegotiatedConfig
 {
-    /// Data channel cipher algorithm (e.g., "AES-256-GCM")
+    /** Data channel cipher algorithm (e.g., "AES-256-GCM") */
     std::string cipher;
 
-    /// Data channel HMAC algorithm (e.g., "SHA256")
+    /** Data channel HMAC algorithm (e.g., "SHA256") */
     std::string auth;
 
-    /// Compression algorithm ("lz4", "stub-v2", "none")
+    /** Compression algorithm ("lz4", "stub-v2", "none") */
     std::string compress;
 
-    /// Maximum fragment size (0 = disabled)
+    /** Maximum fragment size (0 = disabled) */
     std::uint16_t fragment_size = 0;
 
-    /// MSS fix size (0 = disabled)
+    /** MSS fix size (0 = disabled) */
     std::uint16_t mssfix = 0;
 
-    /// Routes to add on client (network, gateway, metric)
+    /** Routes to add on client (network, gateway, metric) */
     std::vector<std::tuple<std::string, std::string, int>> routes;
 
-    /// IPv6 routes (network/mask, gateway, metric)
+    /** IPv6 routes (network/mask, gateway, metric) */
     std::vector<std::tuple<std::string, std::string, int>> routes_ipv6;
 
-    /// DHCP options (type, value pairs)
+    /** DHCP options (type, value pairs) */
     std::vector<std::pair<std::string, std::string>> dhcp_options;
 
-    /// Redirect gateway flags
+    /** Redirect gateway flags */
     std::string redirect_gateway;
 
-    /// Route gateway IP (from route-gateway directive)
+    /** Route gateway IP (from route-gateway directive) */
     std::string route_gateway;
 
-    /// Network topology (subnet, p2p, net30)
+    /** Network topology (subnet, p2p, net30) */
     std::string topology;
 
-    /// Interface local and remote IPs (P2P mode)
+    /** Interface local and remote IPs (P2P mode) */
     std::pair<std::string, std::string> ifconfig;
 
-    /// IPv6 interface config (local, prefix)
+    /** IPv6 interface config (local, prefix) */
     std::pair<std::string, int> ifconfig_ipv6;
 
-    /// Inactive timeout in seconds (0 = disabled)
+    /** Inactive timeout in seconds (0 = disabled) */
     std::uint32_t inactive_timeout = 0;
 
-    /// Renegotiate after N bytes (0 = disabled)
+    /** Renegotiate after N bytes (0 = disabled) */
     std::uint64_t reneg_bytes = 0;
 
-    /// Renegotiate after N packets (0 = disabled)
+    /** Renegotiate after N packets (0 = disabled) */
     std::uint64_t reneg_packets = 0;
 
-    /// Renegotiate after N seconds (0 = disabled, default 3600)
+    /** Renegotiate after N seconds (0 = disabled, default 3600) */
     std::uint32_t reneg_sec = 3600;
 
-    /// Register DNS on Windows
+    /** Register DNS on Windows */
     bool register_dns = false;
 
-    /// Server-assigned peer ID for DATA_V2 packets (-1 = not assigned)
+    /** Server-assigned peer ID for DATA_V2 packets (-1 = not assigned) */
     std::int32_t peer_id = -1;
 
-    /// Keepalive ping interval in seconds (0 = disabled)
+    /** Keepalive ping interval in seconds (0 = disabled) */
     std::uint32_t ping_interval = 0;
 
-    /// Ping restart timeout in seconds (0 = disabled)
+    /** Ping restart timeout in seconds (0 = disabled) */
     std::uint32_t ping_restart = 0;
 
-    /// TUN MTU (0 = use default)
+    /** TUN MTU (0 = use default) */
     std::uint16_t tun_mtu = 0;
 };
 
@@ -156,15 +156,19 @@ struct NegotiatedConfig
 // Table-driven option registry
 // ---------------------------------------------------------------------------
 
-/// Signature for applying parsed args to a NegotiatedConfig.
-/// Throws ConfigParseError on bad input.
+/**
+ * Signature for applying parsed args to a NegotiatedConfig.
+ * Throws ConfigParseError on bad input.
+ */
 using ApplyFn = void (*)(NegotiatedConfig &, const std::vector<std::string> &args);
 
-/// Signature for emitting a field from NegotiatedConfig into a PUSH_REPLY fragment.
-/// Returns an empty string when the field is at its default.
+/**
+ * Signature for emitting a field from NegotiatedConfig into a PUSH_REPLY fragment.
+ * Returns an empty string when the field is at its default.
+ */
 using EmitFn = std::string (*)(const NegotiatedConfig &);
 
-/// How ParseOption reads arguments after the keyword.
+/** How ParseOption reads arguments after the keyword. */
 enum class ArgMode
 {
     SINGLE, ///< Read one whitespace-delimited token
@@ -174,7 +178,7 @@ enum class ArgMode
     NONE,   ///< No arguments (flag)
 };
 
-/// One row in the option table.
+/** One row in the option table. */
 struct OptionSpec
 {
     std::string_view keyword; ///< Wire keyword (e.g. "cipher")
@@ -184,8 +188,10 @@ struct OptionSpec
     EmitFn emit;              ///< Serialize field from NegotiatedConfig
 };
 
-/// The global option table — one entry per recognized keyword, searched linearly.
-/// Defined in config_exchange.cpp.
+/**
+ * The global option table — one entry per recognized keyword, searched linearly.
+ * Defined in config_exchange.cpp.
+ */
 std::span<const OptionSpec> GetOptionTable();
 
 /**
@@ -204,13 +210,13 @@ std::span<const OptionSpec> GetOptionTable();
 class ConfigExchange
 {
   public:
-    /// Maximum number of configuration options to accept
+    /** Maximum number of configuration options to accept */
     static constexpr int MAX_CONFIG_OPTIONS = 128;
 
-    /// Maximum length of a single option string
+    /** Maximum length of a single option string */
     static constexpr int MAX_OPTION_LENGTH = 512;
 
-    /// Timeout waiting for PUSH_REPLY (milliseconds)
+    /** Timeout waiting for PUSH_REPLY (milliseconds) */
     static constexpr int PUSH_REPLY_TIMEOUT = 5000;
 
     ConfigExchange() = default;
@@ -322,19 +328,19 @@ class ConfigExchange
     void Reset();
 
   private:
-    /// Whether configuration is complete and applied
+    /** Whether configuration is complete and applied */
     bool configured_ = false;
 
-    /// Whether waiting for server's PUSH_REPLY
+    /** Whether waiting for server's PUSH_REPLY */
     bool push_pending_ = false;
 
-    /// Server-provided configuration options
+    /** Server-provided configuration options */
     std::vector<ConfigOption> received_options_;
 
-    /// Client-provided configuration options
+    /** Client-provided configuration options */
     std::vector<ConfigOption> local_options_;
 
-    /// Merged negotiated configuration
+    /** Merged negotiated configuration */
     NegotiatedConfig negotiated_config_;
 
     /**
@@ -343,13 +349,13 @@ class ConfigExchange
      */
     std::optional<ConfigOption> ParseOption(const std::string &option_str);
 
-    /// Apply a configuration option to negotiated_config_
+    /** Apply a configuration option to negotiated_config_ */
     void ApplyOption(const ConfigOption &option);
 
-    /// Merge server and client options according to priority rules
+    /** Merge server and client options according to priority rules */
     void MergeOptions();
 
-    /// Validate cipher/auth combination for compatibility
+    /** Validate cipher/auth combination for compatibility */
     bool ValidateAlgorithms(bool strict = true);
 };
 

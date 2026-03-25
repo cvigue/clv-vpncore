@@ -177,10 +177,10 @@ class KeyDerivation
                                              std::string_view cipher_name);
 
   private:
-    /// Size of HMAC-SHA256 output (32 bytes)
+    /** Size of HMAC-SHA256 output (32 bytes) */
     static constexpr size_t PRF_OUTPUT_SIZE = 32;
 
-    /// Label used for OpenVPN key material derivation
+    /** Label used for OpenVPN key material derivation */
     static constexpr const char *OPENVPN_KEY_LABEL = "OpenVPN key material";
 
     /**

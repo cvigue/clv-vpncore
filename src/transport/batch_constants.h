@@ -16,19 +16,23 @@ namespace clv::vpn::transport {
  */
 inline constexpr std::size_t kMaxBatchSize = 4096;
 
-/// Default runtime batch size when not specified in config.
+/** Default runtime batch size when not specified in config. */
 inline constexpr std::size_t kDefaultBatchSize = 4096;
 
-/// Maximum UDP datagram size (matches OpenVPN practical limit).
+/** Maximum UDP datagram size (matches OpenVPN practical limit). */
 inline constexpr std::size_t kMaxDatagram = 2048;
 
-/// Default packets processed per event-loop yield in the receive loop.
-/// A value of 0 disables chunking — the entire batch is processed before yielding.
+/**
+ * Default packets processed per event-loop yield in the receive loop.
+ * A value of 0 disables chunking — the entire batch is processed before yielding.
+ */
 inline constexpr std::size_t kDefaultProcessQuanta = 128;
 
-/// Compute the effective batch size from a raw config value.
-/// Returns the configured value clamped to kMaxBatchSize,
-/// or kDefaultBatchSize if the value is 0 or negative.
+/**
+ * Compute the effective batch size from a raw config value.
+ * Returns the configured value clamped to kMaxBatchSize,
+ * or kDefaultBatchSize if the value is 0 or negative.
+ */
 inline std::size_t EffectiveBatchSize(int configValue)
 {
     if (configValue <= 0)

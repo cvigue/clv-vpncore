@@ -37,37 +37,37 @@ namespace clv::vpn::openvpn {
  */
 struct AckTracker
 {
-    /// Initial retransmission timeout; backed off exponentially per attempt
+    /** Initial retransmission timeout; backed off exponentially per attempt */
     static constexpr auto INITIAL_RTO = std::chrono::milliseconds(500);
 
-    /// Maximum retransmission timeout cap
+    /** Maximum retransmission timeout cap */
     static constexpr auto MAX_RTO = std::chrono::milliseconds(8000);
 
-    /// Maximum number of retransmission attempts
+    /** Maximum number of retransmission attempts */
     static constexpr int MAX_RETRANSMIT_ATTEMPTS = 64;
 
-    /// Construct a tracker for an outbound packet
+    /** Construct a tracker for an outbound packet */
     AckTracker(std::uint32_t packet_id, std::span<const std::uint8_t> data)
         : packet_id_(packet_id), packet_data_(data.begin(), data.end()), sent_at_(std::chrono::steady_clock::now())
     {
     }
 
-    /// Default constructor for map operations
+    /** Default constructor for map operations */
     AckTracker() = default;
 
-    /// Packet sequence ID for retransmission tracking
+    /** Packet sequence ID for retransmission tracking */
     std::uint32_t packet_id_ = 0;
 
-    /// Serialized packet data to retransmit
+    /** Serialized packet data to retransmit */
     std::vector<std::uint8_t> packet_data_;
 
-    /// Time packet was sent (for timeout calculation)
+    /** Time packet was sent (for timeout calculation) */
     std::chrono::steady_clock::time_point sent_at_{};
 
-    /// Number of retransmission attempts so far
+    /** Number of retransmission attempts so far */
     int retransmit_count_ = 0;
 
-    /// Whether this packet has been ACKed
+    /** Whether this packet has been ACKed */
     bool acknowledged_ = false;
 
     /**
@@ -119,7 +119,7 @@ struct AckTracker
 class ControlChannel
 {
   public:
-    /// State of the control channel handshake
+    /** State of the control channel handshake */
     enum class State
     {
         Disconnected,     ///< Initial state, not connected
@@ -364,28 +364,28 @@ class ControlChannel
     }
 
   private:
-    /// Current handshake state
+    /** Current handshake state */
     State state_ = State::Disconnected;
 
-    /// Session ID for this connection (our own session ID)
+    /** Session ID for this connection (our own session ID) */
     SessionId session_id_{};
 
-    /// Peer's session ID (received from remote)
+    /** Peer's session ID (received from remote) */
     std::optional<SessionId> peer_session_id_;
 
-    /// TLS context for handshake
+    /** TLS context for handshake */
     std::optional<TlsContext> tls_context_;
 
-    /// Current TLS key index (0-7)
+    /** Current TLS key index (0-7) */
     std::uint8_t key_id_ = 0;
 
-    /// Outbound packet sequencing (starts at 0 per OpenVPN protocol)
+    /** Outbound packet sequencing (starts at 0 per OpenVPN protocol) */
     std::uint32_t outbound_packet_id_ = 0;
 
-    /// Last received packet ID (for anti-replay), UINT32_MAX means none received yet
+    /** Last received packet ID (for anti-replay), UINT32_MAX means none received yet */
     std::uint32_t last_received_packet_id_ = UINT32_MAX;
 
-    /// Pending outbound ACKs (packet IDs to acknowledge)
+    /** Pending outbound ACKs (packet IDs to acknowledge) */
     std::deque<std::uint32_t> pending_acks_;
 
     /**
@@ -401,37 +401,37 @@ class ControlChannel
      */
     std::deque<std::uint32_t> reack_candidates_;
 
-    /// Tracking for unacknowledged outbound packets
+    /** Tracking for unacknowledged outbound packets */
     std::unordered_map<std::uint32_t, AckTracker> unacked_packets_;
 
-    /// TLS handshake buffer (accumulates TLS records)
+    /** TLS handshake buffer (accumulates TLS records) */
     std::vector<std::uint8_t> tls_buffer_;
 
-    /// Whether we initiated the connection (client) vs received it (server)
+    /** Whether we initiated the connection (client) vs received it (server) */
     bool is_client_ = false;
 
-    /// Queue of pending fragments to send (for send window control)
+    /** Queue of pending fragments to send (for send window control) */
     std::deque<std::vector<std::uint8_t>> pending_fragments_;
 
-    /// Buffer for received decrypted plaintext (post-handshake app data)
+    /** Buffer for received decrypted plaintext (post-handshake app data) */
     std::vector<std::uint8_t> received_plaintext_;
 
-    /// Maximum number of unacknowledged packets allowed (send window size)
+    /** Maximum number of unacknowledged packets allowed (send window size) */
     static constexpr size_t MAX_SEND_WINDOW = 4;
 
-    /// Structured logger (never null)
+    /** Structured logger (never null) */
     clv::not_null<spdlog::logger *> logger_;
 
-    /// Helper: Send a hard reset packet
+    /** Helper: Send a hard reset packet */
     std::vector<std::uint8_t> SendHardReset(std::uint8_t key_id, bool is_client);
 
-    /// Helper: Mark packet as pending ACK
+    /** Helper: Mark packet as pending ACK */
     void TrackOutboundPacket(std::uint32_t packet_id, std::span<const std::uint8_t> data);
 
-    /// Helper: Check anti-replay (ensure packet_id > last_received_packet_id)
+    /** Helper: Check anti-replay (ensure packet_id > last_received_packet_id) */
     bool ValidatePacketId(std::uint32_t packet_id);
 
-    /// Helper: Count unacknowledged packets
+    /** Helper: Count unacknowledged packets */
     size_t CountUnacknowledgedPackets() const;
 
     /**
@@ -441,13 +441,13 @@ class ControlChannel
      */
     std::vector<std::uint32_t> CollectAcksForPiggyback();
 
-    /// Helper: Record which ACKs were sent on a given packet_id
+    /** Helper: Record which ACKs were sent on a given packet_id */
     void RecordInFlightAcks(std::uint32_t packet_id, std::span<const std::uint32_t> acks);
 
-    /// Helper: Called when our packet is acknowledged - removes from in_flight_acks_
+    /** Helper: Called when our packet is acknowledged - removes from in_flight_acks_ */
     void ClearInFlightAcks(std::uint32_t packet_id);
 
-    /// Helper: Called when our packet times out - moves ACKs to reack_candidates_
+    /** Helper: Called when our packet times out - moves ACKs to reack_candidates_ */
     void RescueInFlightAcks(std::uint32_t packet_id);
 
     /**

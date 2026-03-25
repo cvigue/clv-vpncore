@@ -18,7 +18,7 @@ namespace clv::vpn {
  */
 struct ClientOptions
 {
-    /// Client identifier (used in comments/logs)
+    /** Client identifier (used in comments/logs) */
     std::string client_name;
 
     /**
@@ -27,31 +27,31 @@ struct ClientOptions
      */
     bool embed_certificates = true;
 
-    /// Include tls-auth directive and key material
+    /** Include tls-auth directive and key material */
     bool include_tls_auth = false;
 
-    /// Path to client certificate (if different from auto-generated)
+    /** Path to client certificate (if different from auto-generated) */
     std::optional<std::filesystem::path> client_cert;
 
-    /// Path to client private key
+    /** Path to client private key */
     std::optional<std::filesystem::path> client_key;
 
-    /// Path to TLS-auth key file (ta.key)
+    /** Path to TLS-auth key file (ta.key) */
     std::optional<std::filesystem::path> tls_auth_key;
 
-    /// Additional routes to push to this specific client
+    /** Additional routes to push to this specific client */
     std::vector<std::string> extra_routes;
 
-    /// Custom DNS servers for this client (overrides server defaults)
+    /** Custom DNS servers for this client (overrides server defaults) */
     std::vector<std::string> custom_dns;
 
-    /// Remote server hostname/IP (overrides server config if set)
+    /** Remote server hostname/IP (overrides server config if set) */
     std::optional<std::string> remote_host;
 
-    /// Enable LZO compression
+    /** Enable LZO compression */
     bool enable_compression = false;
 
-    /// Client verbosity level (0-11)
+    /** Client verbosity level (0-11) */
     int verbosity = 3;
 };
 

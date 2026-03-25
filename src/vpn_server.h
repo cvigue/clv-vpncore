@@ -109,7 +109,7 @@ class VpnServer
     }
 
   private:
-    /// @brief Convenience accessor returning the current batch depth.
+    /** @brief Convenience accessor returning the current batch depth. */
     std::size_t EffectiveBatchSize() const
     {
         return currentBatchSize_;

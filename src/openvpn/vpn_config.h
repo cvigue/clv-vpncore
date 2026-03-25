@@ -136,7 +136,7 @@ struct VpnConfig
     struct LoggingConfig
     {
         std::string verbosity = "info"; ///< spdlog level name or numeric (0=trace..6=off)
-        /// Per-subsystem level overrides. Key = subsystem name, value = spdlog level.
+        /** Per-subsystem level overrides. Key = subsystem name, value = spdlog level. */
         std::unordered_map<std::string, std::string> subsystem_levels;
     } logging;
 
@@ -166,10 +166,10 @@ class VpnConfigParser
     static VpnConfig ParseString(const std::string &jsonString);
     static VpnConfig ParseJson(const nlohmann::json &json);
 
-    /// Validate server-role config for required fields and consistency.
+    /** Validate server-role config for required fields and consistency. */
     static void ValidateServer(const VpnConfig &config, std::shared_ptr<spdlog::logger> logger = nullptr);
 
-    /// Validate client-role config for required fields.
+    /** Validate client-role config for required fields. */
     static void ValidateClient(const VpnConfig &config, std::shared_ptr<spdlog::logger> logger = nullptr);
 
   private:

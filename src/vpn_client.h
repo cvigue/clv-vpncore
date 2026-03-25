@@ -52,16 +52,16 @@ class SslHandshakeContext;
  */
 struct VpnClientConfig
 {
-    /// Parse client configuration from a JSON object.
+    /** Parse client configuration from a JSON object. */
     static VpnConfig ParseJson(const nlohmann::json &json);
 
-    /// Load configuration from JSON file.
+    /** Load configuration from JSON file. */
     static VpnConfig LoadFromFile(const std::string &path);
 
-    /// Load configuration from .ovpn file.
+    /** Load configuration from .ovpn file. */
     static VpnConfig LoadFromOvpnFile(const std::string &path);
 
-    /// Auto-detect format (.ovpn vs JSON) and load.
+    /** Auto-detect format (.ovpn vs JSON) and load. */
     static VpnConfig Load(const std::string &path);
 };
 
@@ -138,7 +138,7 @@ class VpnClient
     VpnClient(VpnClient &&) noexcept = delete;
     VpnClient &operator=(VpnClient &&) noexcept = delete;
 
-    /// Callback type for state changes: (old_state, new_state).
+    /** Callback type for state changes: (old_state, new_state). */
     using StateCallback = std::function<void(VpnClientState, VpnClientState)>;
 
     /**
@@ -485,7 +485,7 @@ class VpnClient
      */
     void SetState(VpnClientState new_state);
 
-    /// User-registered state-change callback (may be empty).
+    /** User-registered state-change callback (may be empty). */
     StateCallback state_callback_;
 
     /**
@@ -535,9 +535,11 @@ class VpnClient
     StatsObserver stats_observer_{stats_}; ///< Windowed stats for histograms
     std::chrono::steady_clock::time_point connected_at_;
 
-    /// Time of last packet received from the server (any opcode).  Used by
-    /// KeepaliveLoop to detect a silent server in userspace mode (DCO relies
-    /// on kernel netlink notifications instead).
+    /**
+     * Time of last packet received from the server (any opcode).  Used by
+     * KeepaliveLoop to detect a silent server in userspace mode (DCO relies
+     * on kernel netlink notifications instead).
+     */
     std::chrono::steady_clock::time_point last_rx_time_;
 
     // ---- Performance / zero-copy data path ----
@@ -560,9 +562,11 @@ class VpnClient
     std::size_t currentBatchSize_ = 0; ///< Runtime batch depth
     std::size_t processQuanta_ = 0;    ///< Packets per event-loop yield
 
-    /// Timers used by StatsLoop, KeepaliveLoop and the handshake retransmit
-    /// loop.  Stored as members so Disconnect() can cancel them, matching the
-    /// server's shutdown pattern.
+    /**
+     * Timers used by StatsLoop, KeepaliveLoop and the handshake retransmit
+     * loop.  Stored as members so Disconnect() can cancel them, matching the
+     * server's shutdown pattern.
+     */
     asio::steady_timer stats_timer_{io_context_};
     asio::steady_timer keepalive_timer_{io_context_};
     asio::steady_timer handshake_timer_{io_context_};
@@ -645,13 +649,13 @@ class VpnClient
         bool IsDco() const;
     };
 
-    /// Check if the active strategy is DCO.
+    /** Check if the active strategy is DCO. */
     bool IsDco() const
     {
         return data_channel_strategy_ && data_channel_strategy_->IsDco();
     }
 
-    /// Access the DcoDataPath (only valid when IsDco() is true).
+    /** Access the DcoDataPath (only valid when IsDco() is true). */
     DcoDataPath &Dco()
     {
         return std::get<DcoDataPath>(*data_channel_strategy_);

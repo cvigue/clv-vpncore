@@ -1,4 +1,5 @@
-#pragma once
+#ifndef CLV_VPN_OPENVPN_TLS_CRYPT_H
+#define CLV_VPN_OPENVPN_TLS_CRYPT_H
 
 #include <not_null.h>
 
@@ -90,8 +91,10 @@ class TlsCrypt
     std::uint64_t tls_crypt_packet_id_send_{0}; ///< TLS-Crypt wrapper packet ID for sending (8-byte: timestamp + counter)
     clv::not_null<spdlog::logger *> logger_;    ///< Logger for debug output (never null)
 
-    /// Per-session replay protection: maps session_id to last received packet_id
+    /** Per-session replay protection: maps session_id to last received packet_id */
     std::unordered_map<std::uint64_t, std::uint64_t> session_packet_ids_;
 };
 
 } // namespace clv::vpn::openvpn
+
+#endif // CLV_VPN_OPENVPN_TLS_CRYPT_H

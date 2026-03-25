@@ -147,12 +147,12 @@ class DcoDataChannel
     { /* no-op in DCO mode */
     }
 
-    /// @brief No-op — DCO handles batching in kernel.
+    /** @brief No-op — DCO handles batching in kernel. */
     void SetBatchSize(std::size_t)
     { /* no-op */
     }
 
-    /// @brief DCO doesn't have a userspace batch size — returns 0.
+    /** @brief DCO doesn't have a userspace batch size — returns 0. */
     std::size_t GetBatchSize() const
     {
         return 0;

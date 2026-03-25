@@ -46,52 +46,52 @@ class PacketArena
     {
     }
 
-    /// Pointer to the start of slot i
+    /** Pointer to the start of slot i */
     [[nodiscard]] std::uint8_t *Slot(std::size_t i) noexcept
     {
         assert(i < batch_size_);
         return arena_.data() + (i * slot_size_);
     }
 
-    /// Const pointer to the start of slot i
+    /** Const pointer to the start of slot i */
     [[nodiscard]] const std::uint8_t *Slot(std::size_t i) const noexcept
     {
         assert(i < batch_size_);
         return arena_.data() + (i * slot_size_);
     }
 
-    /// Span over the full slot i
+    /** Span over the full slot i */
     [[nodiscard]] std::span<std::uint8_t> SlotSpan(std::size_t i) noexcept
     {
         return {Slot(i), slot_size_};
     }
 
-    /// Span over a portion of slot i (e.g., for a received datagram of known length)
+    /** Span over a portion of slot i (e.g., for a received datagram of known length) */
     [[nodiscard]] std::span<std::uint8_t> SlotSpan(std::size_t i, std::size_t len) noexcept
     {
         assert(len <= slot_size_);
         return {Slot(i), len};
     }
 
-    /// Number of slots in the arena
+    /** Number of slots in the arena */
     [[nodiscard]] std::size_t BatchSize() const noexcept
     {
         return batch_size_;
     }
 
-    /// Size of each slot in bytes
+    /** Size of each slot in bytes */
     [[nodiscard]] std::size_t SlotSize() const noexcept
     {
         return slot_size_;
     }
 
-    /// Raw pointer to the contiguous arena memory
+    /** Raw pointer to the contiguous arena memory */
     [[nodiscard]] std::uint8_t *Data() noexcept
     {
         return arena_.data();
     }
 
-    /// Total arena size in bytes
+    /** Total arena size in bytes */
     [[nodiscard]] std::size_t TotalSize() const noexcept
     {
         return arena_.size();

@@ -15,7 +15,7 @@ namespace clv::vpn::transport {
 // Batched receive — zero-copy recvmmsg(2) into caller-provided buffers
 // ---------------------------------------------------------------------------
 
-/// @brief Slot for zero-copy batch receive.
+/** @brief Slot for zero-copy batch receive. */
 struct IncomingSlot
 {
     std::uint8_t *buf;        ///< Writable destination buffer
@@ -43,7 +43,7 @@ std::size_t RecvBatch(int fd, std::span<IncomingSlot> slots);
 // Batched send — sendmmsg(2) wrapper
 // ---------------------------------------------------------------------------
 
-/// @brief Entry for batched sending: payload + destination endpoint.
+/** @brief Entry for batched sending: payload + destination endpoint. */
 struct SendEntry
 {
     std::span<const std::uint8_t> data; ///< Packet payload (caller retains ownership)

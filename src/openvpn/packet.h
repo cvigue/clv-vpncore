@@ -178,7 +178,7 @@ constexpr bool IsAck(Opcode opcode)
  */
 struct OpenVpnPacket
 {
-    /// Maximum number of ACKs per packet (standard OpenVPN limit)
+    /** Maximum number of ACKs per packet (standard OpenVPN limit) */
     static constexpr std::uint8_t MAX_ACK_COUNT = 8;
     Opcode opcode_;                                  ///< Packet type
     std::uint8_t key_id_;                            ///< Key slot (0-7)
@@ -308,43 +308,43 @@ struct OpenVpnPacket
 
     // ========== Opcode Query Methods ==========
 
-    /// Check if this is a control channel packet
+    /** Check if this is a control channel packet */
     constexpr bool IsControl() const
     {
         return IsControlPacket(opcode_);
     }
 
-    /// Check if this is a data channel packet
+    /** Check if this is a data channel packet */
     constexpr bool IsData() const
     {
         return IsDataPacket(opcode_);
     }
 
-    /// Check if this is any hard reset (client or server, any version)
+    /** Check if this is any hard reset (client or server, any version) */
     constexpr bool IsHardReset() const
     {
         return openvpn::IsHardReset(opcode_);
     }
 
-    /// Check if this is a client hard reset (V1, V2, or V3)
+    /** Check if this is a client hard reset (V1, V2, or V3) */
     constexpr bool IsHardResetClient() const
     {
         return openvpn::IsHardResetClient(opcode_);
     }
 
-    /// Check if this is a server hard reset (V1, V2, or V3)
+    /** Check if this is a server hard reset (V1, V2, or V3) */
     constexpr bool IsHardResetServer() const
     {
         return openvpn::IsHardResetServer(opcode_);
     }
 
-    /// Check if this is a soft reset
+    /** Check if this is a soft reset */
     constexpr bool IsSoftReset() const
     {
         return openvpn::IsSoftReset(opcode_);
     }
 
-    /// Check if this is an ACK packet
+    /** Check if this is an ACK packet */
     constexpr bool IsAck() const
     {
         return openvpn::IsAck(opcode_);

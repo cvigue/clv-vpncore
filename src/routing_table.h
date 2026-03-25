@@ -157,10 +157,10 @@ class RoutingTable
     std::map<RouteKey, std::uint64_t> routes_;
 };
 
-/// IPv4 routing table (host-byte-order uint32_t addresses, /0–/32)
+/** IPv4 routing table (host-byte-order uint32_t addresses, /0–/32) */
 using RoutingTableIpv4 = RoutingTable<Ipv4RoutingTraits>;
 
-/// IPv6 routing table (network-byte-order 16-byte addresses, /0–/128)
+/** IPv6 routing table (network-byte-order 16-byte addresses, /0–/128) */
 using RoutingTableIpv6 = RoutingTable<Ipv6RoutingTraits>;
 
 } // namespace clv::vpn

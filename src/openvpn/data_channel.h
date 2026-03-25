@@ -29,16 +29,16 @@ namespace clv::vpn::openvpn {
 // P_DATA_V2 AEAD wire format constants
 // ============================================================================
 
-/// P_DATA_V2 header: [opcode/key_id (1)] [peer_id (3)] = 4 bytes
+/** P_DATA_V2 header: [opcode/key_id (1)] [peer_id (3)] = 4 bytes */
 constexpr std::size_t kDataV2HeaderLen = 4;
 
-/// Packet ID field: 4 bytes big-endian
+/** Packet ID field: 4 bytes big-endian */
 constexpr std::size_t kDataV2PacketIdLen = 4;
 
-/// AEAD authentication tag: 16 bytes
+/** AEAD authentication tag: 16 bytes */
 constexpr std::size_t kDataV2TagLen = AEAD_TAG_SIZE;
 
-/// Total overhead before ciphertext: header + packet_id + tag = 24 bytes
+/** Total overhead before ciphertext: header + packet_id + tag = 24 bytes */
 constexpr std::size_t kDataV2Overhead = kDataV2HeaderLen + kDataV2PacketIdLen + kDataV2TagLen;
 
 /**
@@ -49,25 +49,25 @@ constexpr std::size_t kDataV2Overhead = kDataV2HeaderLen + kDataV2PacketIdLen + 
  */
 struct EncryptionKey
 {
-    /// Cipher to use for this key
+    /** Cipher to use for this key */
     CipherAlgorithm cipher_algorithm = CipherAlgorithm::NONE;
 
-    /// HMAC algorithm for packet authentication (tls-auth)
+    /** HMAC algorithm for packet authentication (tls-auth) */
     HmacAlgorithm hmac_algorithm = HmacAlgorithm::NONE;
 
-    /// Encryption key material (length depends on cipher)
+    /** Encryption key material (length depends on cipher) */
     std::vector<std::uint8_t> cipher_key;
 
-    /// IV (initialization vector) for CBC modes, or salt for AEAD
+    /** IV (initialization vector) for CBC modes, or salt for AEAD */
     std::vector<std::uint8_t> cipher_iv;
 
-    /// HMAC key material (length depends on HMAC algorithm)
+    /** HMAC key material (length depends on HMAC algorithm) */
     std::vector<std::uint8_t> hmac_key;
 
-    /// Whether this key slot is active and ready to use
+    /** Whether this key slot is active and ready to use */
     bool is_valid = false;
 
-    /// The key_id associated with this key (0-7, from TLS renegotiation)
+    /** The key_id associated with this key (0-7, from TLS renegotiation) */
     std::uint8_t key_id = 0;
 
     /**
@@ -102,7 +102,7 @@ class ReplayWindow
     static constexpr std::size_t kWords = 32;
     static constexpr std::size_t kBits = kWords * 64;
 
-    /// Result of checking a packet ID against the window.
+    /** Result of checking a packet ID against the window. */
     enum class CheckResult
     {
         Accept,   ///< Packet ID not seen before — proceed to decrypt
@@ -110,7 +110,7 @@ class ReplayWindow
         Duplicate ///< Packet ID was already seen (replay)
     };
 
-    /// Check whether a packet ID should be accepted (pre-decrypt).
+    /** Check whether a packet ID should be accepted (pre-decrypt). */
     [[nodiscard]] CheckResult Check(std::uint32_t pkt_id) const noexcept
     {
         if (pkt_id > highest_id_)
@@ -123,7 +123,7 @@ class ReplayWindow
         return CheckResult::Accept;
     }
 
-    /// Record a successfully-decrypted packet ID (post-decrypt).
+    /** Record a successfully-decrypted packet ID (post-decrypt). */
     void Accept(std::uint32_t pkt_id) noexcept
     {
         if (pkt_id > highest_id_)
@@ -137,7 +137,7 @@ class ReplayWindow
         }
     }
 
-    /// Reset all state (new key install).
+    /** Reset all state (new key install). */
     void Reset() noexcept
     {
         highest_id_ = 0;
@@ -229,7 +229,7 @@ struct DecryptKeySlot
 
     std::optional<std::chrono::steady_clock::time_point> expiry; // nullopt = primary
 
-    /// Persistent AEAD decrypt context (nonce-only updates per packet; nullopt until key install)
+    /** Persistent AEAD decrypt context (nonce-only updates per packet; nullopt until key install) */
     std::optional<OpenSSL::SslCipherCtx> decrypt_ctx;
 };
 
@@ -429,20 +429,20 @@ class DataChannel
     void CleanupExpiredKeys();
 
   private:
-    /// Primary decryption key with anti-replay state
+    /** Primary decryption key with anti-replay state */
     DecryptKeySlot primary_decrypt_;
 
-    /// Primary encryption key (never lame ducked, simpler)
+    /** Primary encryption key (never lame ducked, simpler) */
     EncryptionKey primary_encrypt_;
 
-    /// Lame duck decryption key (old key kept for transition, includes expiry)
+    /** Lame duck decryption key (old key kept for transition, includes expiry) */
     std::optional<DecryptKeySlot> lame_duck_decrypt_;
 
-    /// Persistent AEAD encrypt context (nonce-only updates per packet; nullopt until key install)
+    /** Persistent AEAD encrypt context (nonce-only updates per packet; nullopt until key install) */
     std::optional<OpenSSL::SslCipherCtx> encrypt_ctx_;
 
 
-    /// Current key_id for outbound packets (0-7, increments on renegotiation)
+    /** Current key_id for outbound packets (0-7, increments on renegotiation) */
     std::uint8_t current_key_id_ = 0;
 
     /**
@@ -452,27 +452,27 @@ class DataChannel
      */
     bool dco_keys_installed_ = false;
 
-    /// Outbound packet ID counter
+    /** Outbound packet ID counter */
     std::uint32_t outbound_packet_id_ = 1;
 
-    /// Counter of replayed packets for statistics
+    /** Counter of replayed packets for statistics */
     std::uint64_t replayed_packets_ = 0;
 
-    /// Logger for debug output (never null)
+    /** Logger for debug output (never null) */
     clv::not_null<spdlog::logger *> logger_;
 
-    /// Rate limiters for hot-path warnings (avoid log flooding)
+    /** Rate limiters for hot-path warnings (avoid log flooding) */
     RateLimiter no_key_limiter_;
     RateLimiter too_old_limiter_;
 
-    /// Helper: Generate IV/nonce for encryption
+    /** Helper: Generate IV/nonce for encryption */
     std::array<std::uint8_t, 12> GenerateNonce(std::uint32_t packet_id, const EncryptionKey &key);
 
-    /// Helper: Compute HMAC-SHA256 for packet authentication
+    /** Helper: Compute HMAC-SHA256 for packet authentication */
     std::vector<std::uint8_t> ComputeHmac(const EncryptionKey &key,
                                           std::span<const std::uint8_t> packet_data);
 
-    /// Helper: Verify HMAC against expected value
+    /** Helper: Verify HMAC against expected value */
     bool VerifyHmac(const EncryptionKey &key, std::span<const std::uint8_t> packet_data,
                     std::span<const std::uint8_t> expected_hmac);
 };

@@ -17,14 +17,14 @@ namespace clv::vpn {
 // Policy structs — each one provides a proc path and a human-readable label.
 // ---------------------------------------------------------------------------
 
-/// @brief Policy for IPv4 forwarding (/proc/sys/net/ipv4/ip_forward).
+/** @brief Policy for IPv4 forwarding (/proc/sys/net/ipv4/ip_forward). */
 struct Ipv4ForwardPolicy
 {
     static constexpr const char *proc_path = "/proc/sys/net/ipv4/ip_forward";
     static constexpr const char *label = "IPv4 forwarding";
 };
 
-/// @brief Policy for IPv6 forwarding (/proc/sys/net/ipv6/conf/all/forwarding).
+/** @brief Policy for IPv6 forwarding (/proc/sys/net/ipv6/conf/all/forwarding). */
 struct Ipv6ForwardPolicy
 {
     static constexpr const char *proc_path = "/proc/sys/net/ipv6/conf/all/forwarding";
@@ -178,10 +178,10 @@ class ScopedProcToggle
 // Convenience aliases — drop-in replacements for the old class names.
 // ---------------------------------------------------------------------------
 
-/// @brief RAII guard for IPv4 forwarding (was ScopedIpForward).
+/** @brief RAII guard for IPv4 forwarding (was ScopedIpForward). */
 using ScopedIpForward = ScopedProcToggle<Ipv4ForwardPolicy>;
 
-/// @brief RAII guard for IPv6 forwarding (was ScopedIpv6Forward).
+/** @brief RAII guard for IPv6 forwarding (was ScopedIpv6Forward). */
 using ScopedIpv6Forward = ScopedProcToggle<Ipv6ForwardPolicy>;
 
 } // namespace clv::vpn

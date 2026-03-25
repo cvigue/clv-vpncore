@@ -28,7 +28,7 @@ namespace clv::vpn::transport {
 class UdpConnector
 {
   public:
-    /// @param ctx ASIO I/O context
+    /** @param ctx ASIO I/O context */
     explicit UdpConnector(asio::io_context &ctx);
 
     /**
@@ -45,7 +45,7 @@ class UdpConnector
      */
     UdpTransport Connect(const std::string &host, std::uint16_t port, bool dco_mode = false);
 
-    /// @brief Get the resolved server endpoint (valid after Connect()).
+    /** @brief Get the resolved server endpoint (valid after Connect()). */
     const asio::ip::udp::endpoint &ResolvedEndpoint() const
     {
         return resolvedEndpoint_;
@@ -70,7 +70,7 @@ class UdpConnector
 class TcpConnector
 {
   public:
-    /// @param ctx ASIO I/O context
+    /** @param ctx ASIO I/O context */
     explicit TcpConnector(asio::io_context &ctx);
 
     /**
