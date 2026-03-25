@@ -40,6 +40,9 @@ CLIENT_PID=""
 
 ns_exec() { ip netns exec "$1" "${@:2}"; }
 
+# Background variant: exec ensures $! == actual process PID (no intermediate fork)
+ns_bg() { exec nsenter --net="/run/netns/$1" -- "${@:2}"; }
+
 cleanup() {
     echo ""
     echo "--- Cleanup ---"
@@ -96,7 +99,7 @@ cd "${PROJECT_ROOT}"
 # ── Start server ─────────────────────────────────────────────────────
 
 echo "[1/5] Starting server in ${NS_SERVER}..."
-ns_exec "${NS_SERVER}" "${BINARY}" "${SERVER_CONFIG}" \
+ns_bg "${NS_SERVER}" "${BINARY}" "${SERVER_CONFIG}" \
     > "${SERVER_LOG}" 2>&1 &
 SERVER_PID=$!
 sleep 2
@@ -109,7 +112,7 @@ echo "      Server PID: ${SERVER_PID}"
 # ── Start client ─────────────────────────────────────────────────────
 
 echo "[2/5] Starting client in ${NS_CLIENT}..."
-ns_exec "${NS_CLIENT}" "${BINARY}" "${CLIENT_CONFIG}" \
+ns_bg "${NS_CLIENT}" "${BINARY}" "${CLIENT_CONFIG}" \
     > "${CLIENT_LOG}" 2>&1 &
 CLIENT_PID=$!
 echo "      Client PID: ${CLIENT_PID}"
@@ -165,10 +168,40 @@ fi
 
 # ── Collect results ──────────────────────────────────────────────────
 
-echo "[5/5] Collecting results..."
+echo "[5/6] Collecting results..."
 echo ""
 echo "--- Ping Results ---"
 cat "${LOG_DIR}/ping.log"
+
+# ── Negative validation: tunnel requires VPN ─────────────────────────
+
+echo ""
+echo "[6/6] Negative validation — stopping VPN, confirming tunnel dies..."
+
+# Kill VPN processes
+kill -TERM "${CLIENT_PID}" 2>/dev/null || true
+kill -TERM "${SERVER_PID}" 2>/dev/null || true
+sleep 2
+kill -9 "${CLIENT_PID}" 2>/dev/null || true
+kill -9 "${SERVER_PID}" 2>/dev/null || true
+wait 2>/dev/null || true
+# Clear PIDs so cleanup trap doesn't re-kill
+CLIENT_PID=""
+SERVER_PID=""
+
+# Remove TUN devices — persistent TUNs survive process death, so
+# explicitly delete them to prove the tunnel was the only route.
+for ns in "${NS_SERVER}" "${NS_CLIENT}"; do
+    for dev in $(ns_exec "$ns" ip -o link show type tun 2>/dev/null | awk -F: '{print $2}' | tr -d ' '); do
+        ns_exec "$ns" ip link del "$dev" 2>/dev/null || true
+    done
+done
+
+if ns_exec "${NS_CLIENT}" ping -c 1 -W 2 "${TUNNEL_SERVER_IP}" &>/dev/null; then
+    fail "Tunnel ping succeeded after VPN stopped — traffic may not be using the tunnel"
+else
+    echo "      Tunnel ping correctly failed after VPN stopped"
+fi
 
 echo ""
 echo "=== IT1 PASSED ==="

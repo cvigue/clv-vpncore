@@ -42,6 +42,9 @@ declare -a CLIENT_PIDS=()
 
 ns_exec() { ip netns exec "$1" "${@:2}"; }
 
+# Background variant: exec ensures $! == actual process PID (no intermediate fork)
+ns_bg() { exec nsenter --net="/run/netns/$1" -- "${@:2}"; }
+
 cleanup() {
     echo ""
     echo "--- Cleanup ---"
@@ -107,7 +110,7 @@ cd "${PROJECT_ROOT}"
 # ── Start server ─────────────────────────────────────────────────────
 
 echo "[1/6] Starting server in ${NS_SERVER}..."
-ns_exec "${NS_SERVER}" "${BINARY}" "${SERVER_CONFIG}" \
+ns_bg "${NS_SERVER}" "${BINARY}" "${SERVER_CONFIG}" \
     > "${SERVER_LOG}" 2>&1 &
 SERVER_PID=$!
 sleep 2
@@ -124,7 +127,7 @@ for i in $(seq 0 $(( NUM_CLIENTS - 1 ))); do
     NS_CLIENT="ns-vpn-client-${i}"
     CLIENT_LOG_I="${LOG_DIR}/client-${i}.log"
 
-    ns_exec "${NS_CLIENT}" "${BINARY}" "${CLIENT_CONFIG}" \
+    ns_bg "${NS_CLIENT}" "${BINARY}" "${CLIENT_CONFIG}" \
         > "${CLIENT_LOG_I}" 2>&1 &
     CLIENT_PIDS+=($!)
     echo "      Client-${i} PID: ${CLIENT_PIDS[$i]} (${NS_CLIENT})"
@@ -227,7 +230,7 @@ fi
 
 # ── Client-to-client ping through server ─────────────────────────────
 
-echo "[6/6] Pinging client-to-client through tunnel..."
+echo "[6/7] Pinging client-to-client through tunnel..."
 
 C2C_PASS=0
 C2C_TOTAL=0
@@ -253,6 +256,49 @@ if (( C2C_PASS != C2C_TOTAL )); then
     fail "Client-to-client: ${C2C_PASS}/${C2C_TOTAL} passed"
 fi
 
+# ── Negative validation: tunnel requires VPN ─────────────────────────
+
+echo "[7/7] Negative validation — stopping VPN, confirming tunnel dies..."
+
+# Kill VPN processes
+for pid in "${CLIENT_PIDS[@]}"; do
+    kill -TERM "${pid}" 2>/dev/null || true
+done
+[[ -n "${SERVER_PID}" ]] && kill -TERM "${SERVER_PID}" 2>/dev/null || true
+sleep 2
+for pid in "${CLIENT_PIDS[@]}"; do
+    kill -9 "${pid}" 2>/dev/null || true
+done
+[[ -n "${SERVER_PID}" ]] && kill -9 "${SERVER_PID}" 2>/dev/null || true
+wait 2>/dev/null || true
+# Clear PIDs so cleanup trap doesn't re-kill
+CLIENT_PIDS=()
+SERVER_PID=""
+
+# Remove TUN devices — persistent TUNs survive process death, so
+# explicitly delete them to prove the tunnel was the only route.
+for ns in "${NS_SERVER}" $(seq -f "ns-vpn-client-%.0f" 0 $(( NUM_CLIENTS - 1 ))); do
+    for dev in $(ns_exec "$ns" ip -o link show type tun 2>/dev/null | awk -F: '{print $2}' | tr -d ' '); do
+        ns_exec "$ns" ip link del "$dev" 2>/dev/null || true
+    done
+done
+
+neg_ok=1
+for i in $(seq 0 $(( NUM_CLIENTS - 1 ))); do
+    NS_CLIENT="ns-vpn-client-${i}"
+    if ns_exec "${NS_CLIENT}" ping -c 1 -W 2 "${TUNNEL_SERVER_IP}" &>/dev/null; then
+        echo "      Client-${i} → server: still reachable (BAD)"
+        neg_ok=0
+    else
+        echo "      Client-${i} → server: unreachable (good)"
+    fi
+done
+
+if (( neg_ok == 0 )); then
+    fail "Tunnel ping succeeded after VPN stopped — traffic may not be using the tunnel"
+fi
+echo "      Tunnel correctly unreachable after VPN stopped"
+
 # ── Summary ──────────────────────────────────────────────────────────
 
 echo ""
@@ -260,4 +306,5 @@ echo "=== IT2 PASSED ==="
 echo "    ${NUM_CLIENTS} clients connected with unique IPs"
 echo "    All clients pinged server successfully"
 echo "    Client-to-client: ${C2C_PASS}/${C2C_TOTAL} passed"
+echo "    Tunnel unreachable after VPN stopped"
 echo "    Logs: ${LOG_DIR}/"

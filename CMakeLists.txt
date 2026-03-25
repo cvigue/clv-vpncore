@@ -109,6 +109,16 @@ if(BUILD_TESTS)
         TIMEOUT 120
         RESOURCE_LOCK "netns"
     )
+
+    add_test(
+        NAME integration_it3_mesh
+        COMMAND bash "${CMAKE_SOURCE_DIR}/integration/ctest_it3.sh" "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(integration_it3_mesh PROPERTIES
+        LABELS "integration"
+        TIMEOUT 180
+        RESOURCE_LOCK "netns"
+    )
 endif()
 
 # Demos

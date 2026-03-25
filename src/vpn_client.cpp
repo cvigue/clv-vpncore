@@ -203,10 +203,18 @@ std::size_t VpnClient::EffectiveBatchSize() const
     return transport::EffectiveBatchSize(config_.performance.batch_size);
 }
 
+static std::atomic<int> next_client_logger_index_{0};
+
 VpnClient::VpnClient(asio::io_context &io_context, const VpnConfig &config)
     : io_context_(io_context),
       config_(config),
-      logger_(spdlog::stdout_color_mt("vpn_client")),
+      logger_(spdlog::stdout_color_mt(
+          [&]
+{
+    int idx = next_client_logger_index_++;
+    return idx == 0 ? std::string("vpn_client")
+                    : "vpn_client." + std::to_string(idx + 1);
+}())),
       control_channel_(*logger_),
       data_channel_(*logger_),
       inbound_arena_(config.performance.enable_dco
