@@ -119,6 +119,59 @@ if(BUILD_TESTS)
         TIMEOUT 180
         RESOURCE_LOCK "netns"
     )
+
+    add_test(
+        NAME integration_it4_dco
+        COMMAND bash "${CMAKE_SOURCE_DIR}/integration/ctest_it4.sh" "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(integration_it4_dco PROPERTIES
+        LABELS "integration"
+        TIMEOUT 90
+        RESOURCE_LOCK "netns"
+        SKIP_RETURN_CODE 77
+    )
+
+    add_test(
+        NAME integration_it5_multi_client_dco
+        COMMAND bash "${CMAKE_SOURCE_DIR}/integration/ctest_it5.sh" "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(integration_it5_multi_client_dco PROPERTIES
+        LABELS "integration"
+        TIMEOUT 120
+        RESOURCE_LOCK "netns"
+        SKIP_RETURN_CODE 77
+    )
+
+    add_test(
+        NAME integration_it6_masquerade
+        COMMAND bash "${CMAKE_SOURCE_DIR}/integration/ctest_it6.sh" "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(integration_it6_masquerade PROPERTIES
+        LABELS "integration"
+        TIMEOUT 90
+        RESOURCE_LOCK "netns"
+    )
+
+    add_test(
+        NAME integration_it7_reconnect
+        COMMAND bash "${CMAKE_SOURCE_DIR}/integration/ctest_it7.sh" "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(integration_it7_reconnect PROPERTIES
+        LABELS "integration"
+        TIMEOUT 120
+        RESOURCE_LOCK "netns"
+    )
+
+    add_test(
+        NAME integration_it8_netem
+        COMMAND bash "${CMAKE_SOURCE_DIR}/integration/ctest_it8.sh" "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(integration_it8_netem PROPERTIES
+        LABELS "integration"
+        TIMEOUT 90
+        RESOURCE_LOCK "netns"
+        SKIP_RETURN_CODE 77
+    )
 endif()
 
 # Demos

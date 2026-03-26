@@ -1,0 +1,54 @@
+{
+    "server": {
+        "host": "10.99.0.1",
+        "port": 1194,
+        "proto": "udp",
+        "dev": "tun",
+        "dev_node": "/dev/net/tun",
+        "keepalive": [
+            10,
+            60
+        ],
+        "cipher": "AES-256-GCM",
+        "auth": "SHA256",
+        "tls_cipher": "TLS-DHE-RSA-WITH-AES-256-GCM-SHA384",
+        "keysize": 256,
+        "ca_cert": "test_data/certs/ca.crt",
+        "tls_crypt_key": "test_data/certs/tls-crypt.key",
+        "cert": "test_data/certs/server.crt",
+        "key": "test_data/certs/server.key",
+        "dh_params": "test_data/certs/dh2048.pem",
+        "network": "10.8.0.0/24",
+        "bridge_ip": "10.8.0.1",
+        "client_dns": [
+            "8.8.8.8"
+        ],
+        "routes": [
+            "172.16.0.0/24"
+        ],
+        "push_routes": true,
+        "client_to_client": false,
+        "tun_mtu": 1400,
+        "client_cert_required": true,
+        "username_password": false,
+        "max_clients": 10,
+        "ping_timer_remote": 30,
+        "renegotiate_seconds": 3600
+    },
+    "performance": {
+        "enable_dco": false,
+        "socket_recv_buffer": 262144,
+        "socket_send_buffer": 262144,
+        "batch_size": 64,
+        "process_quanta": 16,
+        "stats_interval_seconds": 30
+    },
+    "logging": {
+        "verbosity": "debug",
+        "subsystems": {
+            "control": "debug",
+            "sessions": "debug",
+            "dataio": "info"
+        }
+    }
+}

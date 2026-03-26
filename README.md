@@ -18,7 +18,32 @@ Key capabilities:
 - Full client: auto-reconnect with back-off, keepalive timeout detection, .ovpn config parsing
 - Periodic stats reporting with throughput, batch depth, and buffer headroom
 - Per-subsystem structured logging with config and environment variable overrides
-- 669 unit tests + 3 integration tests (GoogleTest, network-namespace harness)
+- 669 unit tests + 8 integration tests (GoogleTest, network-namespace harness)
+
+#### Benchmark Snapshot (2026-03-25)
+
+Server: clv-vpncore DCO mode, AES-256-GCM, Xeon Gold 6242, virtio NICs.
+All runs: iperf3 -t 60 single-stream TCP through the VPN tunnel.
+
+| Direction | Client | Mode | Throughput | Retransmits |
+|-----------|--------|------|-----------|-------------|
+| Forward (client→server) | clv | Userspace | 1.42 Gbps | 2,671 |
+| Forward (client→server) | clv | DCO | 1.53 Gbps | 137 |
+| Forward (client→server) | OpenVPN 2.6 | DCO | 1.48 Gbps | 187 |
+| Forward (client→server) | OpenVPN 2.6 | Userspace | 873 Mbps | 144 |
+| Reverse (server→client) | clv | Userspace | 2.84 Gbps | 5 |
+| Reverse (server→client) | clv | DCO | 2.61 Gbps | 1,152 |
+| Reverse (server→client) | OpenVPN 2.6 | DCO | 2.61 Gbps | 1,287 |
+| Reverse (server→client) | OpenVPN 2.6 | Userspace | 992 Mbps | 4,081 |
+
+**Observations:**
+- DCO forward numbers nearly identical across clients (1.53 vs 1.48) — validates
+  that clv session/control overhead is negligible.
+- clv userspace forward is 63% faster than official userspace (batched arena path).
+- clv userspace reverse is ~2.9× faster than official (2.84 vs 0.99 Gbps, 5 vs 4081 retransmits).
+- Reverse DCO retransmits (~1,150–1,287) appear on both clients — kernel module
+  receive-path characteristic, not client-side code.
+
 
 ## Dependencies
 
@@ -64,7 +89,7 @@ clv-vpncore/
 │   ├── socket_utils            Socket option helpers
 │   └── udp_receive_loop        Templated coroutine receive loop
 ├── tests/              669 unit tests (GoogleTest)
-├── integration/        Network-namespace integration tests (IT1–IT3)
+├── integration/        Network-namespace integration tests (IT1–IT8)
 │   ├── configs/        Per-test server/client JSON configs
 │   └── netns/          Namespace setup/teardown scripts
 ├── demos/              simple_vpn, config generator, .ovpn parser
@@ -335,7 +360,7 @@ ctest --exclude-regex "IT[123]"                            # unit tests only
 
 **Unit tests** (669): protocol parsing, TLS handshake, TLS-Crypt (key loading, wrap/unwrap, tamper detection, replay protection), key derivation, AEAD encrypt/decrypt, replay protection, config validation, IP pool management (IPv4 + IPv6), routing (IPv4 + IPv6), UDP batching, session lifecycle, and config exchange round-trip.
 
-**Integration tests** (3, require root): full-stack VPN connectivity using Linux network namespaces with real TUN devices, kernel routing, and iptables. IT1 — single client handshake and data path. IT2 — multi-client concurrent sessions. IT3 — 4-node mesh topology with client-to-client routing. All include negative validation (traffic blocked after teardown).
+**Integration tests** (8, require root): full-stack VPN connectivity using Linux network namespaces with real TUN devices, kernel routing, and nftables. IT1 — single client handshake and data path. IT2 — multi-client concurrent sessions. IT3 — 4-node mesh topology with client-to-client routing. IT4 — DCO kernel-offloaded data path. IT5 — multi-client DCO. IT6 — masquerade and transit forwarding with route push. IT7 — client reconnect after crash with server session cleanup and IP recycling. IT8 — netem latency and loss smoke test. All include negative validation (traffic blocked after teardown). IT4/IT5 skip gracefully without ovpn-dco; IT8 skips without tc netem.
 
 ## License
 

@@ -80,9 +80,28 @@ run_test "IT1: Single Client Handshake + Ping" 1 \
 run_test "IT2: Multi-Client Concurrent Connect" 3 \
     "${SCRIPT_DIR}/test_it2_multi_client.sh"
 
-# Future tests slot in here:
-# run_test "IT7: Reconnect After Disconnect" 1 \
-#     "${SCRIPT_DIR}/test_it7_reconnect.sh"
+# IT4: DCO data path — skip if kernel module unavailable
+if modprobe -n ovpn-dco 2>/dev/null || modprobe -n ovpn-dco-v2 2>/dev/null; then
+    run_test "IT4: DCO Data Path (Kernel Offload)" 1 \
+        "${SCRIPT_DIR}/test_it4_dco.sh"
+
+    run_test "IT5: Multi-Client DCO (DCO-F1)" 3 \
+        "${SCRIPT_DIR}/test_it5_multi_client_dco.sh"
+else
+    echo ""
+    echo "  SKIP: IT4/IT5 (ovpn-dco module not available)"
+fi
+
+run_test "IT7: Reconnect After Disconnect" 1 \
+    "${SCRIPT_DIR}/test_it7_reconnect.sh"
+
+run_test "IT6: Masquerade / Transit Forwarding" 1 \
+    "${SCRIPT_DIR}/test_it6_masquerade.sh"
+# IT6 adds ns-lan-host; the test's EXIT trap removes it, but clean up just in case
+ip netns del ns-lan-host 2>/dev/null || true
+
+run_test "IT8: Netem — Latency + Loss" 1 \
+    "${SCRIPT_DIR}/test_it8_netem.sh"
 
 # ── Summary ──────────────────────────────────────────────────────────
 
