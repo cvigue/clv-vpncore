@@ -176,7 +176,12 @@ void OvpnConfigParser::ParseDirective(const std::string &line, ClientConnectionC
         config.remote.host = tokens[1];
         if (tokens.size() > 2)
         {
-            config.remote.port = static_cast<uint16_t>(std::stoi(tokens[2]));
+            int parsed_port = std::stoi(tokens[2]);
+            if (parsed_port < 1 || parsed_port > 65535)
+            {
+                throw std::runtime_error("remote port out of range: " + tokens[2]);
+            }
+            config.remote.port = static_cast<std::uint16_t>(parsed_port);
         }
         if (tokens.size() > 3)
         {
@@ -459,7 +464,7 @@ void OvpnConfigParser::Validate(const ClientConnectionConfig &config)
     }
 
     // Validate port range
-    if (config.remote.port == 0 || config.remote.port > 65535)
+    if (config.remote.port == 0)
     {
         throw std::runtime_error("OvpnConfigParser: invalid port number");
     }

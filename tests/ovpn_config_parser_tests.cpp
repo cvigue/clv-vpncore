@@ -655,6 +655,26 @@ keepalive 10
     EXPECT_THROW(OvpnConfigParser::ParseString(ovpn_content), std::runtime_error);
 }
 
+TEST_F(OvpnConfigParserTest, RejectRemotePortOverflow)
+{
+    std::string ovpn_content = R"(
+remote example.com 65536
+<ca>CA</ca>
+)";
+
+    EXPECT_THROW(OvpnConfigParser::ParseString(ovpn_content), std::runtime_error);
+}
+
+TEST_F(OvpnConfigParserTest, RejectRemotePortNegative)
+{
+    std::string ovpn_content = R"(
+remote example.com -1
+<ca>CA</ca>
+)";
+
+    EXPECT_THROW(OvpnConfigParser::ParseString(ovpn_content), std::runtime_error);
+}
+
 TEST_F(OvpnConfigParserTest, HandleMissingClosingTag)
 {
     std::string ovpn_content = R"(
