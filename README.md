@@ -353,14 +353,18 @@ The `buf_rx` and `buf_tx` values indicate how many milliseconds of traffic the k
 
 ```bash
 cd build
-ctest -j$(nproc)                                          # all tests
+ctest -j$(nproc)                                          # default unit + registered tests
 ctest --exclude-regex "IT[123]"                            # unit tests only
 ./tests/test_vpncore --gtest_filter="DataChannel*"        # specific suite
+bash ../perf/run_vpn_perf.sh --list                       # list explicit perf scenarios
+bash ../perf/run_vpn_perf.sh --build-dir "$PWD" --scenario clv-user-udp-clean-tcp
 ```
 
 **Unit tests** (669): protocol parsing, TLS handshake, TLS-Crypt (key loading, wrap/unwrap, tamper detection, replay protection), key derivation, AEAD encrypt/decrypt, replay protection, config validation, IP pool management (IPv4 + IPv6), routing (IPv4 + IPv6), UDP batching, session lifecycle, and config exchange round-trip.
 
 **Integration tests** (8, require root): full-stack VPN connectivity using Linux network namespaces with real TUN devices, kernel routing, and nftables. IT1 — single client handshake and data path. IT2 — multi-client concurrent sessions. IT3 — 4-node mesh topology with client-to-client routing. IT4 — DCO kernel-offloaded data path. IT5 — multi-client DCO. IT6 — masquerade and transit forwarding with route push. IT7 — client reconnect after crash with server session cleanup and IP recycling. IT8 — netem latency and loss smoke test. All include negative validation (traffic blocked after teardown). IT4/IT5 skip gracefully without ovpn-dco; IT8 skips without tc netem.
+
+**Performance suite** (explicit only, not part of default CTest): namespace-based tunnel benchmarking with `iperf3`, optional `tc netem` impairment, `clv` and official OpenVPN client variants, and separate artifact capture under `build/perf-results`. Run it directly via `perf/run_vpn_perf.sh`. See [perf/README.md](perf/README.md).
 
 ## License
 

@@ -1,0 +1,32 @@
+{
+    "client": {
+        "server_host": "10.99.0.1",
+        "server_port": 1194,
+        "protocol": "udp",
+        "cipher": "AES-256-GCM",
+        "auth": "SHA256",
+        "ca_cert": "test_data/certs/ca.crt",
+        "tls_crypt_key": "test_data/certs/tls-crypt.key",
+        "cert": "test_data/certs/client.crt",
+        "key": "test_data/certs/client.key",
+        "keepalive_interval": 5,
+        "keepalive_timeout": 30,
+        "reconnect_delay_seconds": 2,
+        "max_reconnect_attempts": 3
+    },
+    "performance": {
+        "enable_dco": false,
+        "socket_recv_buffer": 262144,
+        "socket_send_buffer": 262144,
+        "batch_size": 64,
+        "process_quanta": 16,
+        "stats_interval_seconds": 0
+    },
+    "logging": {
+        "verbosity": "info",
+        "subsystems": {
+            "control": "info",
+            "sessions": "info"
+        }
+    }
+}
