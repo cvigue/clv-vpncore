@@ -310,6 +310,14 @@ TEST_F(IpPoolManagerTest, MaxClientsLargerThanCidrNoCap)
     EXPECT_EQ(pool.TotalCount(), 253);
 }
 
+TEST_F(IpPoolManagerTest, MaxClientsCapsWidePrefixNetwork)
+{
+    // /0 is huge; with max_clients set, pool creation must stay bounded.
+    IpPoolManager pool("0.0.0.0/0", true, 10);
+    EXPECT_EQ(pool.TotalCount(), 10);
+    EXPECT_EQ(pool.AvailableCount(), 10);
+}
+
 TEST_F(IpPoolManagerTest, MaxClientsExhaustsCappedPool)
 {
     IpPoolManager pool("10.8.0.0/24", true, 2);

@@ -6,6 +6,8 @@
 #include <util/ipv4_utils.h>
 #include <util/ipv6_utils.h>
 #include <cstdint>
+#include <algorithm>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -105,31 +107,34 @@ std::size_t IpPoolManager::PopulatePool(std::string network_cidr, bool reserve_g
     // Normalize network address to mask off host bits
     network_addr = ipv4::NormalizeNetwork(network_addr, prefix_length);
 
-    // Calculate number of usable hosts
-    uint32_t num_hosts = ipv4::CalculateUsableHosts(prefix_length);
-    if (num_hosts == 0)
+    // Calculate host space and usable host count with 64-bit arithmetic
+    const std::uint64_t host_bits = static_cast<std::uint64_t>(32 - prefix_length);
+    const std::uint64_t host_space = (1ULL << host_bits);
+    const std::uint64_t usable_hosts = host_space - 2; // exclude network and broadcast
+    if (usable_hosts == 0)
         throw std::invalid_argument("Network too small for host allocation");
 
-    // Add usable host addresses
-    uint32_t host_bits = 32 - prefix_length;
-    uint32_t start = network_addr + 1; // Skip network address
+    // Add usable host addresses. end is exclusive (broadcast address).
+    std::uint64_t start = static_cast<std::uint64_t>(network_addr) + 1; // Skip network address
     if (reserve_gateway)
         start++; // Skip .1 for gateway
 
-    uint32_t end = network_addr + (1u << host_bits) - 1; // Exclude broadcast
+    std::uint64_t end = static_cast<std::uint64_t>(network_addr) + host_space - 1;
 
     // Cap at max_clients if set
     if (max_clients > 0)
     {
-        uint32_t range = end - start;
-        if (range > static_cast<uint32_t>(max_clients))
-            end = start + static_cast<uint32_t>(max_clients);
+        const std::uint64_t capped_end = start + static_cast<std::uint64_t>(max_clients);
+        end = std::min(end, capped_end);
     }
 
+    if (end > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()) + 1)
+        throw std::invalid_argument("IPv4 host range exceeds uint32_t bounds");
+
     auto pool = pool_data_.Lock();
-    for (uint32_t ip = start; ip < end; ++ip)
+    for (std::uint64_t ip = start; ip < end; ++ip)
     {
-        pool->available_ipv4s.push_back(ip);
+        pool->available_ipv4s.push_back(static_cast<std::uint32_t>(ip));
     }
 
     return pool->available_ipv4s.size();
