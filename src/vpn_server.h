@@ -303,10 +303,11 @@ class VpnServer
     // Zero-copy inbound arena: recvmmsg → decrypt-in-place → writev to TUN
     transport::PacketArena inbound_arena_;
     std::vector<transport::IncomingSlot> inbound_slots_;
+    std::unique_ptr<transport::BatchScratchpad> batch_scratch_ = std::make_unique<transport::BatchScratchpad>();
 
     // RAII network configuration guards (order matters: destroyed in reverse)
-    std::optional<ScopedMasquerade> masquerade_guard_;   ///< IPv4 NAT masquerade rule
-    std::optional<ScopedMasquerade> masquerade6_guard_;  ///< IPv6 NAT masquerade rule
+    std::optional<ScopedMasquerade> masquerade_guard_;  ///< IPv4 NAT masquerade rule
+    std::optional<ScopedMasquerade> masquerade6_guard_; ///< IPv6 NAT masquerade rule
 
     // Timers for periodic coroutines (members so Stop() can cancel them)
     asio::steady_timer cleanup_timer_; ///< Timer for SessionCleanupLoop

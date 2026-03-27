@@ -460,6 +460,7 @@ asio::awaitable<void> VpnServer::UdpReceiveLoop()
         processQuanta_,
         inbound_slots_,
         inbound_arena_,
+        *batch_scratch_,
         stats_,
         stats_observer_,
         data_channel_strategy_.tun_device(),

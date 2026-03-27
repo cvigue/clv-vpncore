@@ -209,36 +209,6 @@ std::vector<std::uint8_t> DataChannel::EncryptPacket(std::span<const std::uint8_
             // SslHelp returns [ciphertext][tag] — reorder to [tag][ciphertext]
             encrypted_packet.payload_ = ReorderTagToFront(encrypted);
         }
-
-        logger_->debug("EncryptPacket: encrypted {} bytes with {}, packet_id={}",
-                       plaintext.size(),
-                       static_cast<int>(key.cipher_algorithm),
-                       packet_id);
-        if (packet_id <= 2) // Log details for first few packets
-        {
-            logger_->debug("  encrypt_key(first 8): {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                           key.cipher_key[0],
-                           key.cipher_key[1],
-                           key.cipher_key[2],
-                           key.cipher_key[3],
-                           key.cipher_key[4],
-                           key.cipher_key[5],
-                           key.cipher_key[6],
-                           key.cipher_key[7]);
-            logger_->debug("  nonce: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                           nonce[0],
-                           nonce[1],
-                           nonce[2],
-                           nonce[3],
-                           nonce[4],
-                           nonce[5],
-                           nonce[6],
-                           nonce[7],
-                           nonce[8],
-                           nonce[9],
-                           nonce[10],
-                           nonce[11]);
-        }
     }
     catch (const OpenSSL::SslException &e)
     {
@@ -304,42 +274,6 @@ std::size_t DataChannel::EncryptPacketInPlace(std::span<std::uint8_t> buf,
 
         // Write tag at [8..24) — directly in its wire position
         std::memcpy(buf.data() + kDataV2HeaderLen + kDataV2PacketIdLen, tag.data(), kDataV2TagLen);
-
-        logger_->debug("EncryptPacketInPlace: encrypted {} bytes, packet_id={}", payload_len, packet_id);
-        if (packet_id <= 2) // Log details for first few packets
-        {
-            logger_->debug("  encrypt_key(first 8): {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                           key.cipher_key[0],
-                           key.cipher_key[1],
-                           key.cipher_key[2],
-                           key.cipher_key[3],
-                           key.cipher_key[4],
-                           key.cipher_key[5],
-                           key.cipher_key[6],
-                           key.cipher_key[7]);
-            logger_->debug("  nonce: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                           nonce[0],
-                           nonce[1],
-                           nonce[2],
-                           nonce[3],
-                           nonce[4],
-                           nonce[5],
-                           nonce[6],
-                           nonce[7],
-                           nonce[8],
-                           nonce[9],
-                           nonce[10],
-                           nonce[11]);
-            logger_->debug("  aad: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                           aad[0],
-                           aad[1],
-                           aad[2],
-                           aad[3],
-                           aad[4],
-                           aad[5],
-                           aad[6],
-                           aad[7]);
-        }
     }
     catch (const OpenSSL::SslException &e)
     {
@@ -444,37 +378,6 @@ std::span<std::uint8_t> DataChannel::DecryptPacketInPlace(std::span<std::uint8_t
                            key_id,
                            static_cast<int>(key.cipher_algorithm),
                            buf.size());
-            logger_->error("  decrypt_key(first 8): {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                           key.cipher_key[0],
-                           key.cipher_key[1],
-                           key.cipher_key[2],
-                           key.cipher_key[3],
-                           key.cipher_key[4],
-                           key.cipher_key[5],
-                           key.cipher_key[6],
-                           key.cipher_key[7]);
-            logger_->error("  nonce: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                           nonce[0],
-                           nonce[1],
-                           nonce[2],
-                           nonce[3],
-                           nonce[4],
-                           nonce[5],
-                           nonce[6],
-                           nonce[7],
-                           nonce[8],
-                           nonce[9],
-                           nonce[10],
-                           nonce[11]);
-            logger_->error("  aad: {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                           aad[0],
-                           aad[1],
-                           aad[2],
-                           aad[3],
-                           aad[4],
-                           aad[5],
-                           aad[6],
-                           aad[7]);
             return {};
         }
 

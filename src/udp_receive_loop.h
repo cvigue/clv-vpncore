@@ -88,6 +88,7 @@ asio::awaitable<void> UdpReceiveLoopSkeleton(
     std::size_t processQuanta,
     std::vector<transport::IncomingSlot> &inboundSlots,
     transport::PacketArena &inboundArena,
+    transport::BatchScratchpad &scratch,
     DataPathStats &stats,
     StatsObserver &statsObserver,
     tun::TunDevice *tunDevice,
@@ -130,7 +131,8 @@ asio::awaitable<void> UdpReceiveLoopSkeleton(
 
             auto count = transport::RecvBatch(
                 socketFd,
-                std::span<transport::IncomingSlot>(inboundSlots.data(), batchSize));
+                std::span<transport::IncomingSlot>(inboundSlots.data(), batchSize),
+                scratch);
 
             if (count == 0)
                 continue;

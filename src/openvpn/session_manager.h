@@ -91,12 +91,18 @@ class SessionManager
      */
     void ClearAllSessions()
     {
+        endpoint_index_.clear();
         sessions_.clear();
     }
 
   private:
     // Map from SessionId to Connection
     std::unordered_map<uint64_t, std::unique_ptr<Connection>> sessions_;
+
+    // Secondary index: endpoint → raw pointer into sessions_ for O(1) lookup.
+    // Kept in sync by GetOrCreateSession, RemoveSession, CleanupStaleSession,
+    // and ClearAllSessions.
+    std::unordered_map<Connection::Endpoint, Connection *> endpoint_index_;
 
     // Helper: convert SessionId to uint64_t for hashing
     static uint64_t HashSessionId(openvpn::SessionId sid)

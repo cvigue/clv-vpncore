@@ -547,6 +547,7 @@ class VpnClient
     // Zero-copy inbound arena: recvmmsg -> decrypt-in-place -> writev to TUN
     transport::PacketArena inbound_arena_;
     std::vector<transport::IncomingSlot> inbound_slots_;
+    std::unique_ptr<transport::BatchScratchpad> batch_scratch_ = std::make_unique<transport::BatchScratchpad>();
 
     // Zero-copy outbound arena: TUN batch read -> encrypt-in-place -> sendmmsg
     transport::PacketArena outbound_arena_;

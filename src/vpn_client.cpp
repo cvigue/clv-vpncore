@@ -1450,6 +1450,7 @@ asio::awaitable<void> VpnClient::UdpReceiveLoop()
         processQuanta_,
         inbound_slots_,
         inbound_arena_,
+        *batch_scratch_,
         stats_,
         stats_observer_,
         tun_device_.get(),
@@ -1576,7 +1577,7 @@ asio::awaitable<void> VpnClient::TunToServerBatch()
                     auto remaining = std::span<const transport::SendEntry>(sendEntries);
                     while (!remaining.empty())
                     {
-                        auto sent = transport::SendBatch(socketFd, remaining);
+                        auto sent = transport::SendBatch(socketFd, remaining, *batch_scratch_);
                         stats_.packetsSent += sent;
                         if (sent >= remaining.size())
                             break; // all sent

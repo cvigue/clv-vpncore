@@ -36,9 +36,10 @@ Connection &SessionManager::GetOrCreateSession(openvpn::SessionId session_id,
 
     // Create new session with certificate configuration
     auto session = std::make_unique<Connection>(session_id, endpoint, is_server, cert_config, logger);
-    auto &ref = *session;
+    auto *raw = session.get();
     sessions_[key] = std::move(session);
-    return ref;
+    endpoint_index_[endpoint] = raw;
+    return *raw;
 }
 
 Connection *SessionManager::FindSession(openvpn::SessionId session_id)
@@ -56,17 +57,12 @@ Connection *SessionManager::FindSession(openvpn::SessionId session_id)
 
 Connection *SessionManager::FindSessionByEndpoint(const Connection::Endpoint &endpoint)
 {
-    auto it = std::ranges::find_if(sessions_, [&](const auto &pair)
-    {
-        const auto &ep = pair.second->GetEndpoint();
-        return ep.addr == endpoint.addr && ep.port == endpoint.port;
-    });
-
-    if (it != sessions_.end())
+    auto it = endpoint_index_.find(endpoint);
+    if (it != endpoint_index_.end())
     {
         // NOTE: Do NOT update activity here - activity should only be updated
         // when receiving actual client packets, not on lookup
-        return it->second.get();
+        return it->second;
     }
     return nullptr;
 }
@@ -74,7 +70,12 @@ Connection *SessionManager::FindSessionByEndpoint(const Connection::Endpoint &en
 bool SessionManager::RemoveSession(openvpn::SessionId session_id)
 {
     uint64_t key = HashSessionId(session_id);
-    return sessions_.erase(key) > 0;
+    auto it = sessions_.find(key);
+    if (it == sessions_.end())
+        return false;
+    endpoint_index_.erase(it->second->GetEndpoint());
+    sessions_.erase(it);
+    return true;
 }
 
 std::vector<openvpn::SessionId> SessionManager::GetAllSessionIds() const
@@ -92,7 +93,12 @@ size_t SessionManager::CleanupStaleSession(std::chrono::steady_clock::duration t
 
     return std::erase_if(sessions_, [&](const auto &pair)
     {
-        return (now - pair.second->GetLastActivity()) > timeout_duration;
+        if ((now - pair.second->GetLastActivity()) > timeout_duration)
+        {
+            endpoint_index_.erase(pair.second->GetEndpoint());
+            return true;
+        }
+        return false;
     });
 }
 

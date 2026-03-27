@@ -21,7 +21,6 @@
 
 #include <algorithm>
 #include <array>
-#include <bits/types/struct_iovec.h>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -72,7 +71,7 @@ void FillSockaddr6(struct sockaddr_in6 &sa6, const PeerEndpoint &ep)
 // RecvBatch — zero-copy batched receive via recvmmsg(2)
 // ---------------------------------------------------------------------------
 
-std::size_t RecvBatch(int fd, std::span<IncomingSlot> slots)
+std::size_t RecvBatch(int fd, std::span<IncomingSlot> slots, BatchScratchpad &scratch)
 {
     if (slots.empty())
         return 0;
@@ -80,10 +79,9 @@ std::size_t RecvBatch(int fd, std::span<IncomingSlot> slots)
     // Clamp to compile-time array size
     const std::size_t maxMessages = std::min(slots.size(), kMaxBatchSize);
 
-    // Stack-local structures for recvmmsg
-    std::array<struct iovec, kMaxBatchSize> iovecs{};
-    std::array<struct mmsghdr, kMaxBatchSize> msgs{};
-    std::array<struct sockaddr_in6, kMaxBatchSize> addrs{};
+    auto &iovecs = scratch.iovecs;
+    auto &msgs = scratch.msgs;
+    auto &addrs = scratch.addrs;
 
     for (std::size_t i = 0; i < maxMessages; ++i)
     {
@@ -118,12 +116,16 @@ std::size_t RecvBatch(int fd, std::span<IncomingSlot> slots)
 // SendBatch — batched send via sendmmsg(2)
 // ---------------------------------------------------------------------------
 
-std::size_t SendBatch(int fd, std::span<const SendEntry> entries)
+std::size_t SendBatch(int fd, std::span<const SendEntry> entries, BatchScratchpad &scratch)
 {
     if (entries.empty())
         return 0;
 
     std::size_t totalSent = 0;
+
+    auto &iovecs = scratch.iovecs;
+    auto &msgs = scratch.msgs;
+    auto &addrs = scratch.addrs;
 
     // Process in chunks of kMaxBatchSize.
     // sendmmsg(2) may return fewer messages than requested (e.g. the kernel
@@ -132,11 +134,6 @@ std::size_t SendBatch(int fd, std::span<const SendEntry> entries)
     while (!entries.empty())
     {
         auto chunkSize = std::min(entries.size(), kMaxBatchSize);
-
-        // Stack-local send structures
-        std::array<struct iovec, kMaxBatchSize> iovecs{};
-        std::array<struct mmsghdr, kMaxBatchSize> msgs{};
-        std::array<struct sockaddr_in6, kMaxBatchSize> addrs{};
 
         for (std::size_t i = 0; i < chunkSize; ++i)
         {

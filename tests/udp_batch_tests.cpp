@@ -68,19 +68,29 @@ struct FdGuard
 } // namespace
 
 // ---------------------------------------------------------------------------
+// Test fixture — holds a shared BatchScratchpad
+// ---------------------------------------------------------------------------
+
+class UdpBatchTest : public ::testing::Test
+{
+  protected:
+    std::unique_ptr<BatchScratchpad> scratch_ = std::make_unique<BatchScratchpad>();
+};
+
+// ---------------------------------------------------------------------------
 // SendBatch tests
 // ---------------------------------------------------------------------------
 
-TEST(UdpBatchTest, SendBatchEmptyEntries)
+TEST_F(UdpBatchTest, SendBatchEmptyEntries)
 {
     auto [fd, port] = CreateBoundUdpSocket();
     FdGuard guard{fd};
 
-    auto sent = SendBatch(fd, {});
+    auto sent = SendBatch(fd, {}, *scratch_);
     EXPECT_EQ(sent, 0u);
 }
 
-TEST(UdpBatchTest, SendAndRecvSingleDatagram)
+TEST_F(UdpBatchTest, SendAndRecvSingleDatagram)
 {
     auto [fd, port] = CreateBoundUdpSocket();
     FdGuard guard{fd};
@@ -93,7 +103,7 @@ TEST(UdpBatchTest, SendAndRecvSingleDatagram)
         .dest = dest,
     };
 
-    auto sent = SendBatch(fd, std::span<const SendEntry>(&entry, 1));
+    auto sent = SendBatch(fd, std::span<const SendEntry>(&entry, 1), *scratch_);
     EXPECT_EQ(sent, 1u);
 
     // Receive it back
@@ -102,13 +112,13 @@ TEST(UdpBatchTest, SendAndRecvSingleDatagram)
     for (std::size_t i = 0; i < slots.size(); ++i)
         slots[i] = {bufs[i].data(), bufs[i].size()};
 
-    auto n = RecvBatch(fd, slots);
+    auto n = RecvBatch(fd, slots, *scratch_);
     ASSERT_EQ(n, 1u);
     EXPECT_EQ(slots[0].len, payload.size());
     EXPECT_EQ(std::memcmp(slots[0].buf, payload.data(), payload.size()), 0);
 }
 
-TEST(UdpBatchTest, SendAndRecvMultipleDatagrams)
+TEST_F(UdpBatchTest, SendAndRecvMultipleDatagrams)
 {
     auto [fd, port] = CreateBoundUdpSocket();
     FdGuard guard{fd};
@@ -128,7 +138,7 @@ TEST(UdpBatchTest, SendAndRecvMultipleDatagrams)
         };
     }
 
-    auto sent = SendBatch(fd, entries);
+    auto sent = SendBatch(fd, entries, *scratch_);
     EXPECT_EQ(sent, static_cast<std::size_t>(kCount));
 
     // Receive all — may arrive in fewer recvmmsg calls
@@ -137,7 +147,7 @@ TEST(UdpBatchTest, SendAndRecvMultipleDatagrams)
     for (int i = 0; i < kCount; ++i)
         slots[i] = {bufs[i].data(), bufs[i].size()};
 
-    auto n = RecvBatch(fd, slots);
+    auto n = RecvBatch(fd, slots, *scratch_);
     EXPECT_EQ(n, static_cast<std::size_t>(kCount));
 
     for (std::size_t i = 0; i < n; ++i)
@@ -147,7 +157,7 @@ TEST(UdpBatchTest, SendAndRecvMultipleDatagrams)
     }
 }
 
-TEST(UdpBatchTest, SendBatchChunksSplitAtMaxBatchSize)
+TEST_F(UdpBatchTest, SendBatchChunksSplitAtMaxBatchSize)
 {
     // Send more than kMaxBatchSize datagrams — the implementation should
     // chunk internally and still deliver all of them.
@@ -171,7 +181,7 @@ TEST(UdpBatchTest, SendBatchChunksSplitAtMaxBatchSize)
 
     // The key assertion: SendBatch must report all kCount sent, proving it
     // chunked internally at the kMaxBatchSize boundary.
-    auto sent = SendBatch(fd, entries);
+    auto sent = SendBatch(fd, entries, *scratch_);
     EXPECT_EQ(sent, kCount);
 
     // Drain what the socket buffer could hold. On default rmem_max (~208 KB)
@@ -186,7 +196,7 @@ TEST(UdpBatchTest, SendBatchChunksSplitAtMaxBatchSize)
     std::size_t totalReceived = 0;
     for (int attempt = 0; attempt < 16 && totalReceived < kCount; ++attempt)
     {
-        auto n = RecvBatch(fd, slots);
+        auto n = RecvBatch(fd, slots, *scratch_);
         totalReceived += n;
     }
     // Must have received something — and SendBatch must have returned the full count
@@ -197,7 +207,7 @@ TEST(UdpBatchTest, SendBatchChunksSplitAtMaxBatchSize)
 // RecvBatch tests
 // ---------------------------------------------------------------------------
 
-TEST(UdpBatchTest, RecvBatchOnEmptySocketReturnsEmpty)
+TEST_F(UdpBatchTest, RecvBatchOnEmptySocketReturnsEmpty)
 {
     auto [fd, port] = CreateBoundUdpSocket();
     FdGuard guard{fd};
@@ -207,11 +217,11 @@ TEST(UdpBatchTest, RecvBatchOnEmptySocketReturnsEmpty)
     for (std::size_t i = 0; i < slots.size(); ++i)
         slots[i] = {bufs[i].data(), bufs[i].size()};
 
-    auto n = RecvBatch(fd, slots);
+    auto n = RecvBatch(fd, slots, *scratch_);
     EXPECT_EQ(n, 0u);
 }
 
-TEST(UdpBatchTest, RecvBatchReceivesIntoProvidedSlots)
+TEST_F(UdpBatchTest, RecvBatchReceivesIntoProvidedSlots)
 {
     auto [fd, port] = CreateBoundUdpSocket();
     FdGuard guard{fd};
@@ -221,7 +231,7 @@ TEST(UdpBatchTest, RecvBatchReceivesIntoProvidedSlots)
     // Send a single packet
     std::array<uint8_t, 1> payload = {0x42};
     SendEntry entry{.data = payload, .dest = dest};
-    SendBatch(fd, std::span<const SendEntry>(&entry, 1));
+    SendBatch(fd, std::span<const SendEntry>(&entry, 1), *scratch_);
 
     // Receive into a large slot array — should get exactly 1
     // Heap-allocate: kMaxBatchSize * kMaxDatagram can exceed safe stack size
@@ -230,29 +240,29 @@ TEST(UdpBatchTest, RecvBatchReceivesIntoProvidedSlots)
     for (std::size_t i = 0; i < kMaxBatchSize; ++i)
         slots[i] = {(*bufs)[i].data(), (*bufs)[i].size()};
 
-    auto n = RecvBatch(fd, slots);
+    auto n = RecvBatch(fd, slots, *scratch_);
     EXPECT_GE(n, 1u);
     EXPECT_LE(n, kMaxBatchSize);
 }
 
-TEST(UdpBatchTest, RecvBatchInvalidFdReturnsEmpty)
+TEST_F(UdpBatchTest, RecvBatchInvalidFdReturnsEmpty)
 {
     std::array<std::array<std::uint8_t, kMaxDatagram>, 4> bufs;
     std::array<IncomingSlot, 4> slots;
     for (std::size_t i = 0; i < slots.size(); ++i)
         slots[i] = {bufs[i].data(), bufs[i].size()};
 
-    auto n = RecvBatch(-1, slots);
+    auto n = RecvBatch(-1, slots, *scratch_);
     EXPECT_EQ(n, 0u);
 }
 
-TEST(UdpBatchTest, SendBatchInvalidFdReturnsZero)
+TEST_F(UdpBatchTest, SendBatchInvalidFdReturnsZero)
 {
     PeerEndpoint dest{.addr = asio::ip::address_v6::loopback(), .port = 12345};
     std::array<uint8_t, 1> payload = {0x01};
     SendEntry entry{.data = payload, .dest = dest};
 
-    auto sent = SendBatch(-1, std::span<const SendEntry>(&entry, 1));
+    auto sent = SendBatch(-1, std::span<const SendEntry>(&entry, 1), *scratch_);
     EXPECT_EQ(sent, 0u);
 }
 

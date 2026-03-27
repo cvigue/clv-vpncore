@@ -10,9 +10,9 @@ namespace clv::vpn::transport {
 
 /**
  * Compile-time upper bound for recvmmsg / sendmmsg metadata arrays.
- * The runtime batch size (from config) must be ≤ this value.
- * RecvBatch/SendBatch allocate ~96 bytes of metadata per slot on the
- * stack (iovec + mmsghdr + sockaddr_in6) — at 4096 that is ~480 KB.
+ * The runtime batch size (from config) must be <= this value.
+ * BatchScratchpad holds ~96 bytes of metadata per slot (iovec + mmsghdr +
+ * sockaddr_in6) — at 4096 that is ~480 KB, allocated once per scratchpad.
  */
 inline constexpr std::size_t kMaxBatchSize = 4096;
 

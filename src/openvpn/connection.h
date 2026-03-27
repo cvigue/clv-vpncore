@@ -15,6 +15,8 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstring>
+#include <functional>
 #include <optional>
 #include <string>
 #include <utility>
@@ -374,5 +376,34 @@ class Connection
 };
 
 } // namespace clv::vpn
+
+// std::hash specialization for Connection::Endpoint — enables use as
+// unordered_map key for O(1) endpoint-based session lookup.
+template <>
+struct std::hash<clv::vpn::Connection::Endpoint>
+{
+    std::size_t operator()(const clv::vpn::Connection::Endpoint &ep) const noexcept
+    {
+        // Hash the address bytes directly.  For v4 the 4-byte representation
+        // is fast; for v6 we fold the 16 bytes via two 64-bit loads.
+        std::size_t h;
+        if (ep.addr.is_v4())
+        {
+            h = std::hash<std::uint32_t>{}(ep.addr.to_v4().to_uint());
+        }
+        else
+        {
+            auto bytes = ep.addr.to_v6().to_bytes();
+            std::uint64_t lo, hi;
+            std::memcpy(&lo, bytes.data(), 8);
+            std::memcpy(&hi, bytes.data() + 8, 8);
+            h = std::hash<std::uint64_t>{}(lo) ^ (std::hash<std::uint64_t>{}(hi) * 2654435761u);
+        }
+        // Combine with port — shift prevents collisions when address low bits
+        // and port overlap.
+        h ^= std::hash<std::uint16_t>{}(ep.port) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        return h;
+    }
+};
 
 #endif // CLV_VPN_CONNECTION_H

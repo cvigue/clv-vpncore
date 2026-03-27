@@ -118,7 +118,7 @@ struct VpnConfig
     // ---- Process-global settings ----
     struct ProcessConfig
     {
-        int cpu_affinity = -1;                        ///< CPU pinning: -1=off, -2=auto, >=0=core
+        int cpu_affinity = -1;                              ///< CPU pinning: -1=off, -2=auto, >=0=core
         std::optional<bool> transit_routing = std::nullopt; ///< IP forwarding: nullopt=auto (on for server, off for client-only), true/false=explicit
     } process;
 

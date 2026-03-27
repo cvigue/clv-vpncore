@@ -6,11 +6,13 @@
 #include <util/ipv4_utils.h>
 #include <util/ipv6_utils.h>
 
-#include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
-#include <map>
+#include <cstring>
+#include <functional>
 #include <optional>
+#include <unordered_map>
 #include <vector>
 
 namespace clv::vpn {
@@ -52,18 +54,59 @@ struct Ipv6RoutingTraits
 };
 
 // ---------------------------------------------------------------------------
-// RoutingTable<Traits> — longest-prefix-match routing table
+// Hash support for address types used as unordered_map keys
 // ---------------------------------------------------------------------------
 
-/**
- * @brief Longest-prefix-match routing table for VPN traffic.
- *
- * Maintains a mapping of CIDR blocks to client session IDs.
- * Supports efficient longest-prefix-match lookups for routing decisions.
- *
- * @tparam Traits  Address-family traits providing @c Address type,
- *                 @c kMaxPrefix, @c Normalize(), and @c Matches().
- */
+struct Ipv6AddressHash
+{
+    std::size_t operator()(const ipv6::Ipv6Address &addr) const noexcept
+    {
+        std::uint64_t lo, hi;
+        std::memcpy(&lo, addr.data(), 8);
+        std::memcpy(&hi, addr.data() + 8, 8);
+        // boost-style hash combine
+        std::size_t h = std::hash<std::uint64_t>{}(lo);
+        h ^= std::hash<std::uint64_t>{}(hi) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        return h;
+    }
+};
+
+struct Ipv6AddressEqual
+{
+    bool operator()(const ipv6::Ipv6Address &a, const ipv6::Ipv6Address &b) const noexcept
+    {
+        return a == b;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// AddressMapTraits — select hash/equal for each address family
+// ---------------------------------------------------------------------------
+
+template <typename Address>
+struct AddressMapTraits
+{
+    using Hasher = std::hash<Address>;
+    using Equal = std::equal_to<Address>;
+};
+
+template <>
+struct AddressMapTraits<ipv6::Ipv6Address>
+{
+    using Hasher = Ipv6AddressHash;
+    using Equal = Ipv6AddressEqual;
+};
+
+// ---------------------------------------------------------------------------
+// RoutingTable<Traits> — longest-prefix-match routing table
+//
+// Stores one unordered_map per prefix length (0..kMaxPrefix).  Lookup
+// iterates from the longest prefix to the shortest, masking the
+// destination and probing the corresponding map.  For the common
+// case of /32-only (IPv4) or /128-only (IPv6) host routes this
+// collapses to a single O(1) hash probe.
+// ---------------------------------------------------------------------------
+
 template <typename Traits>
 class RoutingTable
 {
@@ -83,8 +126,7 @@ class RoutingTable
             return false;
 
         auto normalized = Traits::Normalize(network, prefix_length);
-        RouteKey key{normalized, prefix_length};
-        routes_[key] = session_id;
+        levels_[prefix_length][normalized] = session_id;
         return true;
     }
 
@@ -94,67 +136,72 @@ class RoutingTable
             return false;
 
         auto normalized = Traits::Normalize(network, prefix_length);
-        RouteKey key{normalized, prefix_length};
-        return routes_.erase(key) > 0;
+        return levels_[prefix_length].erase(normalized) > 0;
     }
 
     std::optional<std::uint64_t> Lookup(const Address &dest) const
     {
-        auto it = std::ranges::find_if(routes_, [&dest](const auto &pair)
+        for (int p = Traits::kMaxPrefix; p >= 0; --p)
         {
-            return Traits::Matches(dest, pair.first.network, pair.first.prefix_length);
-        });
-
-        if (it != routes_.end())
-            return it->second;
-
+            const auto &level = levels_[p];
+            if (level.empty())
+                continue;
+            auto masked = Traits::Normalize(dest, static_cast<std::uint8_t>(p));
+            if (auto it = level.find(masked); it != level.end())
+                return it->second;
+        }
         return std::nullopt;
     }
 
     std::vector<Route> GetRoutesForSession(std::uint64_t session_id) const
     {
         std::vector<Route> result;
-        std::ranges::for_each(routes_, [&](const auto &pair)
+        for (std::uint8_t p = 0; p <= Traits::kMaxPrefix; ++p)
         {
-            if (pair.second == session_id)
-                result.push_back({pair.first.network, pair.first.prefix_length, pair.second});
-        });
+            for (const auto &[network, sid] : levels_[p])
+            {
+                if (sid == session_id)
+                    result.push_back({network, p, sid});
+            }
+        }
         return result;
     }
 
     std::size_t RemoveSessionRoutes(std::uint64_t session_id)
     {
-        return std::erase_if(routes_, [session_id](const auto &pair)
+        std::size_t total = 0;
+        for (auto &level : levels_)
         {
-            return pair.second == session_id;
-        });
+            total += std::erase_if(level, [session_id](const auto &pair)
+            {
+                return pair.second == session_id;
+            });
+        }
+        return total;
     }
 
     std::size_t GetRouteCount() const
     {
-        return routes_.size();
+        std::size_t total = 0;
+        for (const auto &level : levels_)
+            total += level.size();
+        return total;
     }
 
     void Clear()
     {
-        routes_.clear();
+        for (auto &level : levels_)
+            level.clear();
     }
 
   private:
-    struct RouteKey
-    {
-        Address network;
-        std::uint8_t prefix_length;
+    using Map = std::unordered_map<
+        Address,
+        std::uint64_t,
+        typename AddressMapTraits<Address>::Hasher,
+        typename AddressMapTraits<Address>::Equal>;
 
-        bool operator<(const RouteKey &other) const
-        {
-            if (prefix_length != other.prefix_length)
-                return prefix_length > other.prefix_length;
-            return network < other.network;
-        }
-    };
-
-    std::map<RouteKey, std::uint64_t> routes_;
+    std::array<Map, Traits::kMaxPrefix + 1> levels_;
 };
 
 /** IPv4 routing table (host-byte-order uint32_t addresses, /0–/32) */

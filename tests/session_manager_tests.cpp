@@ -258,3 +258,55 @@ TEST_F(SessionManagerTest, GetAllSessionIds)
     EXPECT_TRUE(id_set.count(id2.value));
     EXPECT_TRUE(id_set.count(id3.value));
 }
+
+TEST_F(SessionManagerTest, EndpointIndexClearedAfterRemove)
+{
+    auto id = openvpn::SessionId::Generate();
+    auto ep = CreateEndpoint(0xC0A80001, 1194);
+    manager.GetOrCreateSession(id, ep, true, std::nullopt, *logger_);
+
+    EXPECT_NE(manager.FindSessionByEndpoint(ep), nullptr);
+    manager.RemoveSession(id);
+    EXPECT_EQ(manager.FindSessionByEndpoint(ep), nullptr);
+}
+
+TEST_F(SessionManagerTest, EndpointIndexClearedAfterCleanup)
+{
+    auto id1 = openvpn::SessionId::Generate();
+    auto id2 = openvpn::SessionId::Generate();
+    auto ep1 = CreateEndpoint(0xC0A80001, 1194);
+    auto ep2 = CreateEndpoint(0xC0A80002, 1195);
+
+    manager.GetOrCreateSession(id1, ep1, true, std::nullopt, *logger_);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    manager.GetOrCreateSession(id2, ep2, true, std::nullopt, *logger_);
+
+    // Cleanup stale — id1 should expire, id2 should survive
+    auto removed = manager.CleanupStaleSession(std::chrono::milliseconds(100));
+    EXPECT_EQ(removed, 1u);
+
+    EXPECT_EQ(manager.FindSessionByEndpoint(ep1), nullptr);
+    EXPECT_NE(manager.FindSessionByEndpoint(ep2), nullptr);
+}
+
+TEST_F(SessionManagerTest, EndpointIndexClearedAfterClearAll)
+{
+    auto id = openvpn::SessionId::Generate();
+    auto ep = CreateEndpoint(0xC0A80001, 1194);
+    manager.GetOrCreateSession(id, ep, true, std::nullopt, *logger_);
+
+    EXPECT_NE(manager.FindSessionByEndpoint(ep), nullptr);
+    manager.ClearAllSessions();
+    EXPECT_EQ(manager.FindSessionByEndpoint(ep), nullptr);
+}
+
+TEST_F(SessionManagerTest, EndpointLookupWithIPv6)
+{
+    auto id = openvpn::SessionId::Generate();
+    Connection::Endpoint ep{asio::ip::make_address("::1"), 5000};
+    manager.GetOrCreateSession(id, ep, true, std::nullopt, *logger_);
+
+    auto *found = manager.FindSessionByEndpoint(ep);
+    ASSERT_NE(found, nullptr);
+    EXPECT_EQ(found->GetSessionId().value, id.value);
+}

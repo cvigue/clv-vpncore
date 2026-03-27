@@ -543,7 +543,7 @@ asio::awaitable<void> UserspaceDataChannel::StartTunReceiver()
                 if (!sendEntries_.empty() && socketFd >= 0)
                 {
                     logger_->debug("StartTunReceiver: sending {} encrypted packets to client(s)", sendEntries_.size());
-                    auto sent = transport::SendBatch(socketFd, sendEntries_);
+                    auto sent = transport::SendBatch(socketFd, sendEntries_, *batch_scratch_);
                     stats_.packetsSent += sent;
                     for (std::size_t i = 0; i < sent; ++i)
                     {

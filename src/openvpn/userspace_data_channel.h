@@ -294,6 +294,7 @@ class UserspaceDataChannel
     // on the hot path.  Cleared (but not freed) at the start of each loop.
     std::vector<PreparedPacket> prepared_;
     std::vector<transport::SendEntry> sendEntries_;
+    std::unique_ptr<transport::BatchScratchpad> batch_scratch_ = std::make_unique<transport::BatchScratchpad>();
 
     // Zero-copy arena: contiguous memory for TUN read → encrypt → sendmmsg
     transport::PacketArena outbound_arena_;

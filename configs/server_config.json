@@ -44,7 +44,7 @@
         "lame_duck_seconds": 0
     },
     "performance": {
-        "enable_dco": true,
+        "enable_dco": false,
         "stats_interval_seconds": 120,
         "socket_recv_buffer": 4194304,
         "socket_send_buffer": 4194304,
