@@ -35,8 +35,8 @@
     },
     "performance": {
         "enable_dco": false,
-        "socket_recv_buffer": 262144,
-        "socket_send_buffer": 262144,
+        "socket_recv_buffer": 4194304,
+        "socket_send_buffer": 4194304,
         "batch_size": 64,
         "process_quanta": 16,
         "stats_interval_seconds": 0

@@ -77,7 +77,13 @@ bash perf/run_vpn_perf.sh --list
 bash perf/run_vpn_perf.sh --build-dir build --scenario clv-user-udp-clean-tcp
 bash perf/run_vpn_perf.sh --build-dir build --matrix stage1
 bash perf/run_vpn_perf.sh --build-dir build --matrix stage2
+bash perf/run_vpn_perf.sh --build-dir build --matrix stage1 --verbose-progress
 ```
+
+Progress output behavior:
+
+- Default mode is compact: the active scenario progress line is updated in place.
+- Use `--verbose-progress` to emit per-step run notes and linefeed scenario banners.
 
 Override defaults:
 

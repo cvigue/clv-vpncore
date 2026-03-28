@@ -25,6 +25,7 @@ HANDSHAKE_TIMEOUT="${HANDSHAKE_TIMEOUT:-30}"
 BASE_SCENARIO=""
 PARALLEL_STREAMS=1
 IPERF_REVERSE=0
+VERBOSE_PROGRESS=0
 
 STAGE1_SCENARIOS=(
     clv-user-udp-clean-tcp
@@ -85,8 +86,9 @@ Usage:
   perf/run_vpn_perf.sh [options]
 
 Options:
-  --list                 Show available scenarios and profiles
+    --list                 Show available scenarios and profiles
     --matrix NAME          Run a named matrix: stage1 or stage2 (default: stage1)
+    --verbose-progress     Emit per-step run notes and linefeed scenario banners
   --scenario NAME        Run a single scenario
   --build-dir PATH       Build directory containing demos/simple_vpn
   --results-root PATH    Root directory for performance artifacts
@@ -99,6 +101,32 @@ Environment overrides:
   IPERF_UDP_BANDWIDTH    Same as -b
   HANDSHAKE_TIMEOUT      Default: 30
 EOF
+}
+
+emit_run_note() {
+    if (( VERBOSE_PROGRESS == 1 )); then
+        perf_note "$*"
+    fi
+}
+
+progress_begin_scenario() {
+    local index="$1"
+    local total="$2"
+    local scenario="$3"
+
+    if (( VERBOSE_PROGRESS == 1 )); then
+        echo
+        echo "=== [${index}/${total}] ${scenario} ==="
+    else
+        printf '\r\033[2K=== [%d/%d] %s ===' "${index}" "${total}" "${scenario}"
+    fi
+}
+
+progress_end_for_summary() {
+    if (( VERBOSE_PROGRESS == 0 )); then
+        printf '\r\033[2K'
+        echo
+    fi
 }
 
 emit_matrix_scenarios() {
@@ -239,6 +267,10 @@ parse_args() {
             --matrix)
                 MATRIX_NAME="$2"
                 shift 2
+                ;;
+            --verbose-progress)
+                VERBOSE_PROGRESS=1
+                shift
                 ;;
             --scenario)
                 SCENARIO_NAME="$2"
@@ -521,7 +553,7 @@ run_scenario() {
         fi
     fi
 
-    perf_note "Scenario ${scenario}: setting up namespaces"
+    emit_run_note "Scenario ${scenario}: setting up namespaces"
     if ! "${PROJECT_ROOT}/integration/netns/setup_vpn.sh" 1 > "${scenario_dir}/setup.log" 2>&1; then
         reason="namespace setup failed"
         record_result "${scenario}" "${status}" "${reason}" "${scenario_dir}" "${handshake_seconds}" "${throughput_bps}" "${transfer_bytes}" "${retransmits}" "${jitter_ms}" "${lost_percent}"
@@ -529,7 +561,7 @@ run_scenario() {
     fi
 
     if perf_profile_requires_netem "${PROFILE}"; then
-        perf_note "Scenario ${scenario}: applying profile ${PROFILE}"
+        emit_run_note "Scenario ${scenario}: applying profile ${PROFILE}"
         if ! apply_netem_profile "${PROFILE}"; then
             reason="failed to apply tc netem profile"
             record_result "${scenario}" "${status}" "${reason}" "${scenario_dir}" "${handshake_seconds}" "${throughput_bps}" "${transfer_bytes}" "${retransmits}" "${jitter_ms}" "${lost_percent}"
@@ -539,7 +571,7 @@ run_scenario() {
 
     capture_transport_metadata "${metadata_file}" "${transport_state_file}" "${scenario}"
 
-    perf_note "Scenario ${scenario}: starting clv server"
+    emit_run_note "Scenario ${scenario}: starting clv server"
     ns_bg "${NS_SERVER}" "${BUILD_DIR}/demos/simple_vpn" "${SERVER_CONFIG}" > "${server_log}" 2>&1 &
     server_pid=$!
     sleep 2
@@ -549,7 +581,7 @@ run_scenario() {
         return 1
     fi
 
-    perf_note "Scenario ${scenario}: starting client (${CLIENT_IMPL})"
+    emit_run_note "Scenario ${scenario}: starting client (${CLIENT_IMPL})"
     if [[ "${CLIENT_IMPL}" == "clv" ]]; then
         ns_bg "${NS_CLIENT}" "${BUILD_DIR}/demos/simple_vpn" "${CLIENT_CONFIG}" > "${client_log}" 2>&1 &
     else
@@ -564,7 +596,7 @@ run_scenario() {
         wait_pattern='Initialization Sequence Completed'
     fi
 
-    perf_note "Scenario ${scenario}: waiting for handshake"
+    emit_run_note "Scenario ${scenario}: waiting for handshake"
     handshake_start=$(date +%s)
     if wait_for_log_pattern "${client_log}" "${wait_pattern}" "${HANDSHAKE_TIMEOUT}" "${server_pid}" "${client_pid}"; then
         handshake_end=$(date +%s)
@@ -591,12 +623,12 @@ run_scenario() {
         fi
     fi
 
-    perf_note "Scenario ${scenario}: starting iperf3 server"
+    emit_run_note "Scenario ${scenario}: starting iperf3 server"
     ns_bg "${NS_SERVER}" iperf3 -s -1 -B "${TUNNEL_SERVER_IP}" > "${iperf_server_log}" 2>&1 &
     iperf_server_pid=$!
     sleep 1
 
-    perf_note "Scenario ${scenario}: running ${TRAFFIC} traffic through tunnel"
+    emit_run_note "Scenario ${scenario}: running ${TRAFFIC} traffic through tunnel"
     if [[ "${TRAFFIC}" == "tcp" ]]; then
         local tcp_args=(iperf3 -c "${TUNNEL_SERVER_IP}" -t "${IPERF_SECONDS}" -J)
         if (( PARALLEL_STREAMS > 1 )); then
@@ -759,7 +791,7 @@ main() {
         exit 1
     fi
 
-    perf_note "Results directory: ${RUN_DIR}"
+    emit_run_note "Results directory: ${RUN_DIR}"
 
     local selected=()
     mapfile -t selected < <(select_scenarios)
@@ -770,8 +802,7 @@ main() {
         scenario_dir=$(printf '%s/%02d_%s' "${RUN_DIR}" "${index}" "${scenario}")
         mkdir -p "${scenario_dir}"
 
-        echo
-        echo "=== [${index}/${#selected[@]}] ${scenario} ==="
+        progress_begin_scenario "${index}" "${#selected[@]}" "${scenario}"
         if run_scenario "${scenario}" "${scenario_dir}"; then
             ((PASS_COUNT++)) || true
         else
@@ -784,6 +815,8 @@ main() {
         fi
         ((index++)) || true
     done
+
+    progress_end_for_summary
 
     write_summary_files
     ln -sfn "${RUN_DIR}" "${RESULTS_ROOT}/latest"
