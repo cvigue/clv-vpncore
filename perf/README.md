@@ -11,17 +11,38 @@ real tunnel traffic, and optional underlay impairment via tc netem.
 - Compare clv and official OpenVPN client behavior against the same clv server
 - Collect metrics rather than impose brittle throughput thresholds
 
-## Stage 1 Coverage
+## Matrices
+
+### Stage 1 Coverage
 
 Scenario axes:
 
 - Client implementation: `clv`, `ovpn`
 - Datapath: `user`, `dco`
 - VPN transport: `udp`, plus `tcp` for `clv-user`
-- Impairment profile: `clean`, `lat100`, `lat100_loss1`
+- Impairment profile: `clean`, `lat20`, `lat100`
 - Tunnel traffic: `tcp`, `udp`
 
-The Stage 1 matrix is defined in [perf/run_vpn_perf.sh](run_vpn_perf.sh).
+Purpose:
+
+- Keep a fast baseline matrix for routine clv vs OpenVPN comparisons
+- Cover clean-path throughput plus non-loss latency sensitivity without the noisier stress cases
+
+### Stage 2 Coverage
+
+Scenario focus:
+
+- Reverse-direction TCP for the Stage 1 TCP-over-UDP cases
+- Multi-stream TCP (`-P 4` and `-P 8`) for the Stage 1 TCP-over-UDP cases
+- Loss-profile TCP scenarios (`lat100_loss1`), moved out of Stage 1
+
+Purpose:
+
+- Quantify headroom beyond the single-stream forward baseline
+- Separate directionality effects from aggregate tunnel capacity
+- Keep harsher loss scenarios in an explicit deeper-analysis matrix
+
+Both matrices are defined in [perf/run_vpn_perf.sh](run_vpn_perf.sh).
 
 ## Requirements
 
@@ -55,6 +76,7 @@ Run the harness directly:
 bash perf/run_vpn_perf.sh --list
 bash perf/run_vpn_perf.sh --build-dir build --scenario clv-user-udp-clean-tcp
 bash perf/run_vpn_perf.sh --build-dir build --matrix stage1
+bash perf/run_vpn_perf.sh --build-dir build --matrix stage2
 ```
 
 Override defaults:
@@ -75,12 +97,14 @@ Artifacts are written under the build tree by default:
 Each scenario directory contains:
 
 - `metadata.env`
+- `transport_state.txt`
 - `setup.log`
 - `server.log`
 - `client.log`
 - `iperf_server.log`
 - `iperf_client.json`
 - `iperf_client.stderr`
+- `tcp_socket_state.txt` for TCP scenarios
 
 ## Notes
 
@@ -88,4 +112,5 @@ Each scenario directory contains:
 - The suite is not part of the normal CMake build targets.
 - The suite is not intended for ordinary CI by default.
 - Stage 1 treats handshake success plus non-zero transfer as the main sanity bar.
+- Stage 2 is intentionally larger and noisier; use it for headroom analysis rather than quick regression checks.
 - Throughput, retransmits, jitter, and loss are recorded as report-first metrics.

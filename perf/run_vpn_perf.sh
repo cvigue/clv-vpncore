@@ -22,24 +22,49 @@ RUN_TIMESTAMP="$(date +%Y%m%dT%H%M%S)"
 IPERF_SECONDS="${IPERF_SECONDS:-20}"
 IPERF_UDP_BANDWIDTH="${IPERF_UDP_BANDWIDTH:-700M}"
 HANDSHAKE_TIMEOUT="${HANDSHAKE_TIMEOUT:-30}"
+BASE_SCENARIO=""
+PARALLEL_STREAMS=1
+IPERF_REVERSE=0
 
 STAGE1_SCENARIOS=(
     clv-user-udp-clean-tcp
     clv-user-udp-clean-udp
+    clv-user-udp-lat20-tcp
     clv-user-udp-lat100-tcp
-    clv-user-udp-lat100-loss1-tcp
     clv-user-tcp-clean-tcp
     clv-dco-udp-clean-tcp
     clv-dco-udp-clean-udp
+    clv-dco-udp-lat20-tcp
     clv-dco-udp-lat100-tcp
-    clv-dco-udp-lat100-loss1-tcp
     ovpn-user-udp-clean-tcp
     ovpn-user-udp-clean-udp
+    ovpn-user-udp-lat20-tcp
     ovpn-user-udp-lat100-tcp
-    ovpn-user-udp-lat100-loss1-tcp
     ovpn-dco-udp-clean-tcp
     ovpn-dco-udp-clean-udp
+    ovpn-dco-udp-lat20-tcp
     ovpn-dco-udp-lat100-tcp
+)
+
+STAGE2_HEADROOM_BASE_SCENARIOS=(
+    clv-user-udp-clean-tcp
+    clv-user-udp-lat20-tcp
+    clv-user-udp-lat100-tcp
+    clv-dco-udp-clean-tcp
+    clv-dco-udp-lat20-tcp
+    clv-dco-udp-lat100-tcp
+    ovpn-user-udp-clean-tcp
+    ovpn-user-udp-lat20-tcp
+    ovpn-user-udp-lat100-tcp
+    ovpn-dco-udp-clean-tcp
+    ovpn-dco-udp-lat20-tcp
+    ovpn-dco-udp-lat100-tcp
+)
+
+STAGE2_LOSS_SCENARIOS=(
+    clv-user-udp-lat100-loss1-tcp
+    clv-dco-udp-lat100-loss1-tcp
+    ovpn-user-udp-lat100-loss1-tcp
     ovpn-dco-udp-lat100-loss1-tcp
 )
 
@@ -61,7 +86,7 @@ Usage:
 
 Options:
   --list                 Show available scenarios and profiles
-  --matrix NAME          Run a named matrix (default: stage1)
+    --matrix NAME          Run a named matrix: stage1 or stage2 (default: stage1)
   --scenario NAME        Run a single scenario
   --build-dir PATH       Build directory containing demos/simple_vpn
   --results-root PATH    Root directory for performance artifacts
@@ -76,13 +101,132 @@ Environment overrides:
 EOF
 }
 
+emit_matrix_scenarios() {
+    local matrix_name="$1"
+
+    case "${matrix_name}" in
+        stage1)
+            printf '%s\n' "${STAGE1_SCENARIOS[@]}"
+            ;;
+        stage2)
+            local scenario
+            for scenario in "${STAGE2_HEADROOM_BASE_SCENARIOS[@]}"; do
+                printf '%s\n' "${scenario}-reverse"
+                printf '%s\n' "${scenario}-streams4"
+                printf '%s\n' "${scenario}-streams8"
+            done
+            printf '%s\n' "${STAGE2_LOSS_SCENARIOS[@]}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+print_matrix_scenarios() {
+    emit_matrix_scenarios "$1" | sed 's/^/  /'
+}
+
 list_scenarios() {
     cat <<EOF
-Scenarios:
-$(printf '  %s\n' "${STAGE1_SCENARIOS[@]}")
+Matrices:
+  stage1          Fast baseline comparison matrix (clean, latency, UDP sanity)
+  stage2          Headroom and stress matrix (reverse, multi-stream, loss)
+
+Stage 1 scenarios:
+$(print_matrix_scenarios stage1)
+
+Stage 2 scenarios:
+$(print_matrix_scenarios stage2)
 
 $(list_perf_profiles)
 EOF
+}
+
+parse_scenario_variant() {
+    BASE_SCENARIO="$1"
+    PARALLEL_STREAMS=1
+    IPERF_REVERSE=0
+
+    while [[ "${BASE_SCENARIO}" =~ -(reverse|streams[0-9]+)$ ]]; do
+        local suffix="${BASH_REMATCH[1]}"
+        BASE_SCENARIO="${BASE_SCENARIO%-${suffix}}"
+        case "${suffix}" in
+            reverse)
+                IPERF_REVERSE=1
+                ;;
+            streams*)
+                PARALLEL_STREAMS="${suffix#streams}"
+                ;;
+        esac
+    done
+
+    if ! [[ "${PARALLEL_STREAMS}" =~ ^[1-9][0-9]*$ ]]; then
+        perf_error "Invalid stream count in scenario: $1"
+        return 1
+    fi
+
+    return 0
+}
+
+capture_transport_metadata() {
+    local metadata_file="$1"
+    local state_file="$2"
+    local scenario="$3"
+
+    {
+        echo "scenario=${scenario}"
+        echo "base_scenario=${BASE_SCENARIO}"
+        echo "matrix_name=${MATRIX_NAME}"
+        echo "client_impl=${CLIENT_IMPL}"
+        echo "datapath=${DATAPATH}"
+        echo "vpn_transport=${VPN_TRANSPORT}"
+        echo "traffic=${TRAFFIC}"
+        echo "profile=${PROFILE}"
+        echo "iperf_seconds=${IPERF_SECONDS}"
+        echo "iperf_udp_bandwidth=${IPERF_UDP_BANDWIDTH}"
+        echo "parallel_streams=${PARALLEL_STREAMS}"
+        echo "reverse_mode=${IPERF_REVERSE}"
+        echo "host_tcp_congestion_control=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo unknown)"
+        echo "host_default_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo unknown)"
+        echo "host_tcp_rmem=$(sysctl -n net.ipv4.tcp_rmem 2>/dev/null || echo unknown)"
+        echo "host_tcp_wmem=$(sysctl -n net.ipv4.tcp_wmem 2>/dev/null || echo unknown)"
+        echo "host_rmem_max=$(sysctl -n net.core.rmem_max 2>/dev/null || echo unknown)"
+        echo "host_wmem_max=$(sysctl -n net.core.wmem_max 2>/dev/null || echo unknown)"
+    } > "${metadata_file}"
+
+    {
+        echo "scenario=${scenario}"
+        echo "base_scenario=${BASE_SCENARIO}"
+        echo "matrix_name=${MATRIX_NAME}"
+        echo
+        echo "[host sysctl]"
+        sysctl net.ipv4.tcp_congestion_control net.core.default_qdisc net.ipv4.tcp_rmem net.ipv4.tcp_wmem net.core.rmem_max net.core.wmem_max 2>/dev/null || true
+        echo
+        echo "[bridge qdisc ${BRIDGE_SERVER_VETH}]"
+        ns_exec "${NS_BRIDGE}" tc qdisc show dev "${BRIDGE_SERVER_VETH}" 2>/dev/null || true
+        echo
+        echo "[bridge qdisc ${BRIDGE_CLIENT_VETH}]"
+        ns_exec "${NS_BRIDGE}" tc qdisc show dev "${BRIDGE_CLIENT_VETH}" 2>/dev/null || true
+        echo
+        echo "[server links]"
+        ns_exec "${NS_SERVER}" ip -br link 2>/dev/null || true
+        echo
+        echo "[client links]"
+        ns_exec "${NS_CLIENT}" ip -br link 2>/dev/null || true
+    } > "${state_file}"
+}
+
+capture_tcp_socket_snapshot() {
+    local snapshot_file="$1"
+
+    {
+        echo "[client ss -tin]"
+        ns_exec "${NS_CLIENT}" ss -tin 2>/dev/null || true
+        echo
+        echo "[server ss -tin]"
+        ns_exec "${NS_SERVER}" ss -tin 2>/dev/null || true
+    } > "${snapshot_file}"
 }
 
 parse_args() {
@@ -148,6 +292,9 @@ select_scenarios() {
         stage1)
             printf '%s\n' "${STAGE1_SCENARIOS[@]}"
             ;;
+        stage2)
+            emit_matrix_scenarios stage2
+            ;;
         *)
             perf_error "Unknown matrix: ${MATRIX_NAME}"
             exit 1
@@ -166,22 +313,30 @@ load_scenario() {
     CLIENT_CONFIG=""
     OVPN_CONFIG=""
 
-    case "${scenario}" in
+    if ! parse_scenario_variant "${scenario}"; then
+        return 1
+    fi
+
+    case "${BASE_SCENARIO}" in
         clv-user-udp-clean-tcp)       CLIENT_IMPL=clv;  DATAPATH=user; VPN_TRANSPORT=udp; PROFILE=clean;         TRAFFIC=tcp ;;
         clv-user-udp-clean-udp)       CLIENT_IMPL=clv;  DATAPATH=user; VPN_TRANSPORT=udp; PROFILE=clean;         TRAFFIC=udp ;;
+        clv-user-udp-lat20-tcp)       CLIENT_IMPL=clv;  DATAPATH=user; VPN_TRANSPORT=udp; PROFILE=lat20;         TRAFFIC=tcp ;;
         clv-user-udp-lat100-tcp)      CLIENT_IMPL=clv;  DATAPATH=user; VPN_TRANSPORT=udp; PROFILE=lat100;        TRAFFIC=tcp ;;
         clv-user-udp-lat100-loss1-tcp) CLIENT_IMPL=clv; DATAPATH=user; VPN_TRANSPORT=udp; PROFILE=lat100_loss1;  TRAFFIC=tcp ;;
         clv-user-tcp-clean-tcp)       CLIENT_IMPL=clv;  DATAPATH=user; VPN_TRANSPORT=tcp; PROFILE=clean;         TRAFFIC=tcp ;;
         clv-dco-udp-clean-tcp)        CLIENT_IMPL=clv;  DATAPATH=dco;  VPN_TRANSPORT=udp; PROFILE=clean;         TRAFFIC=tcp ;;
         clv-dco-udp-clean-udp)        CLIENT_IMPL=clv;  DATAPATH=dco;  VPN_TRANSPORT=udp; PROFILE=clean;         TRAFFIC=udp ;;
+        clv-dco-udp-lat20-tcp)        CLIENT_IMPL=clv;  DATAPATH=dco;  VPN_TRANSPORT=udp; PROFILE=lat20;         TRAFFIC=tcp ;;
         clv-dco-udp-lat100-tcp)       CLIENT_IMPL=clv;  DATAPATH=dco;  VPN_TRANSPORT=udp; PROFILE=lat100;        TRAFFIC=tcp ;;
         clv-dco-udp-lat100-loss1-tcp) CLIENT_IMPL=clv;  DATAPATH=dco;  VPN_TRANSPORT=udp; PROFILE=lat100_loss1;  TRAFFIC=tcp ;;
         ovpn-user-udp-clean-tcp)      CLIENT_IMPL=ovpn; DATAPATH=user; VPN_TRANSPORT=udp; PROFILE=clean;         TRAFFIC=tcp ;;
         ovpn-user-udp-clean-udp)      CLIENT_IMPL=ovpn; DATAPATH=user; VPN_TRANSPORT=udp; PROFILE=clean;         TRAFFIC=udp ;;
+        ovpn-user-udp-lat20-tcp)      CLIENT_IMPL=ovpn; DATAPATH=user; VPN_TRANSPORT=udp; PROFILE=lat20;         TRAFFIC=tcp ;;
         ovpn-user-udp-lat100-tcp)     CLIENT_IMPL=ovpn; DATAPATH=user; VPN_TRANSPORT=udp; PROFILE=lat100;        TRAFFIC=tcp ;;
         ovpn-user-udp-lat100-loss1-tcp) CLIENT_IMPL=ovpn; DATAPATH=user; VPN_TRANSPORT=udp; PROFILE=lat100_loss1; TRAFFIC=tcp ;;
         ovpn-dco-udp-clean-tcp)       CLIENT_IMPL=ovpn; DATAPATH=dco;  VPN_TRANSPORT=udp; PROFILE=clean;         TRAFFIC=tcp ;;
         ovpn-dco-udp-clean-udp)       CLIENT_IMPL=ovpn; DATAPATH=dco;  VPN_TRANSPORT=udp; PROFILE=clean;         TRAFFIC=udp ;;
+        ovpn-dco-udp-lat20-tcp)       CLIENT_IMPL=ovpn; DATAPATH=dco;  VPN_TRANSPORT=udp; PROFILE=lat20;         TRAFFIC=tcp ;;
         ovpn-dco-udp-lat100-tcp)      CLIENT_IMPL=ovpn; DATAPATH=dco;  VPN_TRANSPORT=udp; PROFILE=lat100;        TRAFFIC=tcp ;;
         ovpn-dco-udp-lat100-loss1-tcp) CLIENT_IMPL=ovpn; DATAPATH=dco; VPN_TRANSPORT=udp; PROFILE=lat100_loss1;  TRAFFIC=tcp ;;
         *)
@@ -189,6 +344,16 @@ load_scenario() {
             return 1
             ;;
     esac
+
+    if (( IPERF_REVERSE == 1 )) && [[ "${TRAFFIC}" != "tcp" ]]; then
+        perf_error "Reverse mode is only supported for TCP scenarios: ${scenario}"
+        return 1
+    fi
+
+    if (( PARALLEL_STREAMS > 1 )) && [[ "${TRAFFIC}" != "tcp" ]]; then
+        perf_error "Multi-stream mode is only supported for TCP scenarios: ${scenario}"
+        return 1
+    fi
 
     case "${DATAPATH}-${VPN_TRANSPORT}" in
         user-udp)
@@ -274,6 +439,8 @@ run_scenario() {
     local iperf_client_json="${scenario_dir}/iperf_client.json"
     local iperf_client_stderr="${scenario_dir}/iperf_client.stderr"
     local metadata_file="${scenario_dir}/metadata.env"
+    local transport_state_file="${scenario_dir}/transport_state.txt"
+    local tcp_snapshot_file="${scenario_dir}/tcp_socket_state.txt"
     local server_pid=""
     local client_pid=""
     local iperf_server_pid=""
@@ -310,17 +477,6 @@ run_scenario() {
         record_result "${scenario}" "${status}" "${reason}" "${scenario_dir}" "${handshake_seconds}" "${throughput_bps}" "${transfer_bytes}" "${retransmits}" "${jitter_ms}" "${lost_percent}"
         return 1
     fi
-
-    cat > "${metadata_file}" <<EOF
-scenario=${scenario}
-client_impl=${CLIENT_IMPL}
-datapath=${DATAPATH}
-vpn_transport=${VPN_TRANSPORT}
-traffic=${TRAFFIC}
-profile=${PROFILE}
-iperf_seconds=${IPERF_SECONDS}
-iperf_udp_bandwidth=${IPERF_UDP_BANDWIDTH}
-EOF
 
     if ! command_exists iperf3; then
         status="skip"
@@ -381,6 +537,8 @@ EOF
         fi
     fi
 
+    capture_transport_metadata "${metadata_file}" "${transport_state_file}" "${scenario}"
+
     perf_note "Scenario ${scenario}: starting clv server"
     ns_bg "${NS_SERVER}" "${BUILD_DIR}/demos/simple_vpn" "${SERVER_CONFIG}" > "${server_log}" 2>&1 &
     server_pid=$!
@@ -440,11 +598,19 @@ EOF
 
     perf_note "Scenario ${scenario}: running ${TRAFFIC} traffic through tunnel"
     if [[ "${TRAFFIC}" == "tcp" ]]; then
-        if ! ns_exec "${NS_CLIENT}" iperf3 -c "${TUNNEL_SERVER_IP}" -t "${IPERF_SECONDS}" -J > "${iperf_client_json}" 2> "${iperf_client_stderr}"; then
+        local tcp_args=(iperf3 -c "${TUNNEL_SERVER_IP}" -t "${IPERF_SECONDS}" -J)
+        if (( PARALLEL_STREAMS > 1 )); then
+            tcp_args+=( -P "${PARALLEL_STREAMS}" )
+        fi
+        if (( IPERF_REVERSE == 1 )); then
+            tcp_args+=( -R )
+        fi
+        if ! ns_exec "${NS_CLIENT}" "${tcp_args[@]}" > "${iperf_client_json}" 2> "${iperf_client_stderr}"; then
             reason="iperf3 TCP run failed"
             record_result "${scenario}" "${status}" "${reason}" "${scenario_dir}" "${handshake_seconds}" "${throughput_bps}" "${transfer_bytes}" "${retransmits}" "${jitter_ms}" "${lost_percent}"
             return 1
         fi
+        capture_tcp_socket_snapshot "${tcp_snapshot_file}"
         throughput_bps="$(iperf_tcp_metric "${iperf_client_json}" bits_per_second || true)"
         transfer_bytes="$(iperf_tcp_metric "${iperf_client_json}" bytes || true)"
         retransmits="$(iperf_tcp_metric "${iperf_client_json}" retransmits || true)"
@@ -500,9 +666,9 @@ print_result_table() {
     fi
 
     echo
-    printf "${c_bold}%-36s  %-4s  %-13s  %-4s  %-7s  %s${c_reset}\n" \
+    printf "${c_bold}%-44s  %-4s  %-13s  %-4s  %-7s  %s${c_reset}\n" \
         "SCENARIO" "ST" "THROUGHPUT" "HS" "TRAFFIC" "NOTES"
-    printf '%0.s-' {1..92}; echo
+    printf '%0.s-' {1..100}; echo
 
     local row
     for row in "${RESULT_ROWS[@]}"; do
@@ -524,7 +690,16 @@ print_result_table() {
         local hs_str="${hs}s"
         [[ "${hs}" == "n/a" || -z "${hs}" ]] && hs_str="-"
 
+        parse_scenario_variant "${scenario}" >/dev/null 2>&1 || true
+
         local notes=""
+        local variant_notes=""
+        if (( IPERF_REVERSE == 1 )); then
+            variant_notes="reverse"
+        elif (( PARALLEL_STREAMS > 1 )); then
+            variant_notes="P=${PARALLEL_STREAMS}"
+        fi
+
         if [[ "${status}" == "pass" && "${traffic}" == "udp" ]]; then
             local jitter_r loss_r
             jitter_r="$(awk -v v="${jitter}" 'BEGIN { printf "%.3f", v+0 }')"
@@ -536,6 +711,14 @@ print_result_table() {
             notes="${reason:0:58}"
         fi
 
+        if [[ -n "${variant_notes}" ]]; then
+            if [[ -n "${notes}" ]]; then
+                notes="${variant_notes}  ${notes}"
+            else
+                notes="${variant_notes}"
+            fi
+        fi
+
         local st_colored
         case "${status}" in
             pass) st_colored="${c_pass}PASS${c_reset}" ;;
@@ -545,7 +728,7 @@ print_result_table() {
         esac
 
         # Print each field; keep color escape codes out of printf width calculations
-        printf '%-36s  ' "${scenario:0:36}"
+        printf '%-44s  ' "${scenario:0:44}"
         printf "${st_colored}"
         printf '  %-13s  %-4s  %-7s  %s\n' "${tput_str}" "${hs_str}" "${traffic}" "${notes:0:58}"
     done

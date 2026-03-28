@@ -358,6 +358,7 @@ ctest --exclude-regex "IT[123]"                            # unit tests only
 ./tests/test_vpncore --gtest_filter="DataChannel*"        # specific suite
 bash ../perf/run_vpn_perf.sh --list                       # list explicit perf scenarios
 bash ../perf/run_vpn_perf.sh --build-dir "$PWD" --scenario clv-user-udp-clean-tcp
+bash ../perf/run_vpn_perf.sh --build-dir "$PWD" --matrix stage2
 ```
 
 **Unit tests** (669): protocol parsing, TLS handshake, TLS-Crypt (key loading, wrap/unwrap, tamper detection, replay protection), key derivation, AEAD encrypt/decrypt, replay protection, config validation, IP pool management (IPv4 + IPv6), routing (IPv4 + IPv6), UDP batching, session lifecycle, and config exchange round-trip.
