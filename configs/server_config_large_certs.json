@@ -1,0 +1,29 @@
+{
+    "server": {
+        "host": "0.0.0.0",
+        "port": 1194,
+        "proto": "udp",
+        "dev": "tun",
+        "dev_node": "/dev/net/tun",
+        "cipher": "CHACHA20-POLY1305",
+        "auth": "SHA256",
+        "tls_cipher": "TLS-DHE-RSA-WITH-AES-256-GCM-SHA384",
+        "keysize": 256,
+        "ca_cert": "test_data/certs/ca_large.crt",
+        "tls_crypt_key": "test_data/certs/tls-crypt.key",
+        "cert": "test_data/certs/server_large.crt",
+        "key": "test_data/certs/server_large.key",
+        "dh_params": "test_data/certs/dh2048.pem",
+        "network": "10.8.0.0/24",
+        "client_dns": ["8.8.8.8", "8.8.4.4"],
+        "routes": ["10.8.0.0/24"],
+        "push_routes": true,
+        "keepalive": [10, 120],
+        "max_clients": 10,
+        "renegotiate_seconds": 3600,
+        "ping_timer_remote": 60
+    },
+    "logging": {
+        "verbosity": 3
+    }
+}

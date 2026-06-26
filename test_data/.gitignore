@@ -1,0 +1,5 @@
+# Keep all test data files checked in for reproducible tests
+# But ignore any temporary files that might be created
+*.tmp
+*.bak
+*.log

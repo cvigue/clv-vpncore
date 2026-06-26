@@ -1,0 +1,126 @@
+// Copyright (c) 2025- Charlie Vigue. All rights reserved.
+
+#ifndef CLV_VPN_TRANSPORT_LISTENER_H
+#define CLV_VPN_TRANSPORT_LISTENER_H
+
+#include "transport/transport.h"
+
+#include <asio/awaitable.hpp>
+#include <asio/io_context.hpp>
+#include <asio/ip/tcp.hpp>
+#include <asio/ip/udp.hpp>
+
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <utility>
+
+namespace clv::vpn::transport {
+
+// ---------------------------------------------------------------------------
+// UdpListener — binds a UDP socket and receives datagrams
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief Server-side UDP listener.
+ *
+ * Binds a UDP socket on the specified address and port, receives datagrams via
+ * coroutine-based ReceiveNext(), and creates per-client UdpTransport
+ * handles for sending replies.
+ */
+class UdpListener
+{
+  public:
+    /**
+     * @brief Bind a UDP socket on the given address and port.
+     * @param ctx  ASIO I/O context
+     * @param host Bind address. "0.0.0.0" or "" = dual-stack wildcard; "::" = same;
+     *             IPv4 literal = bind to that interface (v4-mapped on AF_INET6 socket);
+     *             IPv6 literal = bind IPv6-only on that address.
+     * @param port Port to bind on
+     */
+    UdpListener(asio::io_context &ctx, const std::string &host, std::uint16_t port);
+
+    /**
+     * @brief Create a transport handle for sending to a specific ASIO endpoint.
+     * @param ep The peer's UDP endpoint
+     * @return A UdpTransport sharing this listener's socket
+     */
+    UdpTransport TransportFor(const asio::ip::udp::endpoint &ep);
+
+    /**
+     * @brief Create a transport handle from a PeerEndpoint.
+     * @param ep The peer endpoint
+     * @return A UdpTransport sharing this listener's socket
+     */
+    UdpTransport TransportFor(const PeerEndpoint &ep);
+
+    /** @brief Access the raw ASIO socket (e.g., for DcoDataChannel FD extraction). */
+    asio::ip::udp::socket &RawSocket()
+    {
+        return *socket_;
+    }
+
+    /** @brief Apply SO_RCVBUF/SO_SNDBUF (with FORCE fallback) to the socket. */
+    void ApplySocketBuffers(int recv_buf, int send_buf, spdlog::logger &logger);
+
+    /**
+     * @brief Query actual kernel socket buffer sizes.
+     * @return {recv_buf, send_buf} as reported by getsockopt.
+     */
+    std::pair<int, int> GetSocketBufferSizes() const;
+
+    /** @brief Get the local port the listener is bound to. */
+    std::uint16_t LocalPort() const
+    {
+        return socket_->local_endpoint().port();
+    }
+
+  private:
+    std::shared_ptr<asio::ip::udp::socket> socket_;
+};
+
+// ---------------------------------------------------------------------------
+// TcpListener — accepts TCP connections
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief Server-side TCP listener (acceptor).
+ *
+ * Listens on a TCP port and accepts incoming connections. Each accepted
+ * connection produces a TcpTransport that the server uses for per-client
+ * communication.
+ */
+class TcpListener
+{
+  public:
+    /**
+     * @brief Start listening on the given address and port.
+     * @param ctx  ASIO I/O context
+     * @param host Bind address (same semantics as UdpListener)
+     * @param port Port to listen on
+     */
+    TcpListener(asio::io_context &ctx, const std::string &host, std::uint16_t port);
+
+    /**
+     * @brief Accept the next incoming connection.
+     * @return A TcpTransport wrapping the accepted socket (with TCP_NODELAY set)
+     */
+    asio::awaitable<TcpTransport> AcceptNext();
+
+    /** @brief Close the acceptor (cancels pending AcceptNext). */
+    void Close();
+
+    /** @brief Get the local port the listener is bound to. */
+    std::uint16_t LocalPort() const
+    {
+        return acceptor_.local_endpoint().port();
+    }
+
+  private:
+    asio::ip::tcp::acceptor acceptor_;
+};
+
+} // namespace clv::vpn::transport
+
+#endif // CLV_VPN_TRANSPORT_LISTENER_H

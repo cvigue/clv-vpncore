@@ -1,0 +1,32 @@
+# Build directories
+build/
+cmake-build-*/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Compiled
+*.o
+*.so
+*.a
+*.exe
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+
+# Test outputs
+Testing/
+*.log
+
+# Generated configs
+*.pem
+*.key
+*.crt
+!test_data/**

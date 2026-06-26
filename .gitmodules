@@ -1,0 +1,3 @@
+[submodule "clv-base"]
+	path = clv-base
+	url = git@github.com:cvigue/clv-base.git
