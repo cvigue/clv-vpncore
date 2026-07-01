@@ -101,9 +101,11 @@ struct ServerDataAdapter
         if (!session || !session->HasTransport())
             co_return;
 
-        auto packet_id = session->GetAndIncrementOutboundPacketId();
+        auto packet_id = session->TryAllocateOutboundPacketId();
+        if (!packet_id)
+            co_return;
         auto encrypted = session->GetDataChannel().EncryptPacketWithId(
-            plaintext, session->GetSessionId(), packet_id);
+            plaintext, session->GetSessionId(), *packet_id);
         if (encrypted.empty())
             co_return;
 

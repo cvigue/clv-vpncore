@@ -70,6 +70,17 @@ inline bool IsAvailable()
     return false;
 }
 
+/**
+ * @brief Whether the active DCO driver supports RFC §7.5 epoch data keys.
+ *
+ * Bundled ovpn-dco-v2 is legacy §7.4 only.  Gate IV_PROTO_DATA_EPOCH on this
+ * returning true once kernel epoch attrs exist (Phase C).
+ */
+[[nodiscard]] inline bool SupportsEpochData() noexcept
+{
+    return false;
+}
+
 } // namespace clv::vpn::dco
 
 #endif // CLV_VPN_DCO_UTILS_H

@@ -272,11 +272,15 @@ struct MultiPeerPolicy
         // This keeps the TX hot path and the control-plane keepalive ping path
         // on the same monotonic sequence so the peer's anti-replay window never
         // sees duplicate IDs regardless of which path sends next.
-        auto packet_id = conn->GetAndIncrementOutboundPacketId();
+        auto packet_id = conn->TryAllocateOutboundPacketId();
+        if (!packet_id)
+            return 0;
         auto wire_len = txs.encrypt.EncryptInPlace(
-            slot_span, payload_len, session_id, packet_id);
+            slot_span, payload_len, session_id, *packet_id);
         if (wire_len == 0)
             return 0;
+
+        conn->GetDataChannel().RecordOutboundEncrypt(payload_len, entry->encrypt_key.cipher_algorithm);
 
         out.data = slot_span.first(wire_len);
         out.dest = conn->GetTransport().GetPeer();

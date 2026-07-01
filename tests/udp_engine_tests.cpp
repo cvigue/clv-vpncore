@@ -6,6 +6,7 @@
 #include "data_path_stats.h"
 #include "openvpn/connection.h"
 #include "openvpn/data_channel.h"
+#include "openvpn/data_v2_wire.h"
 #include "openvpn/session_manager.h"
 #include "p2p_policy.h"
 
@@ -380,6 +381,15 @@ static EncryptionKey MakeTestKey()
     return key;
 }
 
+static void WireOutboundLimits(P2PPolicy &policy,
+                               DataChannel &dc,
+                               std::uint8_t key_id)
+{
+    auto key = MakeTestKey();
+    dc.InstallNewKeys(key, key, key_id);
+    policy.SetOutboundLimitsChannel(&dc);
+}
+
 TEST(TxEncryptState, NeedsReinitWhenInvalid)
 {
     TxEncryptState tx;
@@ -410,15 +420,6 @@ TEST(TxEncryptState, ApplySnapshotInitializesContext)
     EXPECT_EQ(tx.cipher_iv, key.cipher_iv);
 }
 
-TEST(TxEncryptState, ApplySnapshotDoesNotResetPacketId)
-{
-    TxEncryptState tx;
-    tx.outbound_packet_id = 1000;
-    auto key = MakeTestKey();
-    tx.ApplySnapshot(key, 1);
-    EXPECT_EQ(tx.outbound_packet_id, 1000u);
-}
-
 TEST(TxEncryptState, EncryptInPlaceProducesValidWirePacket)
 {
     TxEncryptState tx;
@@ -433,7 +434,7 @@ TEST(TxEncryptState, EncryptInPlaceProducesValidWirePacket)
     buf[kDataV2Overhead] = 0x45; // IPv4 header
     buf[kDataV2Overhead + 1] = 0x00;
 
-    auto wire_len = tx.EncryptInPlace(buf, 64, session);
+    auto wire_len = tx.EncryptInPlace(buf, 64, session, 1u);
     ASSERT_GT(wire_len, 0u);
     EXPECT_EQ(wire_len, kDataV2Overhead + 64);
 
@@ -449,31 +450,11 @@ TEST(TxEncryptState, EncryptInPlaceProducesValidWirePacket)
     EXPECT_EQ(peer_id, 0x00ABCDEFu & PEER_ID_MASK);
 }
 
-TEST(TxEncryptState, EncryptInPlaceIncrementsPacketId)
-{
-    TxEncryptState tx;
-    auto key = MakeTestKey();
-    tx.ApplySnapshot(key, 0);
-
-    EXPECT_EQ(tx.outbound_packet_id, 1u);
-
-    std::vector<std::uint8_t> buf(kDataV2Overhead + 16, 0);
-    SessionId session{1};
-
-    auto w1 = tx.EncryptInPlace(buf, 16, session);
-    EXPECT_GT(w1, 0u);
-    EXPECT_EQ(tx.outbound_packet_id, 2u);
-
-    auto w2 = tx.EncryptInPlace(buf, 16, session);
-    EXPECT_GT(w2, 0u);
-    EXPECT_EQ(tx.outbound_packet_id, 3u);
-}
-
 TEST(TxEncryptState, EncryptInPlaceReturnsZeroWhenInvalid)
 {
     TxEncryptState tx;
     std::vector<std::uint8_t> buf(kDataV2Overhead + 16, 0);
-    EXPECT_EQ(tx.EncryptInPlace(buf, 16, SessionId{1}), 0u);
+    EXPECT_EQ(tx.EncryptInPlace(buf, 16, SessionId{1}, 1u), 0u);
 }
 
 TEST(TxEncryptState, EncryptInPlaceReturnsZeroForSmallBuffer)
@@ -483,7 +464,7 @@ TEST(TxEncryptState, EncryptInPlaceReturnsZeroForSmallBuffer)
     tx.ApplySnapshot(key, 0);
 
     std::vector<std::uint8_t> buf(10); // too small
-    EXPECT_EQ(tx.EncryptInPlace(buf, 64, SessionId{1}), 0u);
+    EXPECT_EQ(tx.EncryptInPlace(buf, 64, SessionId{1}, 1u), 0u);
 }
 
 TEST(TxEncryptState, EncryptInPlaceDecryptibleByDataChannel)
@@ -508,7 +489,7 @@ TEST(TxEncryptState, EncryptInPlaceDecryptibleByDataChannel)
     for (std::size_t i = 0; i < pt_len; ++i)
         buf[kDataV2Overhead + i] = static_cast<uint8_t>(i + 1);
 
-    auto wire_len = tx.EncryptInPlace(buf, pt_len, session);
+    auto wire_len = tx.EncryptInPlace(buf, pt_len, session, 1u);
     ASSERT_EQ(wire_len, kDataV2Overhead + pt_len);
 
     // Decrypt with DataChannel
@@ -781,11 +762,12 @@ TEST(P2PPolicy, SetPeer_UpdatesDestAndSession)
 TEST(P2PPolicy, EncryptSlot_ReturnsWireLen)
 {
     P2PPolicy policy{TestLogger()};
+    DataChannel dc{TestLogger()};
     auto ep = MakeEndpoint("10.0.0.1", 1194);
     SessionId sid{42};
     policy.SetPeer(ep, sid, 5);
     policy.ApplyEncryptKey(MakeTestKey(), 3);
-    policy.tx_snapshot.valid = true;
+    WireOutboundLimits(policy, dc, 3);
 
     constexpr std::size_t pt_len = 64;
     std::vector<uint8_t> slot_buf(kDataV2Overhead + pt_len, 0);
@@ -800,9 +782,10 @@ TEST(P2PPolicy, EncryptSlot_ReturnsWireLen)
 TEST(P2PPolicy, EncryptSlot_IncrementsPacketIdEachCall)
 {
     P2PPolicy policy{TestLogger()};
+    DataChannel dc{TestLogger()};
     policy.SetPeer(MakeEndpoint("10.0.0.1", 1194), SessionId{1}, 5);
     policy.ApplyEncryptKey(MakeTestKey(), 0);
-    policy.tx_snapshot.valid = true;
+    WireOutboundLimits(policy, dc, 0);
 
     constexpr std::size_t pt_len = 64;
     std::vector<uint8_t> slot_buf(kDataV2Overhead + pt_len, 0);
@@ -1011,9 +994,6 @@ TEST(TxEncryptState, EncryptInPlace_WithExplicitPacketId)
                       | (static_cast<uint32_t>(buf[6]) << 8)
                       | static_cast<uint32_t>(buf[7]);
     EXPECT_EQ(pkt_id, 42u);
-
-    // The internal counter must NOT be incremented by the 4-param overload
-    EXPECT_EQ(tx.outbound_packet_id, 1u);
 }
 
 // ============================================================================
@@ -1105,7 +1085,7 @@ TEST(RxDecryptState, DecryptPacketInPlace_NoKeyInstalledReturnsEmpty)
     TxEncryptState tx;
     tx.ApplySnapshot(MakeTestKey(), 1);
     std::vector<uint8_t> buf(kDataV2Overhead + 16, 0);
-    auto wire_len = tx.EncryptInPlace(buf, 16, SessionId{1});
+    auto wire_len = tx.EncryptInPlace(buf, 16, SessionId{1}, 1u);
     ASSERT_GT(wire_len, 0u);
     EXPECT_TRUE(rx.DecryptPacketInPlace(std::span<uint8_t>(buf.data(), wire_len)).empty());
 }
@@ -1126,7 +1106,7 @@ TEST(RxDecryptState, DecryptPacketInPlace_UnsupportedCipherReturnsEmpty)
     TxEncryptState tx;
     tx.ApplySnapshot(MakeTestKey(), 1); // valid AEAD encryption
     std::vector<uint8_t> buf(kDataV2Overhead + 16, 0);
-    auto wire_len = tx.EncryptInPlace(buf, 16, SessionId{1});
+    auto wire_len = tx.EncryptInPlace(buf, 16, SessionId{1}, 1u);
     ASSERT_GT(wire_len, 0u);
 
     // RxDecryptState saw key_id=1 but cipher is NONE → empty
@@ -1147,7 +1127,7 @@ TEST(RxDecryptState, DecryptPacketInPlace_RoundtripWithTxEncrypt)
     for (std::size_t i = 0; i < pt_len; ++i)
         buf[kDataV2Overhead + i] = static_cast<uint8_t>(i + 1);
 
-    auto wire_len = tx.EncryptInPlace(buf, pt_len, session);
+    auto wire_len = tx.EncryptInPlace(buf, pt_len, session, 1u);
     ASSERT_GT(wire_len, 0u);
 
     auto plaintext = rx.DecryptPacketInPlace(std::span<uint8_t>(buf.data(), wire_len));
@@ -1196,7 +1176,7 @@ TEST(RxDecryptState, DecryptPacketInPlace_AuthFailureReturnsEmpty)
     rx.ApplySnapshot(MakeRxSnapshot(1));
 
     std::vector<uint8_t> buf(kDataV2Overhead + 16, 0);
-    auto wire_len = tx.EncryptInPlace(buf, 16, SessionId{0x1});
+    auto wire_len = tx.EncryptInPlace(buf, 16, SessionId{0x1}, 1u);
     ASSERT_GT(wire_len, 0u);
 
     buf[8] ^= 0xFF; // corrupt tag byte at offset 8
@@ -1344,54 +1324,6 @@ TEST(TxBurstAvgWindow, EmptySnapshot)
 }
 
 // ============================================================================
-// RingOccHistWindow tests
-// ============================================================================
-
-TEST(RingOccHistWindow, BinMapping)
-{
-    // depth=32: occ=0 → bin 0, occ=1 (3%) → bin 1, occ=12 (37%) → bin 2, occ=28 (87%) → bin 3
-    EXPECT_EQ(RingOccHistWindow::OccBin(0, 32), 0u);
-    EXPECT_EQ(RingOccHistWindow::OccBin(1, 32), 1u);
-    EXPECT_EQ(RingOccHistWindow::OccBin(8, 32), 1u);  // 25%
-    EXPECT_EQ(RingOccHistWindow::OccBin(9, 32), 2u);  // 28%
-    EXPECT_EQ(RingOccHistWindow::OccBin(24, 32), 2u); // 75%
-    EXPECT_EQ(RingOccHistWindow::OccBin(25, 32), 3u); // 78%
-    EXPECT_EQ(RingOccHistWindow::OccBin(31, 32), 3u); // 97%
-}
-
-TEST(RingOccHistWindow, RecordAndSnapshot)
-{
-    RingOccHistWindow w;
-    w.Record(0, 32);  // bin 0
-    w.Record(4, 32);  // bin 1 (12%)
-    w.Record(16, 32); // bin 2 (50%)
-    w.Record(30, 32); // bin 3 (93%)
-    auto hist = w.SnapshotAndReset();
-    EXPECT_EQ(hist[0], 1u);
-    EXPECT_EQ(hist[1], 1u);
-    EXPECT_EQ(hist[2], 1u);
-    EXPECT_EQ(hist[3], 1u);
-    // Reset
-    auto hist2 = w.SnapshotAndReset();
-    for (auto v : hist2)
-        EXPECT_EQ(v, 0u);
-}
-
-TEST(RingOccHistWindow, FormatRingOccHistIdle)
-{
-    std::array<uint64_t, DataPathStats::kRingOccBins> hist{};
-    EXPECT_EQ(FormatRingOccHist(hist), "idle");
-}
-
-TEST(RingOccHistWindow, FormatRingOccHistAllEmpty)
-{
-    std::array<uint64_t, DataPathStats::kRingOccBins> hist{};
-    hist[0] = 100;
-    auto s = FormatRingOccHist(hist);
-    EXPECT_EQ(s, "[100,00,00,00]");
-}
-
-// ============================================================================
 // ComputeStatsRates tests
 // ============================================================================
 
@@ -1486,14 +1418,28 @@ TEST(BatchHistWindow, RecordAndSnapshot)
 // P2PPolicy – uncovered methods
 // ============================================================================
 
+TEST(P2PPolicy, EncryptSlot_NoLimitsChannel_ReturnsZero)
+{
+    P2PPolicy policy{TestLogger()};
+    policy.SetPeer(MakeEndpoint("10.0.0.1", 1194), SessionId{1}, 5);
+    policy.ApplyEncryptKey(MakeTestKey(), 1);
+
+    std::vector<uint8_t> slot_buf(kDataV2Overhead + 64, 0);
+    transport::SendEntry out{};
+    Connection *conn = nullptr;
+
+    EXPECT_EQ(policy.EncryptSlot(slot_buf, 64, out, conn), 0u);
+}
+
 TEST(P2PPolicy, EncryptSlot_ProducesWirePacket)
 {
     P2PPolicy policy{TestLogger()};
+    DataChannel dc{TestLogger()};
     auto ep = MakeEndpoint("10.0.0.1", 1194);
     SessionId sid{0xABCD};
     policy.SetPeer(ep, sid, 5);
     policy.ApplyEncryptKey(MakeTestKey(), 1);
-    policy.tx_snapshot.valid = true;
+    WireOutboundLimits(policy, dc, 1);
 
     constexpr std::size_t pt_len = 32;
     std::vector<uint8_t> slot_buf(kDataV2Overhead + pt_len, 0);
@@ -1531,7 +1477,7 @@ TEST(P2PPolicy, ApplyDecryptSnapshot_InstallsKey)
     constexpr std::size_t pt_len = 16;
     std::vector<uint8_t> backing(kDataV2Overhead + pt_len, 0);
     backing[kDataV2Overhead] = 0xBB; // canary
-    auto wire_len = tx.EncryptInPlace(backing, pt_len, SessionId{0x1});
+    auto wire_len = tx.EncryptInPlace(backing, pt_len, SessionId{0x1}, 1u);
     ASSERT_GT(wire_len, 0u);
 
     transport::IncomingSlot slot;
@@ -1558,7 +1504,7 @@ TEST(P2PPolicy, DecryptInPlace_RoundtripWithTxEncryptState)
     transport::IncomingSlot slot;
     std::vector<uint8_t> backing(kDataV2Overhead + pt_len, 0);
     backing[kDataV2Overhead] = 0x99; // canary
-    auto wire_len = tx.EncryptInPlace(backing, pt_len, SessionId{0x1});
+    auto wire_len = tx.EncryptInPlace(backing, pt_len, SessionId{0x1}, 1u);
     ASSERT_GT(wire_len, 0u);
     slot.buf = backing.data();
     slot.capacity = backing.size();

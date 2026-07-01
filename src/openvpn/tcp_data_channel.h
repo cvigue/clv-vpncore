@@ -293,8 +293,11 @@ class TcpDataChannel
                 openvpn::KEEPALIVE_PING_PAYLOAD,
                 openvpn::KEEPALIVE_PING_PAYLOAD + openvpn::KEEPALIVE_PING_SIZE);
 
-            auto encrypted = session->GetDataChannel().EncryptPacket(
-                ping_payload, session->GetSessionId());
+            auto packet_id = session->TryAllocateOutboundPacketId();
+            if (!packet_id)
+                co_return;
+            auto encrypted = session->GetDataChannel().EncryptPacketWithId(
+                ping_payload, session->GetSessionId(), *packet_id);
 
             if (encrypted.empty())
             {
@@ -448,8 +451,11 @@ class TcpDataChannel
                 continue;
             }
 
-            auto encrypted = session->GetDataChannel().EncryptPacket(
-                std::span<const std::uint8_t>(ip_packet.data), session_id);
+            auto packet_id = session->TryAllocateOutboundPacketId();
+            if (!packet_id)
+                continue;
+            auto encrypted = session->GetDataChannel().EncryptPacketWithId(
+                std::span<const std::uint8_t>(ip_packet.data), session_id, *packet_id);
 
             if (encrypted.empty())
             {

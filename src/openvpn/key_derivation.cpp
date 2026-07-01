@@ -2,6 +2,7 @@
 
 #include "openvpn/key_derivation.h"
 
+#include "openvpn/crypto_log.h"
 #include "openvpn/crypto_algorithms.h"
 #include "openvpn/data_channel.h"
 #include "openvpn/packet.h"
@@ -10,7 +11,6 @@
 #include <HelpSslEvpPkeyCtx.h>
 #include <HelpSslException.h>
 #include <HelpSslHmac.h>
-#include <log_utils.h>
 
 #include <openssl/types.h>
 
@@ -167,33 +167,9 @@ KeyDerivation::DeriveKeyMethod2(std::span<const std::uint8_t> client_random,
     spdlog::debug("  client_session_id: {:016x}", client_session_id.value);
     spdlog::debug("  server_session_id: {:016x}", server_session_id.value);
     spdlog::debug("  cipher: {} (key_size={} bytes)", cipher_name, cipher_info.key_size);
-    spdlog::debug("  pre_master(first 8): {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                  pre_master[0],
-                  pre_master[1],
-                  pre_master[2],
-                  pre_master[3],
-                  pre_master[4],
-                  pre_master[5],
-                  pre_master[6],
-                  pre_master[7]);
-    spdlog::debug("  client_random1(first 8): {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                  client_random1[0],
-                  client_random1[1],
-                  client_random1[2],
-                  client_random1[3],
-                  client_random1[4],
-                  client_random1[5],
-                  client_random1[6],
-                  client_random1[7]);
-    spdlog::debug("  server_random1(first 8): {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                  server_random1[0],
-                  server_random1[1],
-                  server_random1[2],
-                  server_random1[3],
-                  server_random1[4],
-                  server_random1[5],
-                  server_random1[6],
-                  server_random1[7]);
+    spdlog::debug("  pre_master_fp={}", KeyMaterialFingerprint(pre_master));
+    spdlog::debug("  client_random1_fp={}", KeyMaterialFingerprint(client_random1));
+    spdlog::debug("  server_random1_fp={}", KeyMaterialFingerprint(server_random1));
 
     // Phase 1: master secret = PRF(pre_master, "OpenVPN master secret", client_random1 || server_random1)
     std::vector<uint8_t> master_seed;
@@ -272,11 +248,11 @@ EncryptionKey KeyDerivation::ExtractDirectionalKey(std::span<const std::uint8_t>
                              material.begin() + hmac_offset,
                              material.begin() + hmac_offset + AEAD_IMPLICIT_IV_SIZE);
 
-        // Debug: log the extracted salt
-        spdlog::debug("ExtractDirectionalKey: offset={}, hmac_offset={}, extracted salt={}",
+        spdlog::debug("ExtractDirectionalKey: offset={}, hmac_offset={}, iv_fp={}",
                       offset,
                       hmac_offset,
-                      HexDump(std::span<const std::uint8_t>(material.data() + hmac_offset, AEAD_IMPLICIT_IV_SIZE), 0, ""));
+                      KeyMaterialFingerprint(std::span<const std::uint8_t>(
+                          material.data() + hmac_offset, AEAD_IMPLICIT_IV_SIZE)));
     }
 
     // For non-AEAD ciphers, extract HMAC key from hmac[] portion

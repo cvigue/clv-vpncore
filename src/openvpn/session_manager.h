@@ -94,12 +94,12 @@ class SessionManager
     size_t CleanupStaleSession(std::chrono::steady_clock::duration timeout_duration);
 
     /**
-     * @brief Cancel any armed rekey timer on every active session.
+     * @brief Cancel any armed @c Connection::rekey_timer_ on every session.
      *
-     * Calls Connection::CancelRekeyTimer() on all sessions so that in-flight
-     * RekeyLoop coroutines wake up and exit cleanly before session state
-     * is destroyed.  Must be called on the control thread, before the
-     * supervisory-coroutine futures are joined in StopBase().
+     * Wakes coroutines awaiting @c RekeyTimer().  Server @c RekeyLoop coroutines
+     * poll @c running_ on a 1 s cadence and exit without awaiting this timer.
+     * Call on the control thread before supervisory futures are joined in
+     * @c StopBase().
      */
     void CancelAllRekeyTimers()
     {

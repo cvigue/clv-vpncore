@@ -3,6 +3,7 @@
 #include "openvpn/crypto_algorithms.h"
 #include "openvpn/data_channel.h"
 #include "openvpn/data_channel_hmac.h"
+#include "openvpn/data_v2_wire.h"
 #include "openvpn/packet.h"
 
 #include <gtest/gtest.h>

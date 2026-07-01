@@ -4,6 +4,7 @@
 #define CLV_VPN_OPENVPN_DATA_CHANNEL_H
 
 #include "openvpn/crypto_algorithms.h"
+#include "openvpn/data_v2_wire.h"
 #include "openvpn/packet.h"
 #include "openvpn/protocol_constants.h"
 
@@ -12,6 +13,7 @@
 #include <rate_limiter.h>
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -25,21 +27,8 @@ class logger;
 
 namespace clv::vpn::openvpn {
 
-// ============================================================================
-// P_DATA_V2 AEAD wire format constants
-// ============================================================================
-
-/** P_DATA_V2 header: [opcode/key_id (1)] [peer_id (3)] = 4 bytes */
-constexpr std::size_t kDataV2HeaderLen = 4;
-
-/** Packet ID field: 4 bytes big-endian */
-constexpr std::size_t kDataV2PacketIdLen = 4;
-
-/** AEAD authentication tag: 16 bytes */
-constexpr std::size_t kDataV2TagLen = AEAD_TAG_SIZE;
-
-/** Total overhead before ciphertext: header + packet_id + tag = 24 bytes */
-constexpr std::size_t kDataV2Overhead = kDataV2HeaderLen + kDataV2PacketIdLen + kDataV2TagLen;
+// Wire-format constants (kDataV2Overhead, etc.) from data_v2_wire.h.
+// In-place encrypt: data_v2_encrypt.h (implementation .cpp only).
 
 /**
  * @brief Encryption key material for a single TLS key slot
@@ -233,8 +222,8 @@ class DataChannel
     // Non-copyable, movable
     DataChannel(const DataChannel &) = delete;
     DataChannel &operator=(const DataChannel &) = delete;
-    DataChannel(DataChannel &&) = default;
-    DataChannel &operator=(DataChannel &&) = default;
+    DataChannel(DataChannel &&) = delete;
+    DataChannel &operator=(DataChannel &&) = delete;
 
     /**
      * @brief Encrypt plaintext IP packet for transmission
@@ -255,7 +244,7 @@ class DataChannel
      * Identical to EncryptPacket() but uses @p packet_id instead of the
      * internal @c outbound_packet_id_ counter.  Used by the keepalive ping
      * path so that the control-plane and TX hot path share a single monotonic
-     * counter (Connection::GetAndIncrementOutboundPacketId()) rather than
+     * counter (Connection::TryAllocateOutboundPacketId()) rather than
      * maintaining two independent counters that would produce duplicate IDs.
      *
      * @param plaintext  Payload bytes to encrypt.
@@ -266,6 +255,29 @@ class DataChannel
     [[nodiscard]] std::vector<std::uint8_t> EncryptPacketWithId(std::span<const std::uint8_t> plaintext,
                                                                 SessionId session_id,
                                                                 std::uint32_t packet_id);
+
+    /**
+     * @brief Atomically claim the next outbound packet ID with wrap/limit checks.
+     *
+     * Returns nullopt when encrypt must fail closed (near 32-bit wrap or AEAD
+     * budget exhausted).  Sets an internal rekey-request flag for the control plane.
+     */
+    [[nodiscard]] std::optional<std::uint32_t> AllocateOutboundPacketId() noexcept;
+
+    /**
+     * @brief Record AES-GCM usage after a successful outbound encrypt.
+     *
+     * @p cipher must be the algorithm used for the encrypt (snapshot/slot cipher on
+     * split datapath threads; @c primary_encrypt_.cipher_algorithm on same-thread
+     * paths).  No-op for ChaCha20-Poly1305.  May set rekey-request or block.
+     */
+    void RecordOutboundEncrypt(std::size_t plaintext_len, CipherAlgorithm cipher) noexcept;
+
+    /** @brief Consume a pending limit-driven rekey request (returns true once). */
+    [[nodiscard]] bool TakeRekeyRequest() noexcept;
+
+    /** @brief True when outbound encrypt must fail closed until keys refresh. */
+    [[nodiscard]] bool IsOutboundEncryptBlocked() const noexcept;
 
     /**
      * @brief Decrypt and validate received data packet
@@ -305,6 +317,18 @@ class DataChannel
                                                    SessionId session_id);
 
     /**
+     * @brief Encrypt in-place using a pre-allocated packet ID.
+     *
+     * Same wire layout as EncryptPacketInPlace() but does not claim a packet
+     * ID or record AEAD usage — callers must use AllocateOutboundPacketId()
+     * and RecordOutboundEncrypt(len, cipher) when appropriate.
+     */
+    [[nodiscard]] std::size_t EncryptPacketInPlaceWithId(std::span<std::uint8_t> buf,
+                                                         std::size_t payload_len,
+                                                         SessionId session_id,
+                                                         std::uint32_t packet_id);
+
+    /**
      * @brief Decrypt a P_DATA_V2 packet in-place
      *
      * The buffer must contain a complete P_DATA_V2 wire packet:
@@ -323,7 +347,32 @@ class DataChannel
      */
     std::uint32_t GetOutboundPacketId() const
     {
-        return outbound_packet_id_;
+        return outbound_packet_id_.load(std::memory_order_relaxed);
+    }
+
+    /**
+     * @brief Seed the next outbound packet ID (unit tests only).
+     *
+     * Sets the value returned by the next successful AllocateOutboundPacketId().
+     */
+    void SetOutboundPacketIdForTest(std::uint32_t next_id) noexcept
+    {
+        outbound_packet_id_.store(next_id, std::memory_order_relaxed);
+    }
+
+    /**
+     * @brief Seed AES-GCM usage counters (unit tests only).
+     */
+    void SetAeadUsageForTest(std::uint64_t blocks, std::uint64_t invocations) noexcept
+    {
+        aead_usage_blocks_.store(blocks, std::memory_order_relaxed);
+        aead_usage_invocations_.store(invocations, std::memory_order_relaxed);
+    }
+
+    /** @brief Read rekey-request flag (unit tests only). */
+    [[nodiscard]] bool IsRekeyRequestedForTest() const noexcept
+    {
+        return rekey_requested_.load(std::memory_order_relaxed);
     }
 
     /**
@@ -458,8 +507,17 @@ class DataChannel
      */
     bool dco_keys_installed_ = false;
 
-    /** Outbound packet ID counter */
-    std::uint32_t outbound_packet_id_ = 1;
+    /** Outbound packet ID counter (atomic — shared across TX and keepalive paths).
+     *
+     * TCP sessions encrypt from a single strand; UDP may share this counter across
+     * the TX hot path and control-plane keepalive via Connection::TryAllocateOutboundPacketId().
+     */
+    std::atomic<std::uint32_t> outbound_packet_id_{1};
+
+    std::atomic<bool> rekey_requested_{false};
+    std::atomic<bool> outbound_encrypt_blocked_{false};
+    std::atomic<std::uint64_t> aead_usage_blocks_{0};
+    std::atomic<std::uint64_t> aead_usage_invocations_{0};
 
     /** Counter of replayed packets for statistics */
     std::uint64_t replayed_packets_ = 0;

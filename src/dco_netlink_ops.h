@@ -39,8 +39,8 @@
 namespace clv::vpn::dco {
 
 using clv::netlink::NetlinkHelper;
-using clv::netlink::NlaPut;
 using clv::netlink::NlaBeginNested;
+using clv::netlink::NlaPut;
 
 // ---------------------------------------------------------------------------
 // Internal helper: check a generic-netlink ACK response for errors.

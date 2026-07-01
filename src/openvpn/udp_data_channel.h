@@ -95,7 +95,7 @@ class UdpDataChannel
 
     // Client-side keepalive interface (no-arg): called by the generic KeepaliveLoop
     // via derived().SendKeepalivePing().  Injects the raw ping payload into the TUN
-    // fd so TxSpsc encrypts and sends it through the unified outbound_packet_id counter.
+    // fd so the TX drain loop encrypts and sends it through the unified outbound_packet_id counter.
     asio::awaitable<void> SendKeepalivePing()
     {
         int fd = this->TunNativeHandle();

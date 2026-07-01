@@ -89,7 +89,6 @@
 
 namespace clv::vpn {
 
-namespace ipv4 = clv::net::ipv4;
 
 /**
  * @brief Connection state for the VPN client.
@@ -732,10 +731,32 @@ asio::awaitable<void> ClientControlAdapter<Derived>::ClientRekeyLoop(std::uint32
                                                                      std::uint64_t generation)
 {
     asio::steady_timer timer(*io_context_);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(reneg_seconds);
     timer.expires_after(std::chrono::seconds(reneg_seconds));
     try
     {
-        co_await timer.async_wait(asio::use_awaitable);
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            if (!*running_ || state_ != VpnClientState::Connected || rekey_generation_ != generation)
+                break;
+
+            if (derived().channel().GetLimitsDataChannel().TakeRekeyRequest())
+                break;
+
+            auto remaining = deadline - std::chrono::steady_clock::now();
+            if (remaining <= std::chrono::seconds(0))
+                break;
+
+            const auto one_second = std::chrono::seconds(1);
+            timer.expires_after(remaining < one_second ? remaining : one_second);
+            co_await timer.async_wait(asio::use_awaitable);
+
+            if (!*running_ || state_ != VpnClientState::Connected || rekey_generation_ != generation)
+            {
+                rekey_timer_armed_ = false;
+                co_return;
+            }
+        }
     }
     catch (const asio::system_error &)
     {
@@ -908,9 +929,18 @@ asio::awaitable<void> ClientControlAdapter<Derived>::HandlePushReply(const std::
     struct Actions
     {
         ClientControlAdapter &self;
-        void DeriveAndInstallKeys() { self.DeriveAndInstallKeys(); }
-        void ApplyNetworkConfig()   { self.ApplyNegotiatedNetworkConfig(); }
-        void MarkConnected()        { self.SetState(VpnClientState::Connected); }
+        void DeriveAndInstallKeys()
+        {
+            self.DeriveAndInstallKeys();
+        }
+        void ApplyNetworkConfig()
+        {
+            self.ApplyNegotiatedNetworkConfig();
+        }
+        void MarkConnected()
+        {
+            self.SetState(VpnClientState::Connected);
+        }
         void ScheduleRekey(std::uint32_t r, std::uint64_t g)
         {
             asio::co_spawn(*self.io_context_, self.ClientRekeyLoop(r, g), asio::detached);
@@ -918,16 +948,16 @@ asio::awaitable<void> ClientControlAdapter<Derived>::HandlePushReply(const std::
     };
 
     ClientPushReplyData data{
-        .config_exchange            = config_exchange_,
-        .allowed_ciphers            = effective_data_ciphers_,
-        .current_cipher             = config_->client->cipher,
+        .config_exchange = config_exchange_,
+        .allowed_ciphers = effective_data_ciphers_,
+        .current_cipher = config_->client->cipher,
         .client_renegotiate_seconds = static_cast<std::uint32_t>(config_->client->renegotiate_seconds),
-        .negotiated_cipher          = negotiated_cipher_,
-        .server_peer_id             = server_peer_id_,
-        .is_connected               = (state_ == VpnClientState::Connected),
-        .rekey_timer_armed          = rekey_timer_armed_,
-        .rekey_generation           = rekey_generation_,
-        .logger                     = *logger_,
+        .negotiated_cipher = negotiated_cipher_,
+        .server_peer_id = server_peer_id_,
+        .is_connected = (state_ == VpnClientState::Connected),
+        .rekey_timer_armed = rekey_timer_armed_,
+        .rekey_generation = rekey_generation_,
+        .logger = *logger_,
     };
 
     Actions actions{*this};

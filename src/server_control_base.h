@@ -779,7 +779,10 @@ class ServerControlBase
         struct Actions
         {
             ServerControlBase &self;
-            void DeriveAndInstallKeys(Connection *s) { self.DeriveAndInstallKeys(s); }
+            void DeriveAndInstallKeys(Connection *s)
+            {
+                self.DeriveAndInstallKeys(s);
+            }
             void ScheduleRekey(openvpn::SessionId sid, std::uint32_t sec)
             {
                 asio::co_spawn(*self.io_context_, self.RekeyLoop(sid, sec), asio::detached);
@@ -824,19 +827,50 @@ class ServerControlBase
         std::uniform_int_distribution<std::uint32_t> pct_dist(80, 95);
         const std::uint32_t jittered = (reneg_seconds * pct_dist(rng)) / 100;
 
-        auto *sess = session_manager_.FindSession(sid);
-        if (!sess)
+        if (!session_manager_.FindSession(sid))
+        {
+            DisarmRekeyTimer(sid);
             co_return;
-        sess->ArmRekeyTimer(*io_context_, std::chrono::seconds(jittered));
+        }
 
+        // Wait until jittered deadline or a limit-driven rekey request (80% GCM /
+        // packet-ID wrap).  Poll every ≤1 s so TakeRekeyRequest() is noticed and
+        // so !running_ is observed promptly on shutdown (does not use
+        // Connection::RekeyTimer — see connection.h).
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(jittered);
+        asio::steady_timer poll_timer(*io_context_);
         try
         {
-            co_await sess->RekeyTimer().async_wait(asio::use_awaitable);
+            while (std::chrono::steady_clock::now() < deadline)
+            {
+                auto *session = session_manager_.FindSession(sid);
+                if (!session)
+                {
+                    DisarmRekeyTimer(sid);
+                    co_return;
+                }
+                if (session->GetDataChannel().TakeRekeyRequest())
+                    break;
+
+                auto remaining = deadline - std::chrono::steady_clock::now();
+                if (remaining <= std::chrono::seconds(0))
+                    break;
+
+                const auto one_second = std::chrono::seconds(1);
+                poll_timer.expires_after(remaining < one_second ? remaining : one_second);
+                co_await poll_timer.async_wait(asio::use_awaitable);
+
+                if (!*running_)
+                {
+                    DisarmRekeyTimer(sid);
+                    co_return;
+                }
+            }
         }
         catch (const asio::system_error &)
         {
             DisarmRekeyTimer(sid);
-            co_return; // Server stopped or session removed
+            co_return; // Server stopped or poll_timer cancelled
         }
 
         if (!*running_)
@@ -847,7 +881,10 @@ class ServerControlBase
 
         auto *session = session_manager_.FindSession(sid);
         if (!session)
+        {
+            DisarmRekeyTimer(sid);
             co_return;
+        }
 
         if (!session->GetDataChannel().HasValidKeys())
         {

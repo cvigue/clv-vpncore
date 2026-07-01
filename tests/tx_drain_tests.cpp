@@ -1,5 +1,5 @@
 // Copyright (c) 2025- Charlie Vigue. All rights reserved.
-// TX drain-loop unit tests (replaces old TxSpsc tests after Section 31 rewrite).
+// TX drain-loop unit tests.
 
 #include "data_path_stats.h"
 #include "openvpn/vpn_config.h"
@@ -66,7 +66,6 @@ TEST(TxDrainConfig, ValidationClampsNegativeSmallPktFlush)
 TEST(TxDrainStats, NewCounterFields)
 {
     DataPathStats::TxCounters c;
-    // txSmallPktFlush replaces txSmallPacketInline; txRingFullEvents removed
     c.txSmallPktFlush = 7;
     EXPECT_EQ(c.txSmallPktFlush, 7u);
 }

@@ -22,6 +22,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <array>
 
@@ -43,22 +44,20 @@ struct P2PPolicy
     RxDecryptState rx_decrypt;
     TxEncryptState tx_encrypt;
     ClientTxSnapshot tx_snapshot;
-    /// Monotonic outbound packet-ID counter shared between the TxSpsc hot
-    /// path and the control-plane keepalive sender.  Both paths claim IDs
-    /// with fetch_add(relaxed) — each call always gets a unique value.
-    std::atomic<std::uint32_t> outbound_pkt_id_{1};
+    /// Monotonic outbound limits tracked on the control-plane DataChannel when set.
+    openvpn::DataChannel *outbound_limits_dc_ = nullptr;
 
   private:
-    // Double-buffered encrypt key for thread-safe handoff between the TX
-    // io_context thread (ApplyEncryptKey) and the TxSpsc producer/consumer
-    // threads (PreAssignSlot / EncryptPartition).
+    // Double-buffered encrypt key for thread-safe handoff between the control
+    // plane (ApplyEncryptKey on io_context) and the TX drain thread
+    // (EncryptSlot).
     //
     // Writer fills the *inactive* slot then release-stores active_key_slot_.
     // Readers acquire-load active_key_slot_ before touching key material,
     // ensuring they see a fully-written, consistent (key, key_id) pair.
     //
     // The inactive slot is only overwritten at the NEXT rekey, which is
-    // ~120 s away — far longer than any partition lives in the TX ring.
+    // ~120 s away — far longer than any drain cycle.
     struct KeySlot
     {
         openvpn::EncryptionKey key{};
@@ -122,10 +121,22 @@ struct P2PPolicy
         if (tx_encrypt.NeedsReinit(slot.key_id))
             tx_encrypt.ApplySnapshot(slot.key, slot.key_id);
 
+        std::optional<std::uint32_t> packet_id;
+        if (outbound_limits_dc_)
+            packet_id = outbound_limits_dc_->AllocateOutboundPacketId();
+        else
+            return 0;
+
+        if (!packet_id)
+            return 0;
+
         auto wire_len = tx_encrypt.EncryptInPlace(
-            slot_span, payload_len, tx_snapshot.session_id, outbound_pkt_id_.fetch_add(1, std::memory_order_relaxed));
+            slot_span, payload_len, tx_snapshot.session_id, *packet_id);
         if (wire_len == 0)
             return 0;
+
+        if (outbound_limits_dc_)
+            outbound_limits_dc_->RecordOutboundEncrypt(payload_len, slot.key.cipher_algorithm);
 
         out.data = slot_span.first(wire_len);
         out.dest = tx_snapshot.peer;
@@ -144,6 +155,16 @@ struct P2PPolicy
     void SetTxNsOutput(std::atomic<std::int64_t> *p) noexcept
     {
         tx_ns_out_ = p;
+    }
+
+    void SetOutboundLimitsChannel(openvpn::DataChannel *dc) noexcept
+    {
+        outbound_limits_dc_ = dc;
+    }
+
+    [[nodiscard]] openvpn::DataChannel *OutboundLimitsChannel() const noexcept
+    {
+        return outbound_limits_dc_;
     }
 
     // ---- Key / peer management (called from control plane) ----
@@ -200,7 +221,7 @@ struct P2PPolicy
         rx_decrypt = RxDecryptState{*logger_};
         tx_snapshot = ClientTxSnapshot{};
         tx_encrypt = TxEncryptState{};
-        outbound_pkt_id_.store(1, std::memory_order_relaxed);
+        outbound_limits_dc_ = nullptr;
         key_slots_[0] = KeySlot{};
         key_slots_[1] = KeySlot{};
         active_key_slot_.store(0, std::memory_order_relaxed);

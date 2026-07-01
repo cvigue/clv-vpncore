@@ -40,8 +40,8 @@
 namespace clv::vpn {
 
 using clv::netlink::NetlinkHelper;
-using clv::netlink::NlaPut;
 using clv::netlink::NlaBeginNested;
+using clv::netlink::NlaPut;
 using clv::netlink::NlaReadScalar;
 
 // ---------------------------------------------------------------------------

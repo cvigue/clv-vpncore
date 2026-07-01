@@ -9,6 +9,7 @@
 #include "routing_table.h"
 #include "transport/transport.h"
 
+#include <chrono>
 #include <rate_limiter.h>
 
 #include <cstddef>
@@ -87,16 +88,14 @@ struct SessionIndex
  * @brief Per-connection encrypt state owned exclusively by the TX thread.
  *
  * TX maintains one TxEncryptState per active session.  The AEAD cipher
- * context and packet-ID counter live here — never shared, never locked.
- * When the control plane rotates keys (detected via key_id change in the
- * SessionEntry snapshot), TX reinitializes the context from the new key
- * material.
+ * context lives here — never shared, never locked.  Outbound packet IDs are
+ * allocated by the session DataChannel and passed to EncryptInPlace().
  */
 struct TxEncryptState
 {
-    std::uint32_t outbound_packet_id = 1;                  ///< Monotonic packet ID counter
     std::optional<clv::OpenSSL::SslCipherCtx> encrypt_ctx; ///< Persistent AEAD context
     std::uint8_t current_key_id = 0;                       ///< Last-applied key_id
+    openvpn::CipherAlgorithm cipher_algorithm = openvpn::CipherAlgorithm::NONE;
     std::vector<std::uint8_t> cipher_iv;                   ///< Cached IV salt for nonce generation
     bool valid = false;                                    ///< True after first ApplySnapshot
 
@@ -105,32 +104,20 @@ struct TxEncryptState
 
     /// Reinitialize encrypt context from new key material.
     /// Resets the persistent AEAD context with the new key schedule.
-    /// Does NOT reset outbound_packet_id (it's monotonic across rekeys).
     void ApplySnapshot(const openvpn::EncryptionKey &key, std::uint8_t key_id);
 
     /**
      * @brief Encrypt a TUN packet in-place using TX-local state.
      *
-     * Identical wire format to DataChannel::EncryptPacketInPlace, but reads
-     * key material and cipher context from this TxEncryptState rather than
-     * from the shared DataChannel.
+     * Delegates wire layout to openvpn::EncryptDataV2InPlace (data_v2_encrypt.h).
+     * Packet IDs must be allocated by the session DataChannel.
      *
      * @param buf   Buffer with at least (kDataV2Overhead + payload_len) bytes.
      *              Plaintext must already be at offset kDataV2Overhead.
      * @param payload_len  Length of plaintext at buf[kDataV2Overhead..]
      * @param session_id   Session ID for P_DATA_V2 peer_id field
+     * @param packet_id    Pre-allocated outbound packet ID
      * @return Total wire packet length (kDataV2Overhead + payload_len), or 0 on error.
-     */
-    [[nodiscard]] std::size_t EncryptInPlace(std::span<std::uint8_t> buf,
-                                             std::size_t payload_len,
-                                             openvpn::SessionId session_id);
-
-    /**
-     * @brief Encrypt with a pre-assigned packet ID (partition pre-assign path).
-     *
-     * Same as the 3-param overload but uses the caller-supplied packet_id
-     * instead of incrementing the internal counter.  Used by the partition
-     * encrypt path where the reader thread pre-stamps packet IDs during fill.
      */
     [[nodiscard]] std::size_t EncryptInPlace(std::span<std::uint8_t> buf,
                                              std::size_t payload_len,

@@ -212,14 +212,14 @@ class Connection
     /**
      * @brief Atomically claim the next outbound data-channel packet ID.
      *
-     * Called from both the TX hot path (MultiPeerPolicy) and the slow-path
-     * control-plane keepalive sender (ServerDataAdapter) so that all encrypted
-     * data packets share a single monotonic sequence and the peer's anti-replay
-     * window never sees duplicate IDs.
+     * Delegates to the session @c DataChannel so all encrypt paths (UDP TX,
+     * TCP, keepalive) share one counter with wrap and AEAD-limit checks.
+     *
+     * @return The allocated ID, or nullopt when encrypt must fail closed.
      */
-    std::uint32_t GetAndIncrementOutboundPacketId() noexcept
+    [[nodiscard]] std::optional<std::uint32_t> TryAllocateOutboundPacketId() noexcept
     {
-        return outbound_data_packet_id_.fetch_add(1, std::memory_order_relaxed);
+        return data_channel_.AllocateOutboundPacketId();
     }
 
     // ── Session State ───────────────────────────────────────────────────
@@ -263,11 +263,11 @@ class Connection
     }
 
     /**
-     * @brief Arm the per-session rekey timer.
+     * @brief Create or replace the per-session @c steady_timer with @p d expiry.
      *
-     * Creates (or replaces) the timer and sets its expiry.  Called by
-     * RekeyLoop before co_await-ing so that StopBase() can cancel it via
-     * CancelRekeyTimer() / SessionManager::CancelAllRekeyTimers().
+     * Intended for code that @c co_await s @c RekeyTimer() (see session_manager
+     * integration tests).  Server @c RekeyLoop uses a local poll timer and a
+     * deadline instead; it does not arm or await this object.
      */
     void ArmRekeyTimer(asio::io_context &ctx, std::chrono::seconds d)
     {
@@ -282,11 +282,12 @@ class Connection
     }
 
     /**
-     * @brief Cancel the rekey timer if one is armed.
+     * @brief Cancel @c rekey_timer_ if one was armed via @c ArmRekeyTimer.
      *
-     * Idempotent.  Called from SessionManager::CancelAllRekeyTimers during
-     * server teardown so every in-flight RekeyLoop wakes up and exits before
-     * session state is destroyed.
+     * Idempotent.  Wakes coroutines blocked on @c RekeyTimer().async_wait.
+     * Server @c RekeyLoop does not await this timer; teardown there relies on
+     * the @c running_ flag polled each second (see @c SessionManager::
+     * CancelAllRekeyTimers note).
      */
     void CancelRekeyTimer() noexcept
     {
@@ -502,18 +503,13 @@ class Connection
     alignas(std::hardware_destructive_interference_size)
         std::atomic<std::int64_t> last_outbound_ns_{
             std::chrono::steady_clock::now().time_since_epoch().count()};
-    // Shared outbound data-channel packet ID: incremented from both the TX hot
-    // path and the control-plane keepalive slow path so all encrypted data
-    // packets from this session share one monotonic sequence.
-    alignas(std::hardware_destructive_interference_size)
-        std::atomic<std::uint32_t> outbound_data_packet_id_{1};
 #if defined(__GNUC__) && !defined(__clang__) && (__GNUC__ >= 11)
 #pragma GCC diagnostic pop
 #endif
     std::optional<uint32_t> assigned_ipv4_;               // VPN IPv4 address assigned to this connection
     std::optional<ipv6::Ipv6Address> assigned_ipv6_;      // VPN IPv6 address assigned to this connection
     bool rekey_timer_armed_{false};                       // Server-side rekey timer guard (control thread only)
-    std::optional<asio::steady_timer> rekey_timer_;       // Armed rekey timer (present while RekeyLoop is awaiting)
+    std::optional<asio::steady_timer> rekey_timer_;       // Optional; see ArmRekeyTimer / RekeyTimer
     bool sent_key_method_2_{false};                       // Whether key-method 2 message has been sent
     bool keys_pending_activation_{false};                 // TX keys derived but not yet published (awaiting client ACK)
     std::uint32_t client_iv_proto_{0};                    // IV_PROTO bitmask from client peer-info (0 = unknown)

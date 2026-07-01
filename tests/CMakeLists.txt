@@ -4,6 +4,7 @@ add_executable(test_vpncore
     client_config_generator_tests.cpp
     config_exchange_tests.cpp
     control_channel_tests.cpp
+    data_channel_limits_tests.cpp
     data_channel_tests.cpp
     ip_pool_manager_tests.cpp
     ipv4_utils_tests.cpp
@@ -23,7 +24,7 @@ add_executable(test_vpncore
     vpn_client_tests.cpp
     vpn_config_tests.cpp
     udp_engine_tests.cpp
-    tx_spsc_tests.cpp
+    tx_drain_tests.cpp
     transport_mode_tests.cpp
     transport_tests.cpp
     transport_ipv6_connectivity_tests.cpp

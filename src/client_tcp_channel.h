@@ -142,6 +142,11 @@ class ClientTcpChannel
         logger_->debug("TCP: Keys installed (key_id={})", key_id);
     }
 
+    openvpn::DataChannel &GetLimitsDataChannel()
+    {
+        return data_channel_;
+    }
+
     asio::awaitable<void> StartDataPath()
     {
         if (!tcp_)

@@ -106,7 +106,6 @@ class ClientUdpChannel
     using UdpClientMixinBase::BindSocket;
     using UdpClientMixinBase::DeliverDecryptedPacket;
     using UdpClientMixinBase::GetBatchSize;
-    using UdpClientMixinBase::GetRingOccWindow;
     using UdpClientMixinBase::GetRxBatchWindow;
     using UdpClientMixinBase::GetTxBurstAvgWindow;
     using UdpClientMixinBase::SetBatchSize;
@@ -153,18 +152,25 @@ class ClientUdpChannel
                     openvpn::KEEPALIVE_PING_PAYLOAD,
                     openvpn::KEEPALIVE_PING_SIZE);
 
-        // Claim the next packet ID from the shared counter (same sequence
-        // used by TxSpsc) so the server's anti-replay window is never violated.
-        const auto pkt_id = this->policy().outbound_pkt_id_.fetch_add(1, std::memory_order_relaxed);
+        // Claim the next packet ID from the shared DataChannel counter (same
+        // sequence used by the TX drain loop) so the peer's anti-replay window is never violated.
+        auto *limits_dc = this->policy().OutboundLimitsChannel();
+        if (!limits_dc)
+            co_return;
+        const auto pkt_id = limits_dc->AllocateOutboundPacketId();
+        if (!pkt_id)
+            co_return;
 
         const auto wire_len = ping_tx_state_.EncryptInPlace(
             std::span<std::uint8_t>(buf.data(), kBufSize),
             openvpn::KEEPALIVE_PING_SIZE,
             snap.session_id,
-            pkt_id);
+            *pkt_id);
 
         if (wire_len == 0)
             co_return;
+
+        limits_dc->RecordOutboundEncrypt(openvpn::KEEPALIVE_PING_SIZE, ping_tx_state_.cipher_algorithm);
 
         // Send directly on the raw socket (v4-mapped IPv6 for IPv4 peers).
         struct sockaddr_in6 sa6{};
@@ -201,9 +207,18 @@ class ClientUdpChannel
     {
         if (!openvpn::KeyDerivation::InstallKeys(data_channel, key_material, cipher_algo, hmac_algo, key_id, openvpn::PeerRole::Client))
             throw std::runtime_error("UDP: KeyDerivation::InstallKeys failed");
+        this->policy().SetOutboundLimitsChannel(&data_channel);
         EngineInstallKeys(data_channel.GetPrimaryEncryptKey(),
                           data_channel.GetPrimaryDecryptKey(),
                           key_id);
+    }
+
+    openvpn::DataChannel &GetLimitsDataChannel()
+    {
+        auto *dc = this->policy().OutboundLimitsChannel();
+        if (!dc)
+            throw std::runtime_error("UDP: outbound limits DataChannel not configured");
+        return *dc;
     }
 
     void ConfigureNetworkInterface(const openvpn::NegotiatedConfig &negotiated,

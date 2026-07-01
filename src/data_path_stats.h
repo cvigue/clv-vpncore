@@ -36,7 +36,6 @@ struct DataPathStats
     //                        [4]=2048-2559  [5]=2560-3071  [6]=3072-3583  [7]=3584-4095
     static constexpr std::size_t kBatchHistBins = 8;
     static constexpr std::size_t kBinWidth = 512;
-    static constexpr std::size_t kRingOccBins = 4; ///< SPSC ring occupancy bins: empty/low/med/high
 
     /** Compute histogram bin index for a batch size (linear, width=512). */
     static unsigned BatchBin(std::size_t n)
@@ -328,35 +327,6 @@ inline std::string FormatBatchHist(
 }
 
 /**
- * @brief Format a 4-bin ring occupancy histogram as a compact percentage string.
- *
- * Bins: [empty, low (1-25%), med (26-75%), high (76-99%)].
- * Returns `"idle"` when no enqueues have been recorded.
- */
-inline std::string FormatRingOccHist(
-    const std::array<std::uint64_t, DataPathStats::kRingOccBins> &hist)
-{
-    std::uint64_t total = 0;
-    for (auto c : hist)
-        total += c;
-    if (total == 0)
-        return "idle";
-
-    std::string s = "[";
-    for (std::size_t i = 0; i < hist.size(); ++i)
-    {
-        if (i > 0)
-            s += ',';
-        auto pct = (hist[i] * 100 + total / 2) / total;
-        if (pct < 10)
-            s += '0';
-        s += std::to_string(pct);
-    }
-    s += ']';
-    return s;
-}
-
-/**
  * @brief Format an average burst size for log output.
  *
  * Returns `"---"` when no sessions were recorded in the interval.
@@ -406,7 +376,7 @@ struct BatchHistWindow
 /**
  * @brief Atomic windowed counter pair for average TX drain-session burst size.
  *
- * Producer calls Record(session_packets) on each EAGAIN boundary.
+ * TX drain loop calls Record(session_packets) on each EAGAIN boundary.
  * Control thread calls SnapshotAndReset() to get {total_packets, session_count}
  * for the interval and compute the mean.
  */
@@ -415,7 +385,7 @@ struct TxBurstAvgWindow
     std::atomic<std::uint64_t> total{0};
     std::atomic<std::uint64_t> count{0};
 
-    /// Record one drain session (producer thread).
+    /// Record one drain session (TX thread).
     void Record(std::size_t n)
     {
         total.fetch_add(n, std::memory_order_relaxed);
@@ -428,50 +398,6 @@ struct TxBurstAvgWindow
         auto t = total.exchange(0, std::memory_order_relaxed);
         auto c = count.exchange(0, std::memory_order_relaxed);
         return {t, c};
-    }
-};
-
-// ---------------------------------------------------------------------------
-// RingOccHistWindow — per-interval SPSC ring occupancy histogram (lock-free)
-// ---------------------------------------------------------------------------
-
-/**
- * @brief Atomic windowed 4-bin ring occupancy histogram.
- *
- * Bins: [0]=empty, [1]=1-25%, [2]=26-75%, [3]=76-99%.
- * Producer calls Record(occupancy, ring_depth) at each partition enqueue.
- * Control thread calls SnapshotAndReset() at the stats interval.
- */
-struct RingOccHistWindow
-{
-    std::array<std::atomic<std::uint64_t>, DataPathStats::kRingOccBins> bins{};
-
-    /// Record one enqueue observation (producer thread).
-    void Record(std::size_t occupancy, std::size_t depth)
-    {
-        bins[OccBin(occupancy, depth)].fetch_add(1, std::memory_order_relaxed);
-    }
-
-    /// Atomically read and reset all bins (control thread, once per interval).
-    std::array<std::uint64_t, DataPathStats::kRingOccBins> SnapshotAndReset()
-    {
-        std::array<std::uint64_t, DataPathStats::kRingOccBins> result;
-        for (std::size_t i = 0; i < bins.size(); ++i)
-            result[i] = bins[i].exchange(0, std::memory_order_relaxed);
-        return result;
-    }
-
-    /// Map (occupancy, ring_depth) → bin index.
-    static unsigned OccBin(std::size_t occ, std::size_t depth)
-    {
-        if (depth == 0 || occ == 0)
-            return 0;
-        const auto pct = occ * 100 / depth;
-        if (pct <= 25)
-            return 1;
-        if (pct <= 75)
-            return 2;
-        return 3;
     }
 };
 

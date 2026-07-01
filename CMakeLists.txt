@@ -35,6 +35,7 @@ add_library(clv_vpncore STATIC
     src/openvpn/connection.cpp
     src/openvpn/control_channel.cpp
     src/openvpn/control_plane_helpers.cpp
+    src/openvpn/crypto_log.cpp
     src/openvpn/push_exchange_helpers.cpp
     src/openvpn/data_channel.cpp
     src/openvpn/key_derivation.cpp

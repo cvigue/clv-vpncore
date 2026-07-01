@@ -271,9 +271,7 @@ std::optional<std::vector<std::uint8_t>> TlsCryptV2::WrapClientKey(
     auto tagged_len = data_len + TLS_CRYPT_TAG_SIZE;
     // tagged_len is bounded by validated inputs: max = TLS_CRYPT_TAG_SIZE + TLS_CRYPT_V2_CLIENT_KEY_LEN
     // + TLS_CRYPT_V2_MAX_METADATA_LEN + sizeof(uint16_t) = 546, well within uint16_t.
-    static_assert(TLS_CRYPT_TAG_SIZE + TLS_CRYPT_V2_CLIENT_KEY_LEN +
-                      TLS_CRYPT_V2_MAX_METADATA_LEN + sizeof(std::uint16_t) <=
-                  std::numeric_limits<std::uint16_t>::max(),
+    static_assert(TLS_CRYPT_TAG_SIZE + TLS_CRYPT_V2_CLIENT_KEY_LEN + TLS_CRYPT_V2_MAX_METADATA_LEN + sizeof(std::uint16_t) <= std::numeric_limits<std::uint16_t>::max(),
                   "WKc tagged_len cannot overflow uint16_t given bounded inputs");
     auto net_len = htons(static_cast<std::uint16_t>(tagged_len));
 

@@ -4,7 +4,9 @@
 
 #include "openvpn/connection.h"
 #include "openvpn/crypto_algorithms.h"
+#include "openvpn/crypto_log.h"
 #include "openvpn/data_channel.h"
+#include "openvpn/data_v2_encrypt.h"
 #include "openvpn/packet.h"
 #include "openvpn/protocol_constants.h"
 #include "openvpn/session_manager.h"
@@ -30,7 +32,7 @@
 namespace clv::vpn {
 
 // ============================================================================
-// Local helpers (mirrors of statics in data_channel.cpp)
+// Local helpers
 // ============================================================================
 
 static const OpenSSL::AeadCipherTraits *GetAeadTraits(openvpn::CipherAlgorithm algo)
@@ -51,17 +53,6 @@ static const OpenSSL::AeadCipherTraits *GetAeadTraits(openvpn::CipherAlgorithm a
 static bool IsSupportedAead(openvpn::CipherAlgorithm algo)
 {
     return GetAeadTraits(algo) != nullptr;
-}
-
-static std::array<std::uint8_t, 12> GenerateAeadNonce(std::uint32_t packet_id,
-                                                      std::span<const std::uint8_t> cipher_iv)
-{
-    std::array<std::uint8_t, 12> nonce{};
-    auto pktid_bytes = clv::netcore::uint_to_bytes(packet_id);
-    std::memcpy(nonce.data(), pktid_bytes.data(), 4);
-    if (cipher_iv.size() >= 8)
-        std::memcpy(nonce.data() + 4, cipher_iv.data(), 8);
-    return nonce;
 }
 
 // ============================================================================
@@ -103,33 +94,11 @@ SessionIndex SessionIndex::BuildFrom(const SessionManager &sm)
         const auto &ekey = dc.GetPrimaryEncryptKey();
         const auto &dkey = dc.GetPrimaryDecryptKey();
         const auto key_id = dc.GetCurrentKeyId();
-        // Log first 8 bytes of decrypt/encrypt keys so we can correlate with
-        // the auth-fail "slot_key(first8)" log at rekey time.
-        {
-            const auto &dck = dkey.cipher_key;
-            const auto &eck = ekey.cipher_key;
-            spdlog::debug("BuildFrom: sid={:016x} key_id={} "
-                          "decrypt(first8)={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x} "
-                          "encrypt(first8)={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                          sid.value,
-                          key_id,
-                          dck.size() > 0 ? dck[0] : 0,
-                          dck.size() > 1 ? dck[1] : 0,
-                          dck.size() > 2 ? dck[2] : 0,
-                          dck.size() > 3 ? dck[3] : 0,
-                          dck.size() > 4 ? dck[4] : 0,
-                          dck.size() > 5 ? dck[5] : 0,
-                          dck.size() > 6 ? dck[6] : 0,
-                          dck.size() > 7 ? dck[7] : 0,
-                          eck.size() > 0 ? eck[0] : 0,
-                          eck.size() > 1 ? eck[1] : 0,
-                          eck.size() > 2 ? eck[2] : 0,
-                          eck.size() > 3 ? eck[3] : 0,
-                          eck.size() > 4 ? eck[4] : 0,
-                          eck.size() > 5 ? eck[5] : 0,
-                          eck.size() > 6 ? eck[6] : 0,
-                          eck.size() > 7 ? eck[7] : 0);
-        }
+        spdlog::debug("BuildFrom: sid={:016x} key_id={} decrypt_key_fp={} encrypt_key_fp={}",
+                      sid.value,
+                      key_id,
+                      openvpn::KeyMaterialFingerprint(dkey.cipher_key),
+                      openvpn::KeyMaterialFingerprint(ekey.cipher_key));
         auto &ep = conn->GetEndpoint();
         transport::PeerEndpoint peer{.addr = ep.addr, .port = ep.port};
         idx.entries[sid.value] = SessionEntry{
@@ -156,6 +125,7 @@ bool TxEncryptState::NeedsReinit(std::uint8_t published_key_id) const
 void TxEncryptState::ApplySnapshot(const openvpn::EncryptionKey &key, std::uint8_t key_id)
 {
     current_key_id = key_id;
+    cipher_algorithm = key.cipher_algorithm;
     cipher_iv = key.cipher_iv;
 
     if (IsSupportedAead(key.cipher_algorithm))
@@ -177,61 +147,24 @@ void TxEncryptState::ApplySnapshot(const openvpn::EncryptionKey &key, std::uint8
 
 std::size_t TxEncryptState::EncryptInPlace(std::span<std::uint8_t> buf,
                                            std::size_t payload_len,
-                                           openvpn::SessionId session_id)
-{
-    return EncryptInPlace(buf, payload_len, session_id, outbound_packet_id++);
-}
-
-std::size_t TxEncryptState::EncryptInPlace(std::span<std::uint8_t> buf,
-                                           std::size_t payload_len,
                                            openvpn::SessionId session_id,
                                            std::uint32_t packet_id)
 {
-    using namespace openvpn;
-
     if (!valid || !encrypt_ctx)
         return 0;
 
-    const std::size_t total_len = kDataV2Overhead + payload_len;
+    const std::size_t total_len = openvpn::kDataV2Overhead + payload_len;
     if (buf.size() < total_len)
         return 0;
 
-    // P_DATA_V2 header: [opcode/key_id (1)][peer_id (3)] at [0..4)
-    std::uint32_t peer_id = session_id.value & PEER_ID_MASK;
-    std::uint32_t opcode_peer_id = (MakeOpcodeByte(Opcode::P_DATA_V2, current_key_id) << 24) | peer_id;
-    auto hdr_bytes = clv::netcore::uint_to_bytes(opcode_peer_id);
-    std::memcpy(buf.data(), hdr_bytes.data(), kDataV2HeaderLen);
-
-    // Packet ID at [4..8)
-    auto pktid_bytes = clv::netcore::uint_to_bytes(packet_id);
-    std::memcpy(buf.data() + kDataV2HeaderLen, pktid_bytes.data(), kDataV2PacketIdLen);
-
-    // Nonce: packet_id (4 BE) || cipher_iv salt (8)
-    auto nonce = GenerateAeadNonce(packet_id, cipher_iv);
-
-    // AAD = first 8 bytes (header + packet_id)
-    auto aad = buf.subspan(0, kDataV2HeaderLen + kDataV2PacketIdLen);
-
-    try
-    {
-        auto plaintext_span = buf.subspan(kDataV2Overhead, payload_len);
-        encrypt_ctx->SetEncryptNonce(nonce);
-        encrypt_ctx->UpdateEncryptAad(aad);
-        encrypt_ctx->UpdateEncryptInPlace(plaintext_span);
-        auto tag = encrypt_ctx->FinalizeEncryptTag();
-
-        // Tag at [8..24)
-        std::memcpy(buf.data() + kDataV2HeaderLen + kDataV2PacketIdLen,
-                    tag.data(),
-                    kDataV2TagLen);
-    }
-    catch (const OpenSSL::SslException &e)
-    {
-        spdlog::error("TxEncryptState::EncryptInPlace: AEAD encryption failed: {}", e.what());
-        return 0;
-    }
-
-    return total_len;
+    return openvpn::EncryptDataV2InPlace(
+        buf,
+        payload_len,
+        session_id,
+        packet_id,
+        current_key_id,
+        cipher_iv,
+        *encrypt_ctx);
 }
 
 // ============================================================================
@@ -259,21 +192,10 @@ void RxDecryptState::ApplySnapshot(const RxDecryptSnapshot &snap)
         lame_duck.emplace(std::move(primary));
     }
 
-    // Log bytes being installed so we can track what ends up in lame_duck at next rekey.
-    {
-        const auto &ck = snap.decrypt_key.cipher_key;
-        if (logger)
-            logger->debug("RxDecryptState::ApplySnapshot: installing key_id={} decrypt(first8)={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                          snap.key_id,
-                          ck.size() > 0 ? ck[0] : 0,
-                          ck.size() > 1 ? ck[1] : 0,
-                          ck.size() > 2 ? ck[2] : 0,
-                          ck.size() > 3 ? ck[3] : 0,
-                          ck.size() > 4 ? ck[4] : 0,
-                          ck.size() > 5 ? ck[5] : 0,
-                          ck.size() > 6 ? ck[6] : 0,
-                          ck.size() > 7 ? ck[7] : 0);
-    }
+    if (logger)
+        logger->debug("RxDecryptState::ApplySnapshot: installing key_id={} decrypt_key_fp={}",
+                      snap.key_id,
+                      openvpn::KeyMaterialFingerprint(snap.decrypt_key.cipher_key));
     // Install new primary decrypt key
     primary = openvpn::DecryptKeySlot{};
     primary.key = snap.decrypt_key;
@@ -353,7 +275,7 @@ std::span<std::uint8_t> RxDecryptState::DecryptPacketInPlace(std::span<std::uint
     }
 
     // Nonce: packet_id (4 BE) || cipher_iv salt (8)
-    auto nonce = GenerateAeadNonce(pkt_id, slot->key.cipher_iv);
+    auto nonce = openvpn::GenerateLegacyDataV2Nonce(pkt_id, slot->key.cipher_iv);
 
     // AAD = first 8 bytes
     auto aad = buf.subspan(0, kDataV2HeaderLen + kDataV2PacketIdLen);
@@ -381,21 +303,12 @@ std::span<std::uint8_t> RxDecryptState::DecryptPacketInPlace(std::span<std::uint
                 if (auth_fail_limiter.Due(now))
                 {
                     auto suppressed = auth_fail_limiter.SuppressedCount();
-                    // Format first 8 bytes of cipher key for comparison with DataChannel install log
-                    std::string key_hex;
-                    const auto &ck = slot->key.cipher_key;
-                    for (std::size_t i = 0; i < std::min(ck.size(), std::size_t(8)); ++i)
-                    {
-                        char buf2[3];
-                        std::snprintf(buf2, sizeof(buf2), "%02x", ck[i]);
-                        key_hex += buf2;
-                    }
-                    logger->error("RxDecryptState: authentication failed (tag mismatch) pkt_key_id={} slot_key_id={} is_lame_duck={} current_key_id={} slot_key(first8)={} (+{} suppressed)",
+                    logger->error("RxDecryptState: authentication failed (tag mismatch) pkt_key_id={} slot_key_id={} is_lame_duck={} current_key_id={} slot_key_fp={} (+{} suppressed)",
                                   pkt_key_id,
                                   slot->key.key_id,
                                   slot != &primary,
                                   current_key_id,
-                                  key_hex,
+                                  openvpn::KeyMaterialFingerprint(slot->key.cipher_key),
                                   suppressed);
                 }
             }

@@ -134,8 +134,9 @@ class ClientDcoChannel : public DcoClientDataMixin<ClientDcoChannel<Adapter>>
                              openvpn::CipherAlgorithm cipher_algo,
                              openvpn::HmacAlgorithm /*hmac_algo*/,
                              std::uint8_t key_id,
-                             openvpn::DataChannel & /*data_channel*/)
+                             openvpn::DataChannel &data_channel)
     {
+        limits_dc_ = &data_channel;
         pending_key_material_ = key_material;
         pending_cipher_algo_ = cipher_algo;
         pending_key_id_ = key_id;
@@ -235,6 +236,13 @@ class ClientDcoChannel : public DcoClientDataMixin<ClientDcoChannel<Adapter>>
         co_return; // DCO kernel handles keepalives autonomously
     }
 
+    openvpn::DataChannel &GetLimitsDataChannel()
+    {
+        if (!limits_dc_)
+            throw std::runtime_error("DCO: outbound limits DataChannel not configured");
+        return *limits_dc_;
+    }
+
   private:
     // -- CRTP targets (called by DcoClientDataMixin recv loop) --------------
 
@@ -250,6 +258,7 @@ class ClientDcoChannel : public DcoClientDataMixin<ClientDcoChannel<Adapter>>
     }
 
     Adapter *adapter_ = nullptr;
+    openvpn::DataChannel *limits_dc_ = nullptr;
 
     // -- Pending key state (held until AttachTransport establishes peer) -----
     std::vector<std::uint8_t> pending_key_material_;

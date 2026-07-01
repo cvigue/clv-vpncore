@@ -4,19 +4,23 @@
 #include "openvpn/data_channel_hmac.h"
 
 #include "openvpn/aead_utils.h"
+#include "openvpn/crypto_log.h"
 #include "openvpn/crypto_algorithms.h"
+#include "openvpn/data_channel_limits.h"
+#include "openvpn/data_v2_encrypt.h"
+#include "openvpn/data_v2_wire.h"
 #include "openvpn/packet.h"
 #include "openvpn/protocol_constants.h"
 
 #include <HelpSslCipher.h>
 #include <HelpSslException.h>
 #include <HelpSslHmac.h>
+#include <atomic>
 #include <log_utils.h>
 #include <util/byte_packer.h>
 
 #include <spdlog/spdlog.h>
 
-#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -24,7 +28,6 @@
 #include <optional>
 #include <span>
 #include <stdexcept>
-#include <string>
 #include <utility>
 #include <vector>
 
@@ -146,87 +149,87 @@ static void InitPersistentAeadCtx(OpenSSL::SslCipherCtx &ctx,
 }
 
 // ============================================================================
+// Outbound limits (legacy §7.4 / §7.2.1 Phase A)
+// ============================================================================
+
+std::optional<std::uint32_t> DataChannel::AllocateOutboundPacketId() noexcept
+{
+    if (outbound_encrypt_blocked_.load(std::memory_order_acquire))
+        return std::nullopt;
+
+    std::uint32_t id = outbound_packet_id_.load(std::memory_order_relaxed);
+    while (true)
+    {
+        if (id >= kPacketIdWrapTrigger)
+        {
+            rekey_requested_.store(true, std::memory_order_release);
+            outbound_encrypt_blocked_.store(true, std::memory_order_release);
+            return std::nullopt;
+        }
+        if (outbound_packet_id_.compare_exchange_weak(
+                id, id + 1, std::memory_order_acq_rel, std::memory_order_relaxed))
+        {
+            return id;
+        }
+    }
+}
+
+void DataChannel::RecordOutboundEncrypt(std::size_t plaintext_len,
+                                        CipherAlgorithm cipher) noexcept
+{
+    if (!IsLegacyAeadUsageLimited(cipher))
+        return;
+
+    const auto delta = LegacyAeadUsageForEncrypt(plaintext_len);
+    aead_usage_invocations_.fetch_add(delta.invocations, std::memory_order_relaxed);
+    aead_usage_blocks_.fetch_add(delta.blocks, std::memory_order_relaxed);
+
+    const auto flags = LegacyAeadLimitFlagsForUsage(
+        aead_usage_invocations_.load(std::memory_order_relaxed),
+        aead_usage_blocks_.load(std::memory_order_relaxed));
+    if (flags.is_blocked)
+    {
+        outbound_encrypt_blocked_.store(true, std::memory_order_release);
+        rekey_requested_.store(true, std::memory_order_release);
+    }
+    else if (flags.needs_reneg)
+    {
+        rekey_requested_.store(true, std::memory_order_release);
+    }
+}
+
+bool DataChannel::TakeRekeyRequest() noexcept
+{
+    return rekey_requested_.exchange(false, std::memory_order_acq_rel);
+}
+
+bool DataChannel::IsOutboundEncryptBlocked() const noexcept
+{
+    return outbound_encrypt_blocked_.load(std::memory_order_acquire);
+}
+
+// ============================================================================
 // DataChannel Implementation
 // ============================================================================
 
 std::vector<std::uint8_t> DataChannel::EncryptPacket(std::span<const std::uint8_t> plaintext,
                                                      SessionId session_id)
 {
-    if (!primary_encrypt_.is_valid)
+    if (!primary_encrypt_.is_valid || IsOutboundEncryptBlocked())
         return {};
 
-    const auto &key = primary_encrypt_;
-
-    // Get packet ID and increment counter
-    std::uint32_t packet_id = outbound_packet_id_++;
-
-    // Build packet header for P_DATA_V2
-    std::uint32_t peer_id = session_id.value & PEER_ID_MASK;
-    OpenVpnPacket encrypted_packet = OpenVpnPacket::DataV2(current_key_id_, peer_id, packet_id);
-
-    // Encrypt payload with AEAD cipher
-    if (!IsSupportedAead(key.cipher_algorithm))
-    {
-        spdlog::error("EncryptPacket: unsupported cipher algorithm {}", static_cast<int>(key.cipher_algorithm));
+    auto packet_id = AllocateOutboundPacketId();
+    if (!packet_id)
         return {};
-    }
 
-    // Generate nonce: packet_id (4 bytes BE) || implicit_iv (8 bytes)
-    auto nonce = GenerateNonce(packet_id, key);
-
-    try
-    {
-        if (encrypt_ctx_)
-        {
-            // Fast path: persistent context — copy plaintext, encrypt in-place, reorder tag
-            std::vector<std::uint8_t> ct(plaintext.begin(), plaintext.end());
-
-            encrypt_ctx_->SetEncryptNonce(nonce);
-            encrypt_ctx_->UpdateEncryptAad(encrypted_packet.aad_);
-            encrypt_ctx_->UpdateEncryptInPlace(std::span<std::uint8_t>(ct));
-            auto tag = encrypt_ctx_->FinalizeEncryptTag();
-
-            // Wire format: TAG (16) | ciphertext — prepend tag
-            std::vector<std::uint8_t> payload;
-            payload.reserve(tag.size() + ct.size());
-            payload.insert(payload.end(), tag.begin(), tag.end());
-            payload.insert(payload.end(), ct.begin(), ct.end());
-            encrypted_packet.payload_ = std::move(payload);
-        }
-        else
-        {
-            // Fallback: per-call context (tests with non-AEAD ciphers)
-            auto encrypted = EncryptAeadDispatch(
-                key.cipher_algorithm,
-                std::span<const std::uint8_t>(key.cipher_key.data(), key.cipher_key.size()),
-                nonce,
-                plaintext,
-                encrypted_packet.aad_);
-
-            if (encrypted.empty())
-            {
-                spdlog::error("EncryptPacket: encryption returned empty result");
-                return {};
-            }
-
-            // SslHelp returns [ciphertext][tag] — reorder to [tag][ciphertext]
-            encrypted_packet.payload_ = ReorderTagToFront(encrypted);
-        }
-    }
-    catch (const OpenSSL::SslException &e)
-    {
-        spdlog::error("EncryptPacket: AEAD encryption failed: {}", e.what());
-        return {};
-    }
-
-    return encrypted_packet.Serialize();
+    return EncryptPacketWithId(plaintext, session_id, *packet_id);
 }
 
 std::vector<std::uint8_t> DataChannel::EncryptPacketWithId(std::span<const std::uint8_t> plaintext,
                                                            SessionId session_id,
                                                            std::uint32_t packet_id)
 {
-    if (!primary_encrypt_.is_valid)
+    if (!primary_encrypt_.is_valid || IsOutboundEncryptBlocked())
         return {};
 
     const auto &key = primary_encrypt_;
@@ -279,6 +282,7 @@ std::vector<std::uint8_t> DataChannel::EncryptPacketWithId(std::span<const std::
         return {};
     }
 
+    RecordOutboundEncrypt(plaintext.size(), primary_encrypt_.cipher_algorithm);
     return encrypted_packet.Serialize();
 }
 
@@ -286,65 +290,56 @@ std::vector<std::uint8_t> DataChannel::EncryptPacketWithId(std::span<const std::
 // In-place encrypt/decrypt (zero-copy arena path)
 // ============================================================================
 
+std::size_t DataChannel::EncryptPacketInPlaceWithId(std::span<std::uint8_t> buf,
+                                                    std::size_t payload_len,
+                                                    SessionId session_id,
+                                                    std::uint32_t packet_id)
+{
+    if (!primary_encrypt_.is_valid || IsOutboundEncryptBlocked())
+        return 0;
+
+    if (!IsSupportedAead(primary_encrypt_.cipher_algorithm) || !encrypt_ctx_)
+    {
+        spdlog::error("EncryptPacketInPlaceWithId: unsupported cipher or missing context (cipher={})",
+                      static_cast<int>(primary_encrypt_.cipher_algorithm));
+        return 0;
+    }
+
+    const auto wire_len = EncryptDataV2InPlace(
+        buf,
+        payload_len,
+        session_id,
+        packet_id,
+        current_key_id_,
+        primary_encrypt_.cipher_iv,
+        *encrypt_ctx_);
+    if (wire_len == 0)
+        spdlog::error("EncryptPacketInPlaceWithId: AEAD encryption failed");
+
+    return wire_len;
+}
+
 std::size_t DataChannel::EncryptPacketInPlace(std::span<std::uint8_t> buf,
                                               std::size_t payload_len,
                                               SessionId session_id)
 {
-    if (!primary_encrypt_.is_valid)
+    if (!primary_encrypt_.is_valid || IsOutboundEncryptBlocked())
         return 0;
 
-    const auto &key = primary_encrypt_;
     const std::size_t total_len = kDataV2Overhead + payload_len;
-
     if (buf.size() < total_len)
-        return 0; // Buffer too small
-
-    if (!IsSupportedAead(key.cipher_algorithm) || !encrypt_ctx_)
-    {
-        spdlog::error("EncryptPacketInPlace: unsupported cipher or missing context (cipher={})",
-                      static_cast<int>(key.cipher_algorithm));
         return 0;
-    }
 
-    // Get packet ID and increment counter
-    std::uint32_t packet_id = outbound_packet_id_++;
-
-    // Write P_DATA_V2 header: [opcode/key_id (1)][peer_id (3)] at [0..4)
-    std::uint32_t peer_id = session_id.value & PEER_ID_MASK;
-    std::uint32_t opcode_peer_id = (MakeOpcodeByte(Opcode::P_DATA_V2, current_key_id_) << 24) | peer_id;
-    auto hdr_bytes = netcore::uint_to_bytes(opcode_peer_id);
-    std::memcpy(buf.data(), hdr_bytes.data(), kDataV2HeaderLen);
-
-    // Write packet_id at [4..8)
-    auto pktid_bytes = netcore::uint_to_bytes(packet_id);
-    std::memcpy(buf.data() + kDataV2HeaderLen, pktid_bytes.data(), kDataV2PacketIdLen);
-
-    // Generate nonce: packet_id (4 bytes BE) || implicit_iv (8 bytes)
-    auto nonce = GenerateNonce(packet_id, key);
-
-    // AAD = first 8 bytes of wire packet (header + packet_id)
-    auto aad = buf.subspan(0, kDataV2HeaderLen + kDataV2PacketIdLen);
-
-    try
-    {
-        // Encrypt plaintext at [24..24+payload_len) in-place via persistent context
-        auto plaintext_span = buf.subspan(kDataV2Overhead, payload_len);
-
-        encrypt_ctx_->SetEncryptNonce(nonce);
-        encrypt_ctx_->UpdateEncryptAad(aad);
-        encrypt_ctx_->UpdateEncryptInPlace(plaintext_span);
-        auto tag = encrypt_ctx_->FinalizeEncryptTag();
-
-        // Write tag at [8..24) — directly in its wire position
-        std::memcpy(buf.data() + kDataV2HeaderLen + kDataV2PacketIdLen, tag.data(), kDataV2TagLen);
-    }
-    catch (const OpenSSL::SslException &e)
-    {
-        spdlog::error("EncryptPacketInPlace: AEAD encryption failed: {}", e.what());
+    auto packet_id = AllocateOutboundPacketId();
+    if (!packet_id)
         return 0;
-    }
 
-    return total_len;
+    const auto wire_len = EncryptPacketInPlaceWithId(buf, payload_len, session_id, *packet_id);
+    if (wire_len == 0)
+        return 0;
+
+    RecordOutboundEncrypt(payload_len, primary_encrypt_.cipher_algorithm);
+    return wire_len;
 }
 
 std::span<std::uint8_t> DataChannel::DecryptPacketInPlace(std::span<std::uint8_t> buf)
@@ -602,33 +597,13 @@ std::vector<std::uint8_t> DataChannel::DecryptPacket(const OpenVpnPacket &packet
 std::array<std::uint8_t, 12> DataChannel::GenerateNonce(std::uint32_t packet_id,
                                                         const EncryptionKey &key)
 {
-    std::array<std::uint8_t, 12> nonce{}; // Zero-initialize
-
-    // For AEAD modes, create 96-bit (12-byte) nonce
-    // OpenVPN non-epoch format: packet_id (4 bytes BE) || implicit_iv (8 bytes)
-    // Where implicit_iv comes from hmac[0-7] of the key material
-
-    if (key.IsAead())
+    if (key.IsAead() && key.cipher_iv.size() < 8)
     {
-        // First 4 bytes: packet_id in big-endian (network byte order)
-        auto packet_id_bytes = netcore::uint_to_bytes(packet_id);
-        std::memcpy(nonce.data(), packet_id_bytes.data(), 4);
-
-        // Next 8 bytes: implicit IV from key material (cipher_iv should be 8 bytes)
-        if (key.cipher_iv.size() >= 8)
-        {
-            std::memcpy(nonce.data() + 4, key.cipher_iv.data(), 8);
-        }
-        else
-        {
-            // Configuration error: insufficient IV material will result in weak nonces
-            logger_->error("GenerateNonce: cipher_iv too small ({}), expected 8 bytes. Using zero-padding (INSECURE!).",
-                           key.cipher_iv.size());
-            // Already zero-initialized, so just log error
-        }
+        logger_->error("GenerateNonce: cipher_iv too small ({}), expected 8 bytes. Using zero-padding (INSECURE!).",
+                       key.cipher_iv.size());
     }
 
-    return nonce;
+    return GenerateLegacyDataV2Nonce(packet_id, key.cipher_iv);
 }
 
 std::vector<std::uint8_t> DataChannel::ComputeHmac(const EncryptionKey &key,
@@ -690,24 +665,24 @@ void DataChannel::InstallNewKeys(const EncryptionKey &decrypt_key,
 
     // Update current key_id for outbound packets
     current_key_id_ = new_key_id & KEY_ID_MASK;
-    // Log key and salt for debugging
-    std::string key_hex = HexDump(
-        std::span<const std::uint8_t>(primary_decrypt_.key.cipher_key.data(),
-                                      std::min(primary_decrypt_.key.cipher_key.size(), size_t(16))),
-        16,
-        "");
-    std::string salt_hex = HexDump(primary_decrypt_.key.cipher_iv, 0, "");
-    std::string enc_key_hex = HexDump(
-        std::span<const std::uint8_t>(primary_encrypt_.cipher_key.data(),
-                                      std::min(primary_encrypt_.cipher_key.size(), size_t(16))),
-        16,
-        "");
-    std::string enc_salt_hex = HexDump(primary_encrypt_.cipher_iv, 0, "");
-    logger_->debug("Installed new keys with key_id {}, decrypt_key(first 16)={}, salt={}",
+
+    // Clear limit state after TLS soft reset.  Preserve the monotonic outbound
+    // packet ID across normal rekeys (new implicit IV still yields fresh nonces).
+    // If wrap/limit logic blocked encrypt at the trigger, restart the counter.
+    rekey_requested_.store(false, std::memory_order_relaxed);
+    outbound_encrypt_blocked_.store(false, std::memory_order_relaxed);
+    aead_usage_blocks_.store(0, std::memory_order_relaxed);
+    aead_usage_invocations_.store(0, std::memory_order_relaxed);
+    if (outbound_packet_id_.load(std::memory_order_relaxed) >= kPacketIdWrapTrigger)
+        outbound_packet_id_.store(1, std::memory_order_relaxed);
+
+    logger_->debug("Installed new keys with key_id {}, decrypt_key_fp={}, iv_fp={}",
                    new_key_id,
-                   key_hex,
-                   salt_hex);
-    logger_->debug("  encrypt_key(first 16)={}, salt={}", enc_key_hex, enc_salt_hex);
+                   KeyMaterialFingerprint(primary_decrypt_.key.cipher_key),
+                   KeyMaterialFingerprint(primary_decrypt_.key.cipher_iv));
+    logger_->debug("  encrypt_key_fp={}, iv_fp={}",
+                   KeyMaterialFingerprint(primary_encrypt_.cipher_key),
+                   KeyMaterialFingerprint(primary_encrypt_.cipher_iv));
 }
 
 DecryptKeySlot *DataChannel::FindDecryptSlot(std::uint8_t key_id)

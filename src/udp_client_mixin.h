@@ -142,11 +142,6 @@ class UdpClientMixin : public UdpCore<Derived, P2PPolicy>
         return Core::CoreTxBurstAvgWindow();
     }
 
-    RingOccHistWindow &GetRingOccWindow()
-    {
-        return Core::CoreRingOccWindow();
-    }
-
   protected:
     UdpClientMixin(asio::io_context &io_context,
                    spdlog::logger &logger,
