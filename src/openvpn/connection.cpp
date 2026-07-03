@@ -22,7 +22,7 @@ Connection::Connection(openvpn::SessionId session_id,
       endpoint_(endpoint),
       role_(role),
       control_channel_(logger),
-      data_channel_(logger),
+      crypto_context_(logger),
       logger_(&logger)
 {
     const auto tls_role = (role == ConnectionRole::Server) ? openvpn::PeerRole::Server : openvpn::PeerRole::Client;

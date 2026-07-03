@@ -413,7 +413,7 @@ The `buf_rx` and `buf_tx` values indicate how many milliseconds of traffic the k
 ```bash
 cd build
 ctest -j$(nproc)                                          # all unit tests (integration tests run separately)
-./tests/test_vpncore --gtest_filter="DataChannel*"        # specific suite
+./tests/test_vpncore --gtest_filter="CryptoContext*"        # specific suite
 bash ../perf/run_vpn_perf.sh --list                       # list explicit perf scenarios
 bash ../perf/run_vpn_perf.sh --build-dir "$PWD" --scenario clv-user-udp-clean-tcp
 bash ../perf/run_vpn_perf.sh --build-dir "$PWD" --matrix stage1
@@ -436,7 +436,7 @@ bash ../perf/run_vpn_perf.sh --build-dir "$PWD" --matrix stage1 --verbose-progre
 | IT7 | Client reconnect after abrupt disconnect. Confirms server tears down the stale session, recycles the tunnel IP, and the client re-establishes cleanly. |
 | IT8 | Netem smoke test: 100 ms latency + 1% packet loss injected on the underlay. Verifies the tunnel stays up and passes data under impairment. |
 | IT19 | IPv6 underlay external-connectivity test. Assigns IPv6 underlay addresses in namespaces, connects a `simple_vpn` client with `proto=udp` to the server's IPv6 address, and verifies end-to-end tunnel ping. |
-| IT9 | `client_to_client=false` — route-withholding isolation. Confirms the server does not push the tunnel subnet in `PUSH_REPLY`; clients have no kernel route to peer IPs and cannot reach them. |
+| IT9 | `client_to_client=false` — peer isolation. Confirms the server does not push the tunnel subnet in `PUSH_REPLY` and drops intra-pool forwarding on the data path; clients cannot reach each other. |
 | IT10 | `client_to_client=false` — one-sided route injection. A single client self-adds the tunnel subnet route (simulating a misconfigured host); the return path is absent so the ping fails. Detects trivial single-sided bypass attempts. |
 | IT11 | `client_to_client=false` — full symmetric route injection. Both clients self-add the tunnel subnet route, replicating what `client_to_client=true` would push. With the return path present, only genuine server-side data-path enforcement prevents the ping from succeeding. |
 | IT12 | TLS-Crypt-V2 single-client handshake. Validates the `P_CONTROL_WKC_V1` packet flow, WKc unwrapping, per-session TlsCrypt key derivation, and end-to-end tunnel ping using a per-client wrapped key. |

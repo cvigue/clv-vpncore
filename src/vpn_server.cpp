@@ -8,6 +8,7 @@
 #include "openvpn/vpn_config.h"
 #include "server_control_base.h"
 #include "transport/batch_constants.h"
+#include "tunnel_zone.h"
 
 #include <ci_string.h>
 
@@ -77,7 +78,7 @@ spdlog::level::level_enum ParseLogLevel(const std::string &str)
 
 } // namespace
 
-VpnServer::VpnServer(asio::io_context &io_context, const VpnConfig &config)
+VpnServer::VpnServer(asio::io_context &io_context, const VpnConfig &config, TunnelZone &zone)
     : io_context_(io_context),
       config_(config),
       logger_(spdlog::stdout_color_mt("vpn_server"))
@@ -111,6 +112,7 @@ VpnServer::VpnServer(asio::io_context &io_context, const VpnConfig &config)
         .logger_manager = logger_manager_,
         .logger = logger_,
         .running = running_,
+        .zone = &zone,
     };
 
     logger_->info("Data channel mode: {}", TransportModeString(mode));
@@ -152,11 +154,6 @@ void VpnServer::Start()
                   config_.performance.stats_interval_seconds,
                   AffinityModeString(config_.process.cpu_affinity));
 
-    // Masquerade (RAII — reverted on Stop/destruction)
-    masquerade_guard_.emplace(config_.server->network, *logger_);
-    if (!config_.server->network_v6.empty())
-        masquerade6_guard_.emplace(config_.server->network_v6, *logger_);
-
     running_ = true;
 
     WithDataTransport([](auto &dp)
@@ -176,9 +173,6 @@ void VpnServer::Stop()
 
     WithDataTransport([](auto &dp)
     { dp.Stop(); });
-
-    masquerade6_guard_.reset();
-    masquerade_guard_.reset();
 
     logger_->info("VPN server stopped");
 }

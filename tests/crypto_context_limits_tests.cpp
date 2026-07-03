@@ -2,9 +2,9 @@
 
 #include "openvpn/crypto_log.h"
 #include "openvpn/crypto_algorithms.h"
-#include "openvpn/data_channel.h"
+#include "openvpn/crypto_context.h"
 #include "openvpn/data_v2_wire.h"
-#include "openvpn/data_channel_limits.h"
+#include "openvpn/crypto_context_limits.h"
 
 #include <gtest/gtest.h>
 
@@ -20,7 +20,7 @@
 
 namespace clv::vpn::openvpn::test {
 
-class DataChannelLimitsTest : public ::testing::Test
+class CryptoContextLimitsTest : public ::testing::Test
 {
   protected:
     void SetUp() override
@@ -58,17 +58,17 @@ class DataChannelLimitsTest : public ::testing::Test
         channel_->InstallNewKeys(key, key, key_id);
     }
 
-    std::optional<DataChannel> channel_;
+    std::optional<CryptoContext> channel_;
     std::unique_ptr<spdlog::logger> logger_;
 };
 
-TEST_F(DataChannelLimitsTest, PacketIdWrapTriggerConstant)
+TEST_F(CryptoContextLimitsTest, PacketIdWrapTriggerConstant)
 {
     EXPECT_EQ(0xFF000000u, kPacketIdWrapTrigger);
     EXPECT_LT(0xFEFFFFFFu, kPacketIdWrapTrigger);
 }
 
-TEST_F(DataChannelLimitsTest, GcmUsageThresholdRequestsRekey)
+TEST_F(CryptoContextLimitsTest, GcmUsageThresholdRequestsRekey)
 {
     LegacyAeadUsageTracker usage;
     const std::size_t chunk = kLegacyAeadMaxPlaintextBytes;
@@ -83,7 +83,7 @@ TEST_F(DataChannelLimitsTest, GcmUsageThresholdRequestsRekey)
     EXPECT_FALSE(usage.IsBlocked());
 }
 
-TEST_F(DataChannelLimitsTest, GcmUsagePerMaxPacketIsInvocationsPlusBlocks)
+TEST_F(CryptoContextLimitsTest, GcmUsagePerMaxPacketIsInvocationsPlusBlocks)
 {
     const auto delta = LegacyAeadUsageForEncrypt(kLegacyAeadMaxPlaintextBytes);
     EXPECT_EQ(1u, delta.invocations);
@@ -99,7 +99,7 @@ TEST_F(DataChannelLimitsTest, GcmUsagePerMaxPacketIsInvocationsPlusBlocks)
     EXPECT_EQ(delta.Total(), usage.Total());
 }
 
-TEST_F(DataChannelLimitsTest, ConcurrentAllocateProducesUniqueIds)
+TEST_F(CryptoContextLimitsTest, ConcurrentAllocateProducesUniqueIds)
 {
     InstallAesKeys();
 
@@ -134,7 +134,7 @@ TEST_F(DataChannelLimitsTest, ConcurrentAllocateProducesUniqueIds)
     EXPECT_EQ(static_cast<std::uint32_t>(kThreads * kPerThread), ids.back());
 }
 
-TEST_F(DataChannelLimitsTest, WrapTriggerBlocksAndRequestsRekey)
+TEST_F(CryptoContextLimitsTest, WrapTriggerBlocksAndRequestsRekey)
 {
     InstallAesKeys();
 
@@ -152,7 +152,7 @@ TEST_F(DataChannelLimitsTest, WrapTriggerBlocksAndRequestsRekey)
     EXPECT_TRUE(channel_->TakeRekeyRequest());
 }
 
-TEST_F(DataChannelLimitsTest, GcmUsageViaDataChannelRequestsRekey)
+TEST_F(CryptoContextLimitsTest, GcmUsageViaCryptoContextRequestsRekey)
 {
     InstallAesKeys();
 
@@ -171,7 +171,7 @@ TEST_F(DataChannelLimitsTest, GcmUsageViaDataChannelRequestsRekey)
     EXPECT_TRUE(channel_->TakeRekeyRequest());
 }
 
-TEST_F(DataChannelLimitsTest, GcmHardLimitBlocksEncrypt)
+TEST_F(CryptoContextLimitsTest, GcmHardLimitBlocksEncrypt)
 {
     InstallAesKeys();
 
@@ -188,7 +188,7 @@ TEST_F(DataChannelLimitsTest, GcmHardLimitBlocksEncrypt)
     EXPECT_EQ(channel_->EncryptPacketInPlace(buf, 16, SessionId{1}), 0u);
 }
 
-TEST_F(DataChannelLimitsTest, RekeyClearsBlockAndPreservesCounterBelowWrap)
+TEST_F(CryptoContextLimitsTest, RekeyClearsBlockAndPreservesCounterBelowWrap)
 {
     InstallAesKeys(0);
 
@@ -212,7 +212,7 @@ TEST_F(DataChannelLimitsTest, RekeyClearsBlockAndPreservesCounterBelowWrap)
     EXPECT_EQ(12u, channel_->GetOutboundPacketId());
 }
 
-TEST_F(DataChannelLimitsTest, RekeyAfterWrapResetsCounterAndUnblocks)
+TEST_F(CryptoContextLimitsTest, RekeyAfterWrapResetsCounterAndUnblocks)
 {
     InstallAesKeys(0);
 
@@ -231,7 +231,7 @@ TEST_F(DataChannelLimitsTest, RekeyAfterWrapResetsCounterAndUnblocks)
     EXPECT_EQ(1u, *id);
 }
 
-TEST_F(DataChannelLimitsTest, ChaChaUsageDoesNotRequestRekey)
+TEST_F(CryptoContextLimitsTest, ChaChaUsageDoesNotRequestRekey)
 {
     auto key = MakeChaChaKey();
     channel_->InstallNewKeys(key, key, 0);

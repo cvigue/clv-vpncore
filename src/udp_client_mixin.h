@@ -21,11 +21,11 @@
 #include "udp_core.h"
 
 #include "data_path_stats.h"
-#include "openvpn/data_channel.h"
+#include "openvpn/crypto_context.h"
 #include "transport/batch_constants.h"
 #include "transport/transport.h"
 
-#include <tun/tun_device.h>
+#include "platform/linux/tun/tun_device.h"
 
 #include <asio/awaitable.hpp>
 #include <asio/io_context.hpp>

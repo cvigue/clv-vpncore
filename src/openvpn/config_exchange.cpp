@@ -6,6 +6,8 @@
 #include "openvpn/protocol_constants.h"
 
 #include <exception>
+#include <net/ipv4_utils.h>
+#include <net/ipv6_utils.h>
 #include <stdexcept>
 #include <util/byte_packer.h>
 
@@ -25,6 +27,44 @@
 #include <vector>
 
 namespace clv::vpn::openvpn {
+
+namespace {
+
+namespace ipv4 = clv::net::ipv4;
+namespace ipv6 = clv::net::ipv6;
+
+constexpr std::size_t kMaxPushedRoutes = 64;
+constexpr std::size_t kMaxPushedRoutesV6 = 64;
+constexpr std::size_t kMaxDhcpOptions = 32;
+constexpr std::size_t kMaxDnsServers = 16;
+constexpr std::size_t kMaxDnsAddressesPerServer = 8;
+constexpr std::size_t kMaxDnsResolveDomainsPerServer = 32;
+constexpr std::size_t kMaxDnsSearchDomains = 32;
+
+template <typename Container>
+void RequireBelowLimit(const Container &items, std::size_t limit, std::string_view label)
+{
+    if (items.size() >= limit)
+        throw ConfigParseError(std::string(label) + " exceeds maximum count " + std::to_string(limit));
+}
+
+void ValidateIpv4RouteArgs(const std::vector<std::string> &args)
+{
+    if (!ipv4::ParseIpv4(args[0]))
+        throw ConfigParseError("invalid IPv4 route network '" + args[0] + "'");
+    if (args.size() >= 2 && !args[1].empty() && !ipv4::ParseIpv4(args[1]))
+        throw ConfigParseError("invalid IPv4 route mask/gateway '" + args[1] + "'");
+}
+
+void ValidateIpv6RouteArgs(const std::vector<std::string> &args)
+{
+    if (!ipv6::ParseCidr6(args[0]) && !ipv6::ParseIpv6(args[0]))
+        throw ConfigParseError("invalid IPv6 route network '" + args[0] + "'");
+    if (args.size() >= 2 && !args[1].empty() && !ipv6::ParseIpv6(args[1]))
+        throw ConfigParseError("invalid IPv6 route gateway '" + args[1] + "'");
+}
+
+} // namespace
 
 // ============================================================================
 // Table-driven option helpers
@@ -132,6 +172,16 @@ void ApplyRoute(NegotiatedConfig &c, const std::vector<std::string> &args)
 {
     if (args.empty())
         throw ConfigParseError("missing network for route option");
+    if constexpr (Field == &NegotiatedConfig::routes)
+    {
+        RequireBelowLimit(c.routes, kMaxPushedRoutes, "pushed IPv4 routes");
+        ValidateIpv4RouteArgs(args);
+    }
+    else
+    {
+        RequireBelowLimit(c.routes_ipv6, kMaxPushedRoutesV6, "pushed IPv6 routes");
+        ValidateIpv6RouteArgs(args);
+    }
     std::string net = args[0];
     std::string mask_or_gw = (args.size() >= 2) ? args[1] : "";
     int metric = 0;
@@ -243,6 +293,7 @@ void ApplyDhcpOption(NegotiatedConfig &c, const std::vector<std::string> &args)
 {
     if (args.size() < 2)
         throw ConfigParseError("dhcp-option requires type and value");
+    RequireBelowLimit(c.dhcp_options, kMaxDhcpOptions, "dhcp-options");
     std::string value = args[1];
     for (std::size_t i = 2; i < args.size(); ++i)
     {
@@ -276,8 +327,13 @@ void ApplyDnsOption(NegotiatedConfig &c, const std::vector<std::string> &args)
     {
         // dns search-domains <domain> [domain ...]
         for (std::size_t i = 1; i < args.size(); ++i)
+        {
             if (!args[i].empty())
+            {
+                RequireBelowLimit(c.dns_search_domains, kMaxDnsSearchDomains, "dns search-domains");
                 c.dns_search_domains.push_back(args[i]);
+            }
+        }
     }
     else if (args[0] == "server")
     {
@@ -308,6 +364,7 @@ void ApplyDnsOption(NegotiatedConfig &c, const std::vector<std::string> &args)
                 }
             if (!entry)
             {
+                RequireBelowLimit(c.dns_servers, kMaxDnsServers, "dns servers");
                 c.dns_servers.push_back({priority, {}, {}});
                 entry = &c.dns_servers.back();
             }
@@ -315,14 +372,24 @@ void ApplyDnsOption(NegotiatedConfig &c, const std::vector<std::string> &args)
             if (key == "address")
             {
                 for (std::size_t i = 3; i < args.size(); ++i)
+                {
                     if (!args[i].empty())
+                    {
+                        RequireBelowLimit(entry->addresses, kMaxDnsAddressesPerServer, "dns server addresses");
                         entry->addresses.push_back(args[i]);
+                    }
+                }
             }
             else // resolve-domains
             {
                 for (std::size_t i = 3; i < args.size(); ++i)
+                {
                     if (!args[i].empty())
+                    {
+                        RequireBelowLimit(entry->resolve_domains, kMaxDnsResolveDomainsPerServer, "dns resolve-domains");
                         entry->resolve_domains.push_back(args[i]);
+                    }
+                }
             }
         }
         else

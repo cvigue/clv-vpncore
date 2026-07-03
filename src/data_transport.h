@@ -16,7 +16,7 @@
  *
  * Construction: pass the config bundle directly — ControlAdapterT is constructed
  * in the initializer list (common setup, no derived() calls), then
- * ConstructDataChannel() is called from the constructor body once all members exist.
+ * ChannelArgs() / channel construction runs from the constructor body once all members exist.
  *
  * @tparam DataChannelTpl    Concrete data-channel template (e.g. ClientTcpChannel).
  * @tparam DataAdapterT      Data-side adapter CRTP template.
@@ -50,8 +50,8 @@ namespace clv::vpn {
  * (control→data), exposing their interfaces as first-class methods.
  *
  * Accepts the adapter config bundle as a constructor argument: constructs
- * ControlAdapterT in the initializer list, then calls ConstructDataChannel()
- * from the body — no two-phase init required.
+ * ControlAdapterT in the initializer list, then constructs the channel from
+ * ChannelArgs() in the body — no two-phase init required.
  *
  * Non-copyable, non-movable: the channel holds references to adapter members.
  *

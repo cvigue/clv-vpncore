@@ -4,7 +4,7 @@
 #define CLV_VPN_UDP_ENGINE_TYPES_H
 
 #include "HelpSslCipher.h"
-#include "openvpn/data_channel.h"
+#include "openvpn/crypto_context.h"
 #include "openvpn/packet.h"
 #include "routing_table.h"
 #include "transport/transport.h"
@@ -89,7 +89,7 @@ struct SessionIndex
  *
  * TX maintains one TxEncryptState per active session.  The AEAD cipher
  * context lives here — never shared, never locked.  Outbound packet IDs are
- * allocated by the session DataChannel and passed to EncryptInPlace().
+ * allocated by the session CryptoContext and passed to EncryptInPlace().
  */
 struct TxEncryptState
 {
@@ -110,7 +110,7 @@ struct TxEncryptState
      * @brief Encrypt a TUN packet in-place using TX-local state.
      *
      * Delegates wire layout to openvpn::EncryptDataV2InPlace (data_v2_encrypt.h).
-     * Packet IDs must be allocated by the session DataChannel.
+     * Packet IDs must be allocated by the session CryptoContext.
      *
      * @param buf   Buffer with at least (kDataV2Overhead + payload_len) bytes.
      *              Plaintext must already be at offset kDataV2Overhead.
@@ -265,7 +265,7 @@ struct RxDecryptSnapshot
 /**
  * @brief RX-thread-local decrypt state for the client split-datapath.
  *
- * Mirrors the decrypt side of DataChannel, but owned exclusively by the
+ * Mirrors the decrypt side of CryptoContext, but owned exclusively by the
  * RX thread.  The persistent AEAD context, replay window, and key slots
  * live here — never shared, never locked.  When the control plane rotates
  * keys (detected via key_id change in the snapshot), the RX thread
@@ -302,9 +302,9 @@ struct RxDecryptState
     /**
      * @brief Decrypt a data-channel packet in-place using RX-local state.
      *
-     * Identical wire format to DataChannel::DecryptPacketInPlace, but reads
+     * Identical wire format to CryptoContext::DecryptPacketInPlace, but reads
      * key material and cipher context from this RxDecryptState rather than
-     * from the shared DataChannel.
+     * from the shared CryptoContext.
      *
      * @param buf Wire packet (P_DATA_V2 header + packet_id + tag + ciphertext)
      * @return Plaintext span within buf, or empty on error/replay.

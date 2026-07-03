@@ -229,16 +229,11 @@ sleep 1
 
 # ── Negative: server must block forwarding despite client route ───────
 
-echo "[7/7] Negative check (XFAIL): server must block c2c despite client having route..."
-echo "      This tests server-side enforcement at the data path (§29 — not yet implemented)."
+echo "[7/7] Negative check: server must block c2c despite client having route..."
 
 if ns_exec "ns-vpn-client-0" ping -c 3 -W "${PING_TIMEOUT}" \
         "${TUNNEL_IPS[1]}" > "${LOG_DIR}/ping-bypass.log" 2>&1; then
-    echo ""
-    echo "  XFAIL: c2c bypass succeeded (expected — §29 server-side enforcement not implemented)"
-    echo "  client_to_client=false is currently enforced only by withholding the pushed route."
-    echo "  Server-side data-path enforcement is tracked in §29."
-    exit 77
+    fail "c2c bypass succeeded — server does not enforce isolation at the data path"
 else
     echo "      Client-0 → Client-1 (${TUNNEL_IPS[1]}): blocked (correct)"
 fi

@@ -104,7 +104,7 @@ struct ServerDataAdapter
         auto packet_id = session->TryAllocateOutboundPacketId();
         if (!packet_id)
             co_return;
-        auto encrypted = session->GetDataChannel().EncryptPacketWithId(
+        auto encrypted = session->GetCryptoContext().EncryptPacketWithId(
             plaintext, session->GetSessionId(), *packet_id);
         if (encrypted.empty())
             co_return;

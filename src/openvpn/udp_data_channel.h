@@ -31,7 +31,7 @@
 #include "routing_table.h"
 #include "transport/transport.h"
 
-#include <tun/tun_device.h>
+#include "platform/linux/tun/tun_device.h"
 
 #include <asio/io_context.hpp>
 

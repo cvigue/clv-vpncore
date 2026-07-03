@@ -4,7 +4,7 @@
 #define CLV_VPN_CONNECTION_H
 
 #include "openvpn/control_channel.h"
-#include "openvpn/data_channel.h"
+#include "openvpn/crypto_context.h"
 #include "openvpn/packet.h"
 #include "openvpn/tls_context.h"
 #include "openvpn/tls_crypt.h"
@@ -156,13 +156,13 @@ class Connection
     /**
      * @brief Access the data channel
      */
-    openvpn::DataChannel &GetDataChannel()
+    openvpn::CryptoContext &GetCryptoContext()
     {
-        return data_channel_;
+        return crypto_context_;
     }
-    const openvpn::DataChannel &GetDataChannel() const
+    const openvpn::CryptoContext &GetCryptoContext() const
     {
-        return data_channel_;
+        return crypto_context_;
     }
 
     // ── Activity Tracking ───────────────────────────────────────────────
@@ -212,14 +212,14 @@ class Connection
     /**
      * @brief Atomically claim the next outbound data-channel packet ID.
      *
-     * Delegates to the session @c DataChannel so all encrypt paths (UDP TX,
+     * Delegates to the session @c CryptoContext so all encrypt paths (UDP TX,
      * TCP, keepalive) share one counter with wrap and AEAD-limit checks.
      *
      * @return The allocated ID, or nullopt when encrypt must fail closed.
      */
     [[nodiscard]] std::optional<std::uint32_t> TryAllocateOutboundPacketId() noexcept
     {
-        return data_channel_.AllocateOutboundPacketId();
+        return crypto_context_.AllocateOutboundPacketId();
     }
 
     // ── Session State ───────────────────────────────────────────────────
@@ -489,7 +489,7 @@ class Connection
     Endpoint endpoint_;
     ConnectionRole role_;
     openvpn::ControlChannel control_channel_;
-    openvpn::DataChannel data_channel_;
+    openvpn::CryptoContext crypto_context_;
     // Cache-line separated atomics: RX writes last_activity_ns_, TX writes last_outbound_ns_.
     // std::atomic<int64_t> gives proper C++ memory-model guarantees (no UB on any arch).
     // Note: hardware_destructive_interference_size is a standard implementation detail, not ABI.

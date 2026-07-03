@@ -16,12 +16,11 @@
  * RX: recvmmsg → endpoint lookup → per-session decrypt → TUN write.
  */
 
-#include "openvpn/data_channel.h"
+#include "openvpn/crypto_context.h"
 #include "openvpn/packet.h"
 #include "routing_table.h"
 #include "udp_engine_types.h"
 #include "openvpn/connection.h"
-#include "udp_engine_types.h"
 #include "transport/transport.h"
 #include "transport/udp_batch.h"
 
@@ -280,7 +279,7 @@ struct MultiPeerPolicy
         if (wire_len == 0)
             return 0;
 
-        conn->GetDataChannel().RecordOutboundEncrypt(payload_len, entry->encrypt_key.cipher_algorithm);
+        conn->GetCryptoContext().RecordOutboundEncrypt(payload_len, entry->encrypt_key.cipher_algorithm);
 
         out.data = slot_span.first(wire_len);
         out.dest = conn->GetTransport().GetPeer();

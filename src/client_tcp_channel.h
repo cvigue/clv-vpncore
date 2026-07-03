@@ -25,7 +25,7 @@
 #include "iface_utils.h"
 #include "openvpn/config_exchange.h"
 #include "openvpn/crypto_algorithms.h"
-#include "openvpn/data_channel.h"
+#include "openvpn/crypto_context.h"
 #include "openvpn/key_derivation.h"
 #include "openvpn/packet.h"
 #include "openvpn/protocol_constants.h"
@@ -37,7 +37,7 @@
 #include <not_null.h>
 #include <stdexcept>
 #include <string>
-#include <tun/tun_device.h>
+#include "platform/linux/tun/tun_device.h"
 #include <net/ipv4_utils.h>
 
 #include <asio/awaitable.hpp>
@@ -83,7 +83,7 @@ class ClientTcpChannel
         : io_context_(io_context),
           logger_(&logger),
           running_(running),
-          data_channel_(logger)
+          crypto_context_(logger)
     {
         logger_->info("Client TCP channel initialized");
     }
@@ -112,7 +112,7 @@ class ClientTcpChannel
         std::vector<std::uint8_t> payload(
             openvpn::KEEPALIVE_PING_PAYLOAD,
             openvpn::KEEPALIVE_PING_PAYLOAD + openvpn::KEEPALIVE_PING_SIZE);
-        auto encrypted = data_channel_.EncryptPacket(payload, openvpn::SessionId{});
+        auto encrypted = crypto_context_.EncryptPacket(payload, openvpn::SessionId{});
         if (encrypted.empty())
             co_return;
         co_await tcp_->Send(encrypted);
@@ -137,14 +137,14 @@ class ClientTcpChannel
         pending_key_id_ = key_id;
         keys_installed_ = true;
 
-        data_channel_.InstallNewKeys(decrypt_key, encrypt_key, key_id);
+        crypto_context_.InstallNewKeys(decrypt_key, encrypt_key, key_id);
 
         logger_->debug("TCP: Keys installed (key_id={})", key_id);
     }
 
-    openvpn::DataChannel &GetLimitsDataChannel()
+    openvpn::CryptoContext &GetLimitsCryptoContext()
     {
-        return data_channel_;
+        return crypto_context_;
     }
 
     asio::awaitable<void> StartDataPath()
@@ -204,12 +204,12 @@ class ClientTcpChannel
                              openvpn::CipherAlgorithm cipher_algo,
                              openvpn::HmacAlgorithm hmac_algo,
                              std::uint8_t key_id,
-                             openvpn::DataChannel &data_channel)
+                             openvpn::CryptoContext &crypto_context)
     {
-        if (!openvpn::KeyDerivation::InstallKeys(data_channel, key_material, cipher_algo, hmac_algo, key_id, openvpn::PeerRole::Client))
+        if (!openvpn::KeyDerivation::InstallKeys(crypto_context, key_material, cipher_algo, hmac_algo, key_id, openvpn::PeerRole::Client))
             throw std::runtime_error("TCP: KeyDerivation::InstallKeys failed");
-        EngineInstallKeys(data_channel.GetPrimaryEncryptKey(),
-                          data_channel.GetPrimaryDecryptKey(),
+        EngineInstallKeys(crypto_context.GetPrimaryEncryptKey(),
+                          crypto_context.GetPrimaryDecryptKey(),
                           key_id);
     }
 
@@ -412,7 +412,7 @@ class ClientTcpChannel
             if (!parsed->IsData())
                 continue;
 
-            auto plaintext = data_channel_.DecryptPacket(*parsed);
+            auto plaintext = crypto_context_.DecryptPacket(*parsed);
             if (plaintext.empty())
             {
                 decrypt_failures_.fetch_add(1, std::memory_order_relaxed);
@@ -460,7 +460,7 @@ class ClientTcpChannel
             if (pkt.data.empty())
                 continue;
 
-            auto encrypted = data_channel_.EncryptPacket(pkt.data, session_id);
+            auto encrypted = crypto_context_.EncryptPacket(pkt.data, session_id);
             if (encrypted.empty())
             {
                 send_errors_.fetch_add(1, std::memory_order_relaxed);
@@ -494,7 +494,7 @@ class ClientTcpChannel
     Adapter *adapter_ = nullptr;
 
     transport::TcpTransport *tcp_ = nullptr;
-    openvpn::DataChannel data_channel_;
+    openvpn::CryptoContext crypto_context_;
 
     openvpn::EncryptionKey pending_encrypt_{};
     openvpn::EncryptionKey pending_decrypt_{};

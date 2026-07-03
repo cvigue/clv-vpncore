@@ -1,18 +1,18 @@
 // Copyright (c) 2025- Charlie Vigue. All rights reserved.
 
-#ifndef CLV_VPN_OPENVPN_DATA_CHANNEL_HMAC_H
-#define CLV_VPN_OPENVPN_DATA_CHANNEL_HMAC_H
+#ifndef CLV_VPN_OPENVPN_CRYPTO_CONTEXT_HMAC_H
+#define CLV_VPN_OPENVPN_CRYPTO_CONTEXT_HMAC_H
 
 /**
- * @file data_channel_hmac.h
- * @brief Free-function HMAC helpers for the data-channel packet authenticator.
+ * @file crypto_context_hmac.h
+ * @brief Free-function HMAC helpers for the crypto-context packet authenticator.
  *
- * Extracted from DataChannel private methods so the logic can be unit-tested
- * independently without a friend declaration or a live DataChannel instance.
+ * Extracted from CryptoContext private methods so the logic can be unit-tested
+ * independently without a friend declaration or a live CryptoContext instance.
  */
 
 #include "openvpn/crypto_algorithms.h"
-#include "openvpn/data_channel.h"
+#include "openvpn/crypto_context.h"
 
 #include <HelpSslException.h>
 #include <HelpSslHmac.h>
@@ -88,4 +88,4 @@ inline bool VerifyHmac(const EncryptionKey &key,
 
 } // namespace clv::vpn::openvpn::detail
 
-#endif // CLV_VPN_OPENVPN_DATA_CHANNEL_HMAC_H
+#endif // CLV_VPN_OPENVPN_CRYPTO_CONTEXT_HMAC_H

@@ -154,13 +154,13 @@ run_test "IT19: IPv6 Underlay Connectivity (UDP client, IPv6 host)" 1 \
     "${SCRIPT_DIR}/test_it19_ipv6_underlay.sh"
 
 run_test "IT9: client_to_client=false — Peer Isolation" 2 \
-    "${SCRIPT_DIR}/test_it9_no_c2c.sh" 1
+    "${SCRIPT_DIR}/test_it9_no_c2c.sh"
 
 run_test "IT10: client_to_client=false — Server-Side Enforcement (route bypass)" 2 \
-    "${SCRIPT_DIR}/test_it10_c2c_route_bypass.sh" 1
+    "${SCRIPT_DIR}/test_it10_c2c_route_bypass.sh"
 
 run_test "IT11: client_to_client=false — Full Symmetric Route Bypass" 2 \
-    "${SCRIPT_DIR}/test_it11_c2c_full_bypass.sh" 1
+    "${SCRIPT_DIR}/test_it11_c2c_full_bypass.sh"
 
 run_test "IT12: TLS-Crypt-V2 Single Client Handshake" 1 \
     "${SCRIPT_DIR}/test_it12_v2_handshake.sh"

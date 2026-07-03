@@ -89,13 +89,13 @@ TEST_F(ConnectionTest, ControlChannelAccess)
     EXPECT_EQ(control.GetSessionId().value, session_id.value);
 }
 
-TEST_F(ConnectionTest, DataChannelAccess)
+TEST_F(ConnectionTest, CryptoContextAccess)
 {
     auto session_id = openvpn::SessionId::Generate();
     auto endpoint = CreateEndpoint();
     Connection session(session_id, endpoint, true, std::nullopt, *logger_);
 
-    auto &data = session.GetDataChannel();
+    auto &data = session.GetCryptoContext();
     EXPECT_EQ(data.GetOutboundPacketId(), 1);
     EXPECT_FALSE(data.HasValidKeys());
     EXPECT_EQ(data.GetReplayedPacketCount(), 0);
@@ -227,12 +227,12 @@ TEST_F(ConnectionTest, Endpoint_EqualityOperator)
     EXPECT_NE(e1, e3);
 }
 
-TEST_F(ConnectionTest, ConstGetDataChannel_ReturnsConst)
+TEST_F(ConnectionTest, ConstGetCryptoContext_ReturnsConst)
 {
     auto sid = openvpn::SessionId::Generate();
     const Connection session(sid, CreateEndpoint(), true, std::nullopt, *logger_);
 
-    const auto &dc = session.GetDataChannel();
+    const auto &dc = session.GetCryptoContext();
     EXPECT_FALSE(dc.HasValidKeys());
 }
 

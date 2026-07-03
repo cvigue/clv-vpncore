@@ -44,8 +44,8 @@ struct P2PPolicy
     RxDecryptState rx_decrypt;
     TxEncryptState tx_encrypt;
     ClientTxSnapshot tx_snapshot;
-    /// Monotonic outbound limits tracked on the control-plane DataChannel when set.
-    openvpn::DataChannel *outbound_limits_dc_ = nullptr;
+    /// Monotonic outbound limits tracked on the control-plane CryptoContext when set.
+    openvpn::CryptoContext *outbound_limits_crypto_ = nullptr;
 
   private:
     // Double-buffered encrypt key for thread-safe handoff between the control
@@ -122,8 +122,8 @@ struct P2PPolicy
             tx_encrypt.ApplySnapshot(slot.key, slot.key_id);
 
         std::optional<std::uint32_t> packet_id;
-        if (outbound_limits_dc_)
-            packet_id = outbound_limits_dc_->AllocateOutboundPacketId();
+        if (outbound_limits_crypto_)
+            packet_id = outbound_limits_crypto_->AllocateOutboundPacketId();
         else
             return 0;
 
@@ -135,8 +135,8 @@ struct P2PPolicy
         if (wire_len == 0)
             return 0;
 
-        if (outbound_limits_dc_)
-            outbound_limits_dc_->RecordOutboundEncrypt(payload_len, slot.key.cipher_algorithm);
+        if (outbound_limits_crypto_)
+            outbound_limits_crypto_->RecordOutboundEncrypt(payload_len, slot.key.cipher_algorithm);
 
         out.data = slot_span.first(wire_len);
         out.dest = tx_snapshot.peer;
@@ -157,14 +157,14 @@ struct P2PPolicy
         tx_ns_out_ = p;
     }
 
-    void SetOutboundLimitsChannel(openvpn::DataChannel *dc) noexcept
+    void SetOutboundLimitsCryptoContext(openvpn::CryptoContext *crypto) noexcept
     {
-        outbound_limits_dc_ = dc;
+        outbound_limits_crypto_ = crypto;
     }
 
-    [[nodiscard]] openvpn::DataChannel *OutboundLimitsChannel() const noexcept
+    [[nodiscard]] openvpn::CryptoContext *OutboundLimitsCryptoContext() const noexcept
     {
-        return outbound_limits_dc_;
+        return outbound_limits_crypto_;
     }
 
     // ---- Key / peer management (called from control plane) ----
@@ -221,7 +221,7 @@ struct P2PPolicy
         rx_decrypt = RxDecryptState{*logger_};
         tx_snapshot = ClientTxSnapshot{};
         tx_encrypt = TxEncryptState{};
-        outbound_limits_dc_ = nullptr;
+        outbound_limits_crypto_ = nullptr;
         key_slots_[0] = KeySlot{};
         key_slots_[1] = KeySlot{};
         active_key_slot_.store(0, std::memory_order_relaxed);

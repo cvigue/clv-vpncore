@@ -15,7 +15,7 @@
 #include "cpu_affinity.h"
 #include "data_path_stats.h"
 #include "openvpn/connection.h"
-#include "openvpn/data_channel.h"
+#include "openvpn/crypto_context.h"
 #include "openvpn/packet.h"
 #include "openvpn/protocol_constants.h"
 #include "udp_worker_thread.h"
@@ -28,7 +28,7 @@
 #include <algorithm>
 #include <exception>
 #include <memory>
-#include <tun/tun_device.h>
+#include "platform/linux/tun/tun_device.h"
 
 #include <asio/awaitable.hpp>
 #include <asio/co_spawn.hpp>

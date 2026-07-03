@@ -3,7 +3,7 @@
 #include "scoped_masquerade.h"
 
 #include <cstdint>
-#include <util/nftables_client.h>
+#include "platform/linux/nftables/nftables_client.h"
 
 #include <arpa/inet.h>
 #include <cstring>

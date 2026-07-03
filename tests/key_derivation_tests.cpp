@@ -5,7 +5,7 @@
 #include <gtest/gtest.h>
 #include "openvpn/crypto_algorithms.h"
 #include "openvpn/key_derivation.h"
-#include "openvpn/data_channel.h"
+#include "openvpn/crypto_context.h"
 #include "openvpn/packet.h"
 #include "openvpn/protocol_constants.h"
 #include <array>
@@ -214,9 +214,9 @@ TEST_F(KeyDerivationTest, InstallKeysAes256Gcm)
             CipherAlgorithm::AES_256_GCM,
             HmacAlgorithm::NONE)); // AEAD ciphers don't use separate HMAC
 
-    DataChannel data_channel(*logger_);
+    CryptoContext crypto_context(*logger_);
     bool success = KeyDerivation::InstallKeys(
-        data_channel,
+        crypto_context,
         key_material,
         CipherAlgorithm::AES_256_GCM,
         HmacAlgorithm::NONE,
@@ -235,9 +235,9 @@ TEST_F(KeyDerivationTest, InstallKeysKeySlotsIsolated)
             CipherAlgorithm::AES_256_GCM,
             HmacAlgorithm::SHA256));
 
-    DataChannel data_channel(*logger_);
+    CryptoContext crypto_context(*logger_);
     KeyDerivation::InstallKeys(
-        data_channel,
+        crypto_context,
         key_material,
         CipherAlgorithm::AES_256_GCM,
         HmacAlgorithm::SHA256,
@@ -255,9 +255,9 @@ TEST_F(KeyDerivationTest, InstallKeysChaCha20Poly1305)
             CipherAlgorithm::CHACHA20_POLY1305,
             HmacAlgorithm::NONE)); // AEAD ciphers don't use separate HMAC
 
-    DataChannel data_channel(*logger_);
+    CryptoContext crypto_context(*logger_);
     bool success = KeyDerivation::InstallKeys(
-        data_channel,
+        crypto_context,
         key_material,
         CipherAlgorithm::CHACHA20_POLY1305,
         HmacAlgorithm::NONE,
@@ -273,9 +273,9 @@ TEST_F(KeyDerivationTest, InstallKeysInsufficientMaterial)
     auto key_material = KeyDerivation::DeriveKeyMaterial(
         TEST_MASTER_SECRET, "label", 32);
 
-    DataChannel data_channel(*logger_);
+    CryptoContext crypto_context(*logger_);
     bool success = KeyDerivation::InstallKeys(
-        data_channel,
+        crypto_context,
         key_material,
         CipherAlgorithm::AES_256_GCM,
         HmacAlgorithm::SHA256,
@@ -294,9 +294,9 @@ TEST_F(KeyDerivationTest, InstallKeysValidatesKeys)
             CipherAlgorithm::AES_256_GCM,
             HmacAlgorithm::SHA256));
 
-    DataChannel data_channel(*logger_);
+    CryptoContext crypto_context(*logger_);
     bool success = KeyDerivation::InstallKeys(
-        data_channel,
+        crypto_context,
         key_material,
         CipherAlgorithm::AES_256_GCM,
         HmacAlgorithm::SHA256,
@@ -320,9 +320,9 @@ TEST_F(KeyDerivationTest, FullWorkflowAes256Gcm)
         "OpenVPN key material",
         needed);
 
-    DataChannel data_channel(*logger_);
+    CryptoContext crypto_context(*logger_);
     bool success = KeyDerivation::InstallKeys(
-        data_channel,
+        crypto_context,
         key_material,
         CipherAlgorithm::AES_256_GCM,
         HmacAlgorithm::SHA256,
@@ -334,7 +334,7 @@ TEST_F(KeyDerivationTest, FullWorkflowAes256Gcm)
     std::vector<uint8_t> plaintext = {1, 2, 3, 4, 5};
     SessionId session_id{0x12345678};
 
-    auto encrypted = data_channel.EncryptPacket(plaintext, session_id);
+    auto encrypted = crypto_context.EncryptPacket(plaintext, session_id);
     EXPECT_FALSE(encrypted.empty());
 }
 

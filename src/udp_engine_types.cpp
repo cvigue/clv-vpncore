@@ -3,9 +3,10 @@
 #include "udp_engine_types.h"
 
 #include "openvpn/connection.h"
+#include "openvpn/aead_traits.h"
 #include "openvpn/crypto_algorithms.h"
 #include "openvpn/crypto_log.h"
-#include "openvpn/data_channel.h"
+#include "openvpn/crypto_context.h"
 #include "openvpn/data_v2_encrypt.h"
 #include "openvpn/packet.h"
 #include "openvpn/protocol_constants.h"
@@ -30,30 +31,6 @@
 #include <utility>
 
 namespace clv::vpn {
-
-// ============================================================================
-// Local helpers
-// ============================================================================
-
-static const OpenSSL::AeadCipherTraits *GetAeadTraits(openvpn::CipherAlgorithm algo)
-{
-    switch (algo)
-    {
-    case openvpn::CipherAlgorithm::AES_128_GCM:
-        return &OpenSSL::AES_128_GCM_TRAITS;
-    case openvpn::CipherAlgorithm::AES_256_GCM:
-        return &OpenSSL::AES_256_GCM_TRAITS;
-    case openvpn::CipherAlgorithm::CHACHA20_POLY1305:
-        return &OpenSSL::CHACHA20_POLY1305_TRAITS;
-    default:
-        return nullptr;
-    }
-}
-
-static bool IsSupportedAead(openvpn::CipherAlgorithm algo)
-{
-    return GetAeadTraits(algo) != nullptr;
-}
 
 // ============================================================================
 // SessionIndex
@@ -85,7 +62,7 @@ SessionIndex SessionIndex::BuildFrom(const SessionManager &sm)
         if (!conn)
             continue;
 
-        auto &dc = conn->GetDataChannel();
+        auto &dc = conn->GetCryptoContext();
         if (!dc.HasValidKeys())
             continue;
         if (!conn->HasTransport())
@@ -128,10 +105,10 @@ void TxEncryptState::ApplySnapshot(const openvpn::EncryptionKey &key, std::uint8
     cipher_algorithm = key.cipher_algorithm;
     cipher_iv = key.cipher_iv;
 
-    if (IsSupportedAead(key.cipher_algorithm))
+    if (openvpn::IsSupportedAead(key.cipher_algorithm))
     {
         encrypt_ctx.emplace();
-        const auto *traits = GetAeadTraits(key.cipher_algorithm);
+        const auto *traits = openvpn::GetAeadTraits(key.cipher_algorithm);
         encrypt_ctx->InitAeadEncrypt(*traits);
 
         std::array<std::uint8_t, OpenSSL::AEAD_DEFAULT_NONCE_LENGTH> dummy_nonce{};
@@ -202,9 +179,9 @@ void RxDecryptState::ApplySnapshot(const RxDecryptSnapshot &snap)
     primary.replay.Reset();
 
     // Create persistent AEAD decrypt context
-    if (IsSupportedAead(snap.decrypt_key.cipher_algorithm))
+    if (openvpn::IsSupportedAead(snap.decrypt_key.cipher_algorithm))
     {
-        const auto *traits = GetAeadTraits(snap.decrypt_key.cipher_algorithm);
+        const auto *traits = openvpn::GetAeadTraits(snap.decrypt_key.cipher_algorithm);
         primary.decrypt_ctx.emplace();
         primary.decrypt_ctx->InitAeadDecrypt(*traits);
         std::array<std::uint8_t, OpenSSL::AEAD_DEFAULT_NONCE_LENGTH> dummy_nonce{};
@@ -249,7 +226,7 @@ std::span<std::uint8_t> RxDecryptState::DecryptPacketInPlace(std::span<std::uint
         return {};
     }
 
-    if (!IsSupportedAead(slot->key.cipher_algorithm) || !slot->decrypt_ctx)
+    if (!openvpn::IsSupportedAead(slot->key.cipher_algorithm) || !slot->decrypt_ctx)
         return {};
 
     // Extract packet_id from [4..8) (big-endian)

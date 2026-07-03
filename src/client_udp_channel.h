@@ -19,7 +19,7 @@
  */
 
 #include "openvpn/crypto_algorithms.h"
-#include "openvpn/data_channel.h"
+#include "openvpn/crypto_context.h"
 #include "openvpn/packet.h"
 #include "openvpn/protocol_constants.h"
 #include "p2p_policy.h"
@@ -42,7 +42,7 @@
 #include <string>
 #include <net/ipv4_utils.h>
 
-#include <tun/tun_device.h>
+#include "platform/linux/tun/tun_device.h"
 
 #include <asio/io_context.hpp>
 
@@ -152,12 +152,12 @@ class ClientUdpChannel
                     openvpn::KEEPALIVE_PING_PAYLOAD,
                     openvpn::KEEPALIVE_PING_SIZE);
 
-        // Claim the next packet ID from the shared DataChannel counter (same
+        // Claim the next packet ID from the shared CryptoContext counter (same
         // sequence used by the TX drain loop) so the peer's anti-replay window is never violated.
-        auto *limits_dc = this->policy().OutboundLimitsChannel();
-        if (!limits_dc)
+        auto *limits_crypto = this->policy().OutboundLimitsCryptoContext();
+        if (!limits_crypto)
             co_return;
-        const auto pkt_id = limits_dc->AllocateOutboundPacketId();
+        const auto pkt_id = limits_crypto->AllocateOutboundPacketId();
         if (!pkt_id)
             co_return;
 
@@ -170,7 +170,7 @@ class ClientUdpChannel
         if (wire_len == 0)
             co_return;
 
-        limits_dc->RecordOutboundEncrypt(openvpn::KEEPALIVE_PING_SIZE, ping_tx_state_.cipher_algorithm);
+        limits_crypto->RecordOutboundEncrypt(openvpn::KEEPALIVE_PING_SIZE, ping_tx_state_.cipher_algorithm);
 
         // Send directly on the raw socket (v4-mapped IPv6 for IPv4 peers).
         struct sockaddr_in6 sa6{};
@@ -203,22 +203,22 @@ class ClientUdpChannel
                              openvpn::CipherAlgorithm cipher_algo,
                              openvpn::HmacAlgorithm hmac_algo,
                              std::uint8_t key_id,
-                             openvpn::DataChannel &data_channel)
+                             openvpn::CryptoContext &crypto_context)
     {
-        if (!openvpn::KeyDerivation::InstallKeys(data_channel, key_material, cipher_algo, hmac_algo, key_id, openvpn::PeerRole::Client))
+        if (!openvpn::KeyDerivation::InstallKeys(crypto_context, key_material, cipher_algo, hmac_algo, key_id, openvpn::PeerRole::Client))
             throw std::runtime_error("UDP: KeyDerivation::InstallKeys failed");
-        this->policy().SetOutboundLimitsChannel(&data_channel);
-        EngineInstallKeys(data_channel.GetPrimaryEncryptKey(),
-                          data_channel.GetPrimaryDecryptKey(),
+        this->policy().SetOutboundLimitsCryptoContext(&crypto_context);
+        EngineInstallKeys(crypto_context.GetPrimaryEncryptKey(),
+                          crypto_context.GetPrimaryDecryptKey(),
                           key_id);
     }
 
-    openvpn::DataChannel &GetLimitsDataChannel()
+    openvpn::CryptoContext &GetLimitsCryptoContext()
     {
-        auto *dc = this->policy().OutboundLimitsChannel();
-        if (!dc)
-            throw std::runtime_error("UDP: outbound limits DataChannel not configured");
-        return *dc;
+        auto *crypto = this->policy().OutboundLimitsCryptoContext();
+        if (!crypto)
+            throw std::runtime_error("UDP: outbound limits CryptoContext not configured");
+        return *crypto;
     }
 
     void ConfigureNetworkInterface(const openvpn::NegotiatedConfig &negotiated,

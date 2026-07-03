@@ -67,7 +67,11 @@ std::optional<std::vector<std::uint8_t>> ParseHexKeyLines(std::istream &input)
         {
             for (size_t i = 0; i < line.length(); ++i)
             {
-                if (std::isxdigit(line[i]) && i + 1 < line.length() && std::isxdigit(line[i + 1]))
+                const auto ch = static_cast<unsigned char>(line[i]);
+                const auto next = i + 1 < line.length()
+                                      ? static_cast<unsigned char>(line[i + 1])
+                                      : static_cast<unsigned char>(0);
+                if (std::isxdigit(ch) && i + 1 < line.length() && std::isxdigit(next))
                 {
                     std::string hex_pair = line.substr(i, 2);
                     key_data.push_back(static_cast<std::uint8_t>(std::stoul(hex_pair, nullptr, 16)));

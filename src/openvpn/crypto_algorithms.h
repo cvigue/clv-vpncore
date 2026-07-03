@@ -86,7 +86,7 @@ constexpr std::array<CipherInfo, 3> CIPHER_REGISTRY = {{
     {CipherAlgorithm::AES_256_GCM, "AES-256-GCM", 32, 12, true, false, nullptr},
     {CipherAlgorithm::CHACHA20_POLY1305, "ChaCha20-Poly1305", 32, 12, true, false, nullptr},
     // Legacy/deprecated algorithms - supported for compatibility but flagged
-    // Note: These are not yet implemented in data_channel but included for config validation
+    // Note: These are not yet implemented in CryptoContext but included for config validation
     // {CipherAlgorithm::BF_CBC, "BF-CBC", 16, 8, false, true, "Blowfish has weak key schedule"},
     // {CipherAlgorithm::AES_128_CBC, "AES-128-CBC", 16, 16, false, true, "CBC mode lacks authentication"},
 }};

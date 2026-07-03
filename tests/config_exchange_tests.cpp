@@ -14,6 +14,18 @@ class ConfigExchangeTest : public ::testing::Test
     ConfigExchange exchange_;
 };
 
+std::string RepeatOption(const std::string &option, int count)
+{
+    std::string result;
+    for (int i = 0; i < count; ++i)
+    {
+        if (i > 0)
+            result += ',';
+        result += option;
+    }
+    return result;
+}
+
 // ============================================================================
 // Push Request Tests
 // ============================================================================
@@ -289,6 +301,48 @@ TEST_F(ConfigExchangeTest, AcceptsRouteWithNetworkOnly)
     const auto &config = exchange_.GetNegotiatedConfig();
     ASSERT_EQ(config.routes.size(), 1u);
     EXPECT_EQ(std::get<0>(config.routes[0]), "10.8.0.0");
+}
+
+TEST_F(ConfigExchangeTest, RejectsInvalidIpv4RouteNetwork)
+{
+    EXPECT_THROW(exchange_.ProcessPushReply("route not-an-ip 255.255.255.0"), ConfigParseError);
+}
+
+TEST_F(ConfigExchangeTest, RejectsInvalidIpv6RouteNetwork)
+{
+    EXPECT_THROW(exchange_.ProcessPushReply("route-ipv6 not-an-ipv6 ::1 0"), ConfigParseError);
+}
+
+TEST_F(ConfigExchangeTest, RejectsTooManyPushedRoutes)
+{
+    EXPECT_THROW(exchange_.ProcessPushReply(RepeatOption("route 10.8.0.0 255.255.255.0", 65)),
+                 ConfigParseError);
+}
+
+TEST_F(ConfigExchangeTest, RejectsTooManyDhcpOptions)
+{
+    EXPECT_THROW(exchange_.ProcessPushReply(RepeatOption("dhcp-option DNS 8.8.8.8", 33)),
+                 ConfigParseError);
+}
+
+TEST_F(ConfigExchangeTest, RejectsTooManyDnsSearchDomains)
+{
+    std::string option = "dns search-domains";
+    for (int i = 0; i < 33; ++i)
+        option += " d" + std::to_string(i) + ".example";
+    EXPECT_THROW(exchange_.ProcessPushReply(option), ConfigParseError);
+}
+
+TEST_F(ConfigExchangeTest, RejectsTooManyDnsServers)
+{
+    std::string options;
+    for (int i = 0; i < 17; ++i)
+    {
+        if (i > 0)
+            options += ',';
+        options += "dns server " + std::to_string(i) + " address 8.8.8.8";
+    }
+    EXPECT_THROW(exchange_.ProcessPushReply(options), ConfigParseError);
 }
 
 TEST_F(ConfigExchangeTest, RejectsOptionTooLong)

@@ -22,7 +22,7 @@
 #include "data_path_stats.h"
 #include "openvpn/connection.h"
 #include "keepalive_loop.h"
-#include "openvpn/data_channel.h"
+#include "openvpn/crypto_context.h"
 #include "openvpn/key_derivation.h"
 #include "openvpn/packet.h"
 #include "openvpn/protocol_constants.h"
@@ -36,7 +36,8 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
-#include <tun/tun_device.h>
+#include "platform/linux/tun/tun_device.h"
+#include "platform/linux/tun/tun_setup.h"
 #include <net/ipv4_utils.h>
 #include <net/ipv6_utils.h>
 
@@ -132,51 +133,7 @@ class TcpDataChannel
     {
         // TCP channel runs TUN I/O on its own internal io_context.
         tun_device_ = std::make_unique<tun::TunDevice>(internal_ctx_);
-
-        std::string dev_name = srv.dev;
-        if (dev_name == "tun")
-            dev_name = "";
-
-        std::string actual_name = tun_device_->Create(dev_name);
-        logger_->info("Created TUN device: {}", actual_name);
-
-        auto parsed = ipv4::ParseCidr(srv.network);
-        if (!parsed)
-            throw std::invalid_argument("Invalid server network CIDR: " + srv.network);
-        auto [network_addr, prefix_len] = *parsed;
-
-        std::string server_ip = srv.bridge_ip.empty()
-                                    ? ipv4::Ipv4ToString(network_addr + 1)
-                                    : srv.bridge_ip;
-
-        tun_device_->SetAddress(server_ip, prefix_len);
-        logger_->info("Set TUN address: {}/{}", server_ip, static_cast<int>(prefix_len));
-        tun_device_->SetMtu(srv.tun_mtu);
-
-        if (srv.tun_txqueuelen > 0)
-        {
-            tun_device_->SetTxQueueLen(srv.tun_txqueuelen);
-            logger_->info("Set TUN txqueuelen: {}", srv.tun_txqueuelen);
-        }
-
-        tun_device_->BringUp();
-        logger_->info("TUN device is up");
-
-        if (!srv.network_v6.empty())
-        {
-            auto parsed_v6 = ipv6::ParseCidr6(srv.network_v6);
-            if (parsed_v6)
-            {
-                auto [net_v6, prefix_v6] = *parsed_v6;
-                ipv6::Ipv6Address server_v6 = net_v6;
-                server_v6[15] += 1;
-                std::string server_v6_str = ipv6::Ipv6ToString(server_v6);
-                tun_device_->AddIpv6Address(server_v6_str, prefix_v6);
-                logger_->info("Set TUN IPv6 address: {}/{}", server_v6_str, prefix_v6);
-            }
-        }
-
-        return actual_name;
+        return tun::SetupServerTun(*tun_device_, srv, *logger_);
     }
 
     // ---- Data-plane interface ----
@@ -184,7 +141,7 @@ class TcpDataChannel
     asio::awaitable<void> ProcessIncomingDataPacket(Connection *session,
                                                     const openvpn::OpenVpnPacket &packet)
     {
-        auto plaintext = session->GetDataChannel().DecryptPacket(packet);
+        auto plaintext = session->GetCryptoContext().DecryptPacket(packet);
 
         logger_->debug("DecryptPacket returned {} bytes", plaintext.size());
 
@@ -260,7 +217,7 @@ class TcpDataChannel
                      std::uint8_t key_id)
     {
         bool keys_installed = openvpn::KeyDerivation::InstallKeys(
-            session->GetDataChannel(),
+            session->GetCryptoContext(),
             key_material,
             cipher_algo,
             hmac_algo,
@@ -269,7 +226,7 @@ class TcpDataChannel
         if (keys_installed)
         {
             logger_->info("Data channel session keys installed successfully (key_id={})", key_id);
-            session->GetDataChannel().SetCurrentKeyId(key_id);
+            session->GetCryptoContext().SetCurrentKeyId(key_id);
         }
         else
         {
@@ -296,7 +253,7 @@ class TcpDataChannel
             auto packet_id = session->TryAllocateOutboundPacketId();
             if (!packet_id)
                 co_return;
-            auto encrypted = session->GetDataChannel().EncryptPacketWithId(
+            auto encrypted = session->GetCryptoContext().EncryptPacketWithId(
                 ping_payload, session->GetSessionId(), *packet_id);
 
             if (encrypted.empty())
@@ -322,7 +279,7 @@ class TcpDataChannel
             Connection *conn;
             bool HasValidKeys() const
             {
-                return conn->GetDataChannel().HasValidKeys();
+                return conn->GetCryptoContext().HasValidKeys();
             }
             tp GetLastActivity() const
             {
@@ -445,7 +402,7 @@ class TcpDataChannel
                 continue;
             }
 
-            if (!session->GetDataChannel().HasValidKeys())
+            if (!session->GetCryptoContext().HasValidKeys())
             {
                 logger_->debug("TUN→TCP: session {} has no valid data channel keys", session_id);
                 continue;
@@ -454,7 +411,7 @@ class TcpDataChannel
             auto packet_id = session->TryAllocateOutboundPacketId();
             if (!packet_id)
                 continue;
-            auto encrypted = session->GetDataChannel().EncryptPacketWithId(
+            auto encrypted = session->GetCryptoContext().EncryptPacketWithId(
                 std::span<const std::uint8_t>(ip_packet.data), session_id, *packet_id);
 
             if (encrypted.empty())

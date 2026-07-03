@@ -1,10 +1,10 @@
 // Copyright (c) 2025- Charlie Vigue. All rights reserved.
 
-#ifndef CLV_VPN_OPENVPN_DATA_CHANNEL_LIMITS_H
-#define CLV_VPN_OPENVPN_DATA_CHANNEL_LIMITS_H
+#ifndef CLV_VPN_OPENVPN_CRYPTO_CONTEXT_LIMITS_H
+#define CLV_VPN_OPENVPN_CRYPTO_CONTEXT_LIMITS_H
 
 /**
- * @file data_channel_limits.h
+ * @file crypto_context_limits.h
  * @brief Legacy §7.4 outbound limits (packet-ID wrap + AES-GCM usage).
  *
  * Phase A of epoch RFC remediation: no wire-format changes.  Matches OpenVPN
@@ -137,7 +137,7 @@ inline void LegacyAeadApplyEncrypt(LegacyAeadUsage &usage, std::size_t plaintext
     usage.blocks += delta.blocks;
 }
 
-/** Limit flags after recording usage (shared by DataChannel and unit tests). */
+/** Limit flags after recording usage (shared by CryptoContext and unit tests). */
 struct LegacyAeadLimitFlags
 {
     bool needs_reneg = false;
@@ -189,4 +189,4 @@ struct LegacyAeadUsageTracker
 
 } // namespace clv::vpn::openvpn
 
-#endif // CLV_VPN_OPENVPN_DATA_CHANNEL_LIMITS_H
+#endif // CLV_VPN_OPENVPN_CRYPTO_CONTEXT_LIMITS_H

@@ -4,7 +4,7 @@
 #define CLV_VPN_OPENVPN_KEY_DERIVATION_H
 
 #include "openvpn/crypto_algorithms.h"
-#include "openvpn/data_channel.h"
+#include "openvpn/crypto_context.h"
 #include "openvpn/packet.h"
 
 #include <cstddef>
@@ -48,7 +48,7 @@ namespace clv::vpn::openvpn {
  * );
  *
  * // Install into data channel
- * KeyDerivation::InstallKeys(data_channel, key_material, cipher_algo, hmac_algo);
+ * KeyDerivation::InstallKeys(crypto_context, key_material, cipher_algo, hmac_algo);
  * @endcode
  */
 /** @brief Identifies which peer role is installing keys. */
@@ -79,7 +79,7 @@ class KeyDerivation
 
     /**
      * @brief Install derived keys into data channel with proper key transition
-     * @param data_channel Data channel to install keys into
+     * @param crypto_context Data channel to install keys into
      * @param key_material Derived key material (minimum 128 bytes for AEAD)
      * @param cipher_algorithm Cipher to use for keys
      * @param hmac_algorithm HMAC to use for keys
@@ -92,7 +92,7 @@ class KeyDerivation
      * - Lame duck lives until the next rekey overwrites it
      * - Packets are matched to keys by key_id embedded in packet header
      */
-    static bool InstallKeys(DataChannel &data_channel,
+    static bool InstallKeys(CryptoContext &crypto_context,
                             std::span<const std::uint8_t> key_material,
                             CipherAlgorithm cipher_algorithm,
                             HmacAlgorithm hmac_algorithm,

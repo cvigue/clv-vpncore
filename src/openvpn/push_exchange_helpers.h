@@ -135,7 +135,7 @@ asio::awaitable<void> HandleServerPushRequest(
 {
     logger.info("Client sent PUSH_REQUEST, sending PUSH_REPLY");
 
-    if (!session->GetDataChannel().HasValidKeys())
+    if (!session->GetCryptoContext().HasValidKeys())
     {
         logger.warn("PUSH_REQUEST received but keys not yet installed");
         if (!session->GetClientRandom().empty() && !session->GetServerRandom().empty())

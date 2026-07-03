@@ -1,12 +1,13 @@
 // Copyright (c) 2025- Charlie Vigue. All rights reserved.
 
-#include "openvpn/data_channel.h"
-#include "openvpn/data_channel_hmac.h"
+#include "openvpn/crypto_context.h"
+#include "openvpn/crypto_context_hmac.h"
 
+#include "openvpn/aead_traits.h"
 #include "openvpn/aead_utils.h"
 #include "openvpn/crypto_log.h"
 #include "openvpn/crypto_algorithms.h"
-#include "openvpn/data_channel_limits.h"
+#include "openvpn/crypto_context_limits.h"
 #include "openvpn/data_v2_encrypt.h"
 #include "openvpn/data_v2_wire.h"
 #include "openvpn/packet.h"
@@ -36,25 +37,6 @@ namespace clv::vpn::openvpn {
 // ============================================================================
 // AEAD Cipher Dispatch (runtime algorithm selection)
 // ============================================================================
-
-/**
- * @brief Map a CipherAlgorithm to its OpenSSL AEAD traits
- * @return Pointer to traits, or nullptr for unsupported ciphers
- */
-static const OpenSSL::AeadCipherTraits *GetAeadTraits(CipherAlgorithm algo)
-{
-    switch (algo)
-    {
-    case CipherAlgorithm::AES_128_GCM:
-        return &OpenSSL::AES_128_GCM_TRAITS;
-    case CipherAlgorithm::AES_256_GCM:
-        return &OpenSSL::AES_256_GCM_TRAITS;
-    case CipherAlgorithm::CHACHA20_POLY1305:
-        return &OpenSSL::CHACHA20_POLY1305_TRAITS;
-    default:
-        return nullptr;
-    }
-}
 
 static std::vector<std::uint8_t> EncryptAeadDispatch(CipherAlgorithm algo,
                                                      std::span<const std::uint8_t> key,
@@ -110,11 +92,6 @@ static bool DecryptAeadInPlaceDispatch(CipherAlgorithm algo,
     return OpenSSL::DecryptAeadInPlace(*traits, key, nonce, data, tag, aad);
 }
 
-static bool IsSupportedAead(CipherAlgorithm algo)
-{
-    return GetAeadTraits(algo) != nullptr;
-}
-
 // ============================================================================
 // Persistent AEAD Context Initialization
 // ============================================================================
@@ -152,7 +129,7 @@ static void InitPersistentAeadCtx(OpenSSL::SslCipherCtx &ctx,
 // Outbound limits (legacy §7.4 / §7.2.1 Phase A)
 // ============================================================================
 
-std::optional<std::uint32_t> DataChannel::AllocateOutboundPacketId() noexcept
+std::optional<std::uint32_t> CryptoContext::AllocateOutboundPacketId() noexcept
 {
     if (outbound_encrypt_blocked_.load(std::memory_order_acquire))
         return std::nullopt;
@@ -174,7 +151,7 @@ std::optional<std::uint32_t> DataChannel::AllocateOutboundPacketId() noexcept
     }
 }
 
-void DataChannel::RecordOutboundEncrypt(std::size_t plaintext_len,
+void CryptoContext::RecordOutboundEncrypt(std::size_t plaintext_len,
                                         CipherAlgorithm cipher) noexcept
 {
     if (!IsLegacyAeadUsageLimited(cipher))
@@ -198,21 +175,21 @@ void DataChannel::RecordOutboundEncrypt(std::size_t plaintext_len,
     }
 }
 
-bool DataChannel::TakeRekeyRequest() noexcept
+bool CryptoContext::TakeRekeyRequest() noexcept
 {
     return rekey_requested_.exchange(false, std::memory_order_acq_rel);
 }
 
-bool DataChannel::IsOutboundEncryptBlocked() const noexcept
+bool CryptoContext::IsOutboundEncryptBlocked() const noexcept
 {
     return outbound_encrypt_blocked_.load(std::memory_order_acquire);
 }
 
 // ============================================================================
-// DataChannel Implementation
+// CryptoContext Implementation
 // ============================================================================
 
-std::vector<std::uint8_t> DataChannel::EncryptPacket(std::span<const std::uint8_t> plaintext,
+std::vector<std::uint8_t> CryptoContext::EncryptPacket(std::span<const std::uint8_t> plaintext,
                                                      SessionId session_id)
 {
     if (!primary_encrypt_.is_valid || IsOutboundEncryptBlocked())
@@ -225,7 +202,7 @@ std::vector<std::uint8_t> DataChannel::EncryptPacket(std::span<const std::uint8_
     return EncryptPacketWithId(plaintext, session_id, *packet_id);
 }
 
-std::vector<std::uint8_t> DataChannel::EncryptPacketWithId(std::span<const std::uint8_t> plaintext,
+std::vector<std::uint8_t> CryptoContext::EncryptPacketWithId(std::span<const std::uint8_t> plaintext,
                                                            SessionId session_id,
                                                            std::uint32_t packet_id)
 {
@@ -290,7 +267,7 @@ std::vector<std::uint8_t> DataChannel::EncryptPacketWithId(std::span<const std::
 // In-place encrypt/decrypt (zero-copy arena path)
 // ============================================================================
 
-std::size_t DataChannel::EncryptPacketInPlaceWithId(std::span<std::uint8_t> buf,
+std::size_t CryptoContext::EncryptPacketInPlaceWithId(std::span<std::uint8_t> buf,
                                                     std::size_t payload_len,
                                                     SessionId session_id,
                                                     std::uint32_t packet_id)
@@ -319,7 +296,7 @@ std::size_t DataChannel::EncryptPacketInPlaceWithId(std::span<std::uint8_t> buf,
     return wire_len;
 }
 
-std::size_t DataChannel::EncryptPacketInPlace(std::span<std::uint8_t> buf,
+std::size_t CryptoContext::EncryptPacketInPlace(std::span<std::uint8_t> buf,
                                               std::size_t payload_len,
                                               SessionId session_id)
 {
@@ -342,7 +319,7 @@ std::size_t DataChannel::EncryptPacketInPlace(std::span<std::uint8_t> buf,
     return wire_len;
 }
 
-std::span<std::uint8_t> DataChannel::DecryptPacketInPlace(std::span<std::uint8_t> buf)
+std::span<std::uint8_t> CryptoContext::DecryptPacketInPlace(std::span<std::uint8_t> buf)
 {
     if (buf.size() < kDataV2Overhead)
     {
@@ -454,7 +431,7 @@ std::span<std::uint8_t> DataChannel::DecryptPacketInPlace(std::span<std::uint8_t
 
 // Zero-copy arena path uses DecryptPacketInPlace above.  This allocating path
 // is used by the TCP slow path and unit tests.
-std::vector<std::uint8_t> DataChannel::DecryptPacket(const OpenVpnPacket &packet)
+std::vector<std::uint8_t> CryptoContext::DecryptPacket(const OpenVpnPacket &packet)
 {
     // Validate packet is a data packet
     if (!IsDataPacket(packet.opcode_))
@@ -594,7 +571,7 @@ std::vector<std::uint8_t> DataChannel::DecryptPacket(const OpenVpnPacket &packet
     }
 }
 
-std::array<std::uint8_t, 12> DataChannel::GenerateNonce(std::uint32_t packet_id,
+std::array<std::uint8_t, 12> CryptoContext::GenerateNonce(std::uint32_t packet_id,
                                                         const EncryptionKey &key)
 {
     if (key.IsAead() && key.cipher_iv.size() < 8)
@@ -606,19 +583,19 @@ std::array<std::uint8_t, 12> DataChannel::GenerateNonce(std::uint32_t packet_id,
     return GenerateLegacyDataV2Nonce(packet_id, key.cipher_iv);
 }
 
-std::vector<std::uint8_t> DataChannel::ComputeHmac(const EncryptionKey &key,
+std::vector<std::uint8_t> CryptoContext::ComputeHmac(const EncryptionKey &key,
                                                    std::span<const std::uint8_t> packet_data)
 {
     return detail::ComputeHmac(key, packet_data);
 }
 
-bool DataChannel::VerifyHmac(const EncryptionKey &key, std::span<const std::uint8_t> packet_data,
+bool CryptoContext::VerifyHmac(const EncryptionKey &key, std::span<const std::uint8_t> packet_data,
                              std::span<const std::uint8_t> expected_hmac)
 {
     return detail::VerifyHmac(key, packet_data, expected_hmac);
 }
 
-void DataChannel::InstallNewKeys(const EncryptionKey &decrypt_key,
+void CryptoContext::InstallNewKeys(const EncryptionKey &decrypt_key,
                                  const EncryptionKey &encrypt_key,
                                  std::uint8_t new_key_id)
 {
@@ -685,7 +662,7 @@ void DataChannel::InstallNewKeys(const EncryptionKey &decrypt_key,
                    KeyMaterialFingerprint(primary_encrypt_.cipher_iv));
 }
 
-DecryptKeySlot *DataChannel::FindDecryptSlot(std::uint8_t key_id)
+DecryptKeySlot *CryptoContext::FindDecryptSlot(std::uint8_t key_id)
 {
     // First check primary key
     if (primary_decrypt_.key.is_valid && primary_decrypt_.key.key_id == key_id)

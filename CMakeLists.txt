@@ -21,7 +21,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(BUILD_TESTS "Build test programs" ON)
 option(BUILD_DEMOS "Build demo programs" ON)
 
-# Add clv-base (provides clv::core, clv::sslhelp, clv::nettransport, clv::netlinux, clv::netvpn)
+# Add clv-base (provides clv::core, clv::sslhelp, clv::nettransport, clv::netlinux)
 set(USING_QUIC_TLS ON CACHE BOOL "Build quictls for QUIC transport" FORCE)
 add_subdirectory(clv-base)
 
@@ -37,7 +37,7 @@ add_library(clv_vpncore STATIC
     src/openvpn/control_plane_helpers.cpp
     src/openvpn/crypto_log.cpp
     src/openvpn/push_exchange_helpers.cpp
-    src/openvpn/data_channel.cpp
+    src/openvpn/crypto_context.cpp
     src/openvpn/key_derivation.cpp
     src/openvpn/ovpn_config_parser.cpp
     src/openvpn/packet.cpp
@@ -58,8 +58,11 @@ add_library(clv_vpncore STATIC
     src/vpn_server.cpp
     src/log_subsystems.cpp
     src/ip_pool_manager.cpp
+    src/platform/linux/nftables/nftables_client.cpp
+    src/platform/linux/tun/tun_device.cpp
     src/routing_table.cpp
-    src/scoped_masquerade.cpp
+    src/nft_subnet_target.cpp
+    src/tunnel_zone.cpp
 )
 
 target_include_directories(clv_vpncore
@@ -76,7 +79,6 @@ target_link_libraries(clv_vpncore
         clv::sslhelp
         clv::nettransport
         clv::netlinux
-        clv::netvpn
 )
 
 if(KERNEL_HEADERS_HAVE_OVPN_IFLA)

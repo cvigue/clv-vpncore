@@ -4,7 +4,7 @@
 
 #include "openvpn/crypto_log.h"
 #include "openvpn/crypto_algorithms.h"
-#include "openvpn/data_channel.h"
+#include "openvpn/crypto_context.h"
 #include "openvpn/packet.h"
 #include "openvpn/protocol_constants.h"
 
@@ -281,7 +281,7 @@ EncryptionKey KeyDerivation::ExtractDirectionalKey(std::span<const std::uint8_t>
     return key;
 }
 
-bool KeyDerivation::InstallKeys(DataChannel &data_channel,
+bool KeyDerivation::InstallKeys(CryptoContext &crypto_context,
                                 std::span<const std::uint8_t> key_material,
                                 CipherAlgorithm cipher_algorithm,
                                 HmacAlgorithm hmac_algorithm,
@@ -313,13 +313,13 @@ bool KeyDerivation::InstallKeys(DataChannel &data_channel,
         //   Client: decrypt = server→client, encrypt = client→server
         if (role == PeerRole::Server)
         {
-            data_channel.InstallNewKeys(client_to_server, // decrypt
+            crypto_context.InstallNewKeys(client_to_server, // decrypt
                                         server_to_client, // encrypt
                                         key_id);
         }
         else
         {
-            data_channel.InstallNewKeys(server_to_client, // decrypt
+            crypto_context.InstallNewKeys(server_to_client, // decrypt
                                         client_to_server, // encrypt
                                         key_id);
         }

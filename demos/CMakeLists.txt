@@ -7,7 +7,6 @@ target_link_libraries(simple_vpn
         clv::vpncore
         clv::nettransport
         clv::netlinux
-        clv::netvpn
         clv::sslhelp
         clv::core
 )
@@ -20,7 +19,6 @@ target_link_libraries(generate_client_config
         clv::vpncore
         clv::nettransport
         clv::netlinux
-        clv::netvpn
         clv::sslhelp
         clv::core
 )
@@ -33,7 +31,6 @@ target_link_libraries(ovpn_parser_demo
         clv::vpncore
         clv::nettransport
         clv::netlinux
-        clv::netvpn
         clv::sslhelp
         clv::core
 )

@@ -238,8 +238,8 @@ class DcoServerDataMixin : public DcoCore<Derived>
             }
         }
 
-        session->GetDataChannel().SetCurrentKeyId(key_id);
-        session->GetDataChannel().SetDcoKeysInstalled(true);
+        session->GetCryptoContext().SetCurrentKeyId(key_id);
+        session->GetCryptoContext().SetDcoKeysInstalled(true);
 
         this->logger_->info("DCO: Keys installed successfully in kernel (key_id={})", key_id);
         return true;

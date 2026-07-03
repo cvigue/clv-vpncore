@@ -26,7 +26,7 @@
  * Channel hooks (called on derived().channel(), implemented by each channel
  * type — ClientUdpChannel, ClientTcpChannel, ClientDcoChannel):
  *   - AttachTransport(handle, peer, peer_id)
- *   - InstallDataPathKeys(material, cipher, hmac, key_id, data_channel)
+ *   - InstallDataPathKeys(material, cipher, hmac, key_id, crypto_context)
  *   - ConfigureNetworkInterface(negotiated, config, io_ctx)
  *   - InstallNegotiatedRoutes(negotiated)
  *   - OnTeardown()
@@ -42,7 +42,7 @@
 #include "openvpn/control_channel.h"
 #include "openvpn/control_plane_helpers.h"
 #include "openvpn/crypto_algorithms.h"
-#include "openvpn/data_channel.h"
+#include "openvpn/crypto_context.h"
 #include "openvpn/key_derivation.h"
 #include "openvpn/packet.h"
 #include "openvpn/protocol_constants.h"
@@ -61,7 +61,6 @@
 
 #include <log_utils.h>
 #include <tuple>
-#include <net/ipv4_utils.h>
 
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
@@ -239,7 +238,7 @@ class ClientControlAdapter
     std::uint8_t key_id_ = 0;             ///< Current OpenVPN key ID (cycles on rekey)
 
     std::optional<openvpn::ControlChannel> control_channel_; ///< TLS + reliability layer for control messages
-    std::optional<openvpn::DataChannel> data_channel_;       ///< Symmetric-key encrypt/decrypt for data packets
+    std::optional<openvpn::CryptoContext> crypto_context_;       ///< Symmetric-key encrypt/decrypt for data packets
     std::optional<openvpn::TlsCrypt> tls_crypt_;             ///< TLS-Crypt HMAC wrapper (V1 or V2 client key)
     std::vector<std::uint8_t> tls_crypt_v2_wkc_;             ///< TLS-Crypt-V2 wrapped-client-key blob appended to HARD_RESET
     openvpn::ConfigExchange config_exchange_;                ///< PUSH_REQUEST / PUSH_REPLY negotiated-config state
@@ -389,7 +388,7 @@ ClientControlAdapter<Derived>::ClientControlAdapter(ClientControlConfig cfg)
     handshake_timer_.emplace(*io_context_);
 
     control_channel_.emplace(*logger_);
-    data_channel_.emplace(*logger_);
+    crypto_context_.emplace(*logger_);
 }
 
 template <typename Derived>
@@ -740,7 +739,7 @@ asio::awaitable<void> ClientControlAdapter<Derived>::ClientRekeyLoop(std::uint32
             if (!*running_ || state_ != VpnClientState::Connected || rekey_generation_ != generation)
                 break;
 
-            if (derived().channel().GetLimitsDataChannel().TakeRekeyRequest())
+            if (derived().channel().GetLimitsCryptoContext().TakeRekeyRequest())
                 break;
 
             auto remaining = deadline - std::chrono::steady_clock::now();
@@ -823,7 +822,7 @@ asio::awaitable<void> ClientControlAdapter<Derived>::ClientRekeyLoop(std::uint32
 template <typename Derived>
 asio::awaitable<void> ClientControlAdapter<Derived>::HandleDataPacket(const openvpn::OpenVpnPacket &packet)
 {
-    auto plaintext = data_channel_->DecryptPacket(packet);
+    auto plaintext = crypto_context_->DecryptPacket(packet);
     if (plaintext.empty())
     {
         logger_->warn("Failed to decrypt data packet");
@@ -995,7 +994,7 @@ void ClientControlAdapter<Derived>::DeriveAndInstallKeys()
                                             result->cipher_algo,
                                             result->hmac_algo,
                                             current_key_id,
-                                            *data_channel_);
+                                            *crypto_context_);
 }
 
 template <typename Derived>

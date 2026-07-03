@@ -33,7 +33,7 @@
 #include "openvpn/connection.h"
 #include "openvpn/control_channel.h"
 #include "openvpn/control_plane_helpers.h"
-#include "openvpn/data_channel.h"
+#include "openvpn/crypto_context.h"
 #include "openvpn/key_derivation.h"
 #include "openvpn/packet.h"
 #include "openvpn/protocol_constants.h"
@@ -44,6 +44,8 @@
 #include "openvpn/tls_crypt_v2.h"
 #include "openvpn/vpn_config.h"
 #include "routing_table.h"
+#include "traffic_policy.h"
+#include "tunnel_zone.h"
 #include "udp_engine_types.h"
 #include "transport/transport.h"
 
@@ -130,6 +132,7 @@ struct ServerControlConfig
     logging::SubsystemLoggerManager &logger_manager;
     std::shared_ptr<spdlog::logger> logger;
     std::atomic<bool> &running;
+    TunnelZone *zone = nullptr;
 };
 
 // ---- Shared CRTP base ------------------------------------------------------
@@ -222,6 +225,7 @@ class ServerControlBase
         logger_manager_ = &cfg.logger_manager;
         logger_ = std::move(cfg.logger);
         running_ = &cfg.running;
+        zone_ = cfg.zone;
 
         const auto &server_cfg = *config_->server;
 
@@ -265,6 +269,12 @@ class ServerControlBase
         std::optional<WorkGuard> work_guard;
         if (split_ctx_)
             work_guard.emplace(io_context_->get_executor());
+
+        if (zone_ && registered_hub_ifname_)
+        {
+            zone_->UnregisterHubAttachment(*registered_hub_ifname_);
+            registered_hub_ifname_.reset();
+        }
 
         // Cancel rekey timers FIRST so their operation_aborted completions are
         // queued before the supervisory-loop cancellations.  The io_context
@@ -319,8 +329,15 @@ class ServerControlBase
     void ConfigureDataPlane()
     {
         std::string dev = derived().channel().ConfigureDataPlane(*config_->server, *io_context_);
-        if (!dev.empty())
-            logger_->info("Data plane ready: {}", dev);
+        if (dev.empty())
+            return;
+
+        logger_->info("Data plane ready: {}", dev);
+        if (!zone_)
+            return;
+
+        zone_->RegisterHubAttachment(BuildHubAttachmentSpec(*config_->server, dev));
+        registered_hub_ifname_ = dev;
     }
 
     // -- Supervisory coroutines ----------------------------------------------
@@ -357,7 +374,7 @@ class ServerControlBase
                 auto *session = session_manager_.FindSession(sid);
                 if (!session)
                     continue;
-                if (session->GetDataChannel().HasValidKeys())
+                if (session->GetCryptoContext().HasValidKeys())
                     continue;
                 if ((now - session->GetLastActivity()) > session_timeout)
                 {
@@ -849,7 +866,7 @@ class ServerControlBase
                     DisarmRekeyTimer(sid);
                     co_return;
                 }
-                if (session->GetDataChannel().TakeRekeyRequest())
+                if (session->GetCryptoContext().TakeRekeyRequest())
                     break;
 
                 auto remaining = deadline - std::chrono::steady_clock::now();
@@ -886,7 +903,7 @@ class ServerControlBase
             co_return;
         }
 
-        if (!session->GetDataChannel().HasValidKeys())
+        if (!session->GetCryptoContext().HasValidKeys())
         {
             logger_->debug("Rekey {:016x}: skipped (data keys not ready)", sid.value);
             RearmRekeyTimer(sid, reneg_seconds);
@@ -1097,6 +1114,9 @@ class ServerControlBase
     std::future<void> cleanup_future_;
     std::future<void> keepalive_future_;
     std::future<void> stats_future_;
+
+    TunnelZone *zone_ = nullptr;
+    std::optional<std::string> registered_hub_ifname_;
 
   private:
     void LoadTlsCryptKeys()

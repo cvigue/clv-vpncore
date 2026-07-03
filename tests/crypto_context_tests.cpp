@@ -1,8 +1,8 @@
 // Copyright (c) 2025- Charlie Vigue. All rights reserved.
 
 #include "openvpn/crypto_algorithms.h"
-#include "openvpn/data_channel.h"
-#include "openvpn/data_channel_hmac.h"
+#include "openvpn/crypto_context.h"
+#include "openvpn/crypto_context_hmac.h"
 #include "openvpn/data_v2_wire.h"
 #include "openvpn/packet.h"
 
@@ -22,13 +22,13 @@
 
 namespace clv::vpn::openvpn::test {
 
-class DataChannelTest : public ::testing::Test
+class CryptoContextTest : public ::testing::Test
 {
   protected:
     void SetUp() override
     {
         auto null_sink = std::make_shared<spdlog::sinks::null_sink_mt>();
-        logger_ = std::make_unique<spdlog::logger>("test_data_channel", null_sink);
+        logger_ = std::make_unique<spdlog::logger>("test_crypto_context", null_sink);
     }
 
     // Helper to create a properly configured AES-128-GCM key
@@ -45,7 +45,7 @@ class DataChannelTest : public ::testing::Test
 
     // Helper to encrypt plaintext and return parsed packet for decryption testing
     std::optional<OpenVpnPacket> EncryptAndParse(
-        DataChannel &channel,
+        CryptoContext &channel,
         const std::vector<std::uint8_t> &plaintext,
         SessionId session = SessionId::Generate())
     {
@@ -56,7 +56,7 @@ class DataChannelTest : public ::testing::Test
     }
 
     // Lazy accessor for channel_ - creates on first use
-    DataChannel &channel()
+    CryptoContext &channel()
     {
         if (!channel_)
         {
@@ -65,7 +65,7 @@ class DataChannelTest : public ::testing::Test
         return *channel_;
     }
 
-    std::optional<DataChannel> channel_;
+    std::optional<CryptoContext> channel_;
     std::unique_ptr<spdlog::logger> logger_;
 };
 // ============================================================================
@@ -74,12 +74,12 @@ class DataChannelTest : public ::testing::Test
 // Anti-Replay Tests (via DecryptPacket)
 // ============================================================================
 
-TEST_F(DataChannelTest, GetOutboundPacketIdStartsAtOne)
+TEST_F(CryptoContextTest, GetOutboundPacketIdStartsAtOne)
 {
     EXPECT_EQ(1, channel().GetOutboundPacketId());
 }
 
-TEST_F(DataChannelTest, DecryptPacketRejectsOldPackets)
+TEST_F(CryptoContextTest, DecryptPacketRejectsOldPackets)
 {
     auto key = MakeAes128GcmKey();
     channel().InstallNewKeys(key, key, 0);
@@ -101,7 +101,7 @@ TEST_F(DataChannelTest, DecryptPacketRejectsOldPackets)
     EXPECT_FALSE(decrypted.empty());
 
     // Create a new channel with same keys to generate packet_id=1
-    DataChannel channel2(*logger_);
+    CryptoContext channel2(*logger_);
     channel2.InstallNewKeys(key, key, 0);
 
     auto packet1 = EncryptAndParse(channel2, plaintext, session);
@@ -114,7 +114,7 @@ TEST_F(DataChannelTest, DecryptPacketRejectsOldPackets)
     EXPECT_GT(channel().GetReplayedPacketCount(), 0u);
 }
 
-TEST_F(DataChannelTest, DecryptPacketAcceptsNewerPackets)
+TEST_F(CryptoContextTest, DecryptPacketAcceptsNewerPackets)
 {
     auto key = MakeAes128GcmKey();
     channel().InstallNewKeys(key, key, 0);
@@ -141,7 +141,7 @@ TEST_F(DataChannelTest, DecryptPacketAcceptsNewerPackets)
     EXPECT_FALSE(decrypted.empty());
 }
 
-TEST_F(DataChannelTest, AntiReplayDetectsDuplicates)
+TEST_F(CryptoContextTest, AntiReplayDetectsDuplicates)
 {
     auto key = MakeAes128GcmKey();
     channel().InstallNewKeys(key, key, 0);
@@ -164,7 +164,7 @@ TEST_F(DataChannelTest, AntiReplayDetectsDuplicates)
     EXPECT_GT(channel().GetReplayedPacketCount(), initial_replays);
 }
 
-TEST_F(DataChannelTest, GetReplayedPacketCount)
+TEST_F(CryptoContextTest, GetReplayedPacketCount)
 {
     auto key = MakeAes128GcmKey();
     channel().InstallNewKeys(key, key, 0);
@@ -189,7 +189,7 @@ TEST_F(DataChannelTest, GetReplayedPacketCount)
     EXPECT_EQ(1u, channel().GetReplayedPacketCount());
 }
 
-TEST_F(DataChannelTest, ResetAntiReplayWindow)
+TEST_F(CryptoContextTest, ResetAntiReplayWindow)
 {
     auto key = MakeAes128GcmKey();
     channel().InstallNewKeys(key, key, 0);
@@ -219,7 +219,7 @@ TEST_F(DataChannelTest, ResetAntiReplayWindow)
 // Encryption/Decryption Tests
 // ============================================================================
 
-TEST_F(DataChannelTest, EncryptPacketRequiresValidKey)
+TEST_F(CryptoContextTest, EncryptPacketRequiresValidKey)
 {
     std::vector<std::uint8_t> plaintext = {0x45, 0x00};
 
@@ -228,7 +228,7 @@ TEST_F(DataChannelTest, EncryptPacketRequiresValidKey)
     EXPECT_TRUE(encrypted.empty());
 }
 
-TEST_F(DataChannelTest, EncryptPacketWithValidKey)
+TEST_F(CryptoContextTest, EncryptPacketWithValidKey)
 {
     auto key = MakeAes128GcmKey();
     channel().InstallNewKeys(key, key, 0);
@@ -240,7 +240,7 @@ TEST_F(DataChannelTest, EncryptPacketWithValidKey)
     EXPECT_FALSE(encrypted.empty());
 }
 
-TEST_F(DataChannelTest, EncryptPacketIncrementPacketId)
+TEST_F(CryptoContextTest, EncryptPacketIncrementPacketId)
 {
     auto key = MakeAes128GcmKey();
     channel().InstallNewKeys(key, key, 0);
@@ -262,7 +262,7 @@ TEST_F(DataChannelTest, EncryptPacketIncrementPacketId)
     EXPECT_NE(encrypted1, encrypted2);
 }
 
-TEST_F(DataChannelTest, DecryptPacketRequiresValidKey)
+TEST_F(CryptoContextTest, DecryptPacketRequiresValidKey)
 {
     OpenVpnPacket packet;
     packet.opcode_ = Opcode::P_DATA_V1;
@@ -275,7 +275,7 @@ TEST_F(DataChannelTest, DecryptPacketRequiresValidKey)
     EXPECT_TRUE(decrypted.empty());
 }
 
-TEST_F(DataChannelTest, DecryptPacketWithValidKey)
+TEST_F(CryptoContextTest, DecryptPacketWithValidKey)
 {
     auto key = MakeAes128GcmKey();
     channel().InstallNewKeys(key, key, 0);
@@ -292,7 +292,7 @@ TEST_F(DataChannelTest, DecryptPacketWithValidKey)
     EXPECT_EQ(plaintext, decrypted);
 }
 
-TEST_F(DataChannelTest, DecryptPacketRejectsReplay)
+TEST_F(CryptoContextTest, DecryptPacketRejectsReplay)
 {
     auto key = MakeAes128GcmKey();
     channel().InstallNewKeys(key, key, 0);
@@ -312,7 +312,7 @@ TEST_F(DataChannelTest, DecryptPacketRejectsReplay)
     EXPECT_TRUE(decrypted.empty());
 }
 
-TEST_F(DataChannelTest, DecryptPacketRequiresPacketId)
+TEST_F(CryptoContextTest, DecryptPacketRequiresPacketId)
 {
     auto key = MakeAes128GcmKey();
     channel().InstallNewKeys(key, key, 0);
@@ -332,7 +332,7 @@ TEST_F(DataChannelTest, DecryptPacketRequiresPacketId)
 // Integration Tests
 // ============================================================================
 
-TEST_F(DataChannelTest, SequentialEncryptionDecryption)
+TEST_F(CryptoContextTest, SequentialEncryptionDecryption)
 {
     auto key = MakeAes128GcmKey();
     channel().InstallNewKeys(key, key, 0);
@@ -365,7 +365,7 @@ TEST_F(DataChannelTest, SequentialEncryptionDecryption)
     }
 }
 
-TEST_F(DataChannelTest, MultipleKeySlotIndependentEncryption)
+TEST_F(CryptoContextTest, MultipleKeySlotIndependentEncryption)
 {
     auto key0 = MakeAes128GcmKey();
     key0.cipher_key[0] = 0xAA;
@@ -391,7 +391,7 @@ TEST_F(DataChannelTest, MultipleKeySlotIndependentEncryption)
     EXPECT_NE(encrypted0, encrypted1);
 }
 
-TEST_F(DataChannelTest, DecryptPacketDifferentKeySlots)
+TEST_F(CryptoContextTest, DecryptPacketDifferentKeySlots)
 {
     // Create two different keys - both AES-128-GCM but different key material
     auto key0 = MakeAes128GcmKey();
@@ -431,7 +431,7 @@ TEST_F(DataChannelTest, DecryptPacketDifferentKeySlots)
 // Cipher Algorithm Tests
 // ================================================================================================
 
-TEST_F(DataChannelTest, EncryptDecryptWithAes128Gcm)
+TEST_F(CryptoContextTest, EncryptDecryptWithAes128Gcm)
 {
     auto key = MakeAes128GcmKey();
     channel().InstallNewKeys(key, key, 0);
@@ -451,7 +451,7 @@ TEST_F(DataChannelTest, EncryptDecryptWithAes128Gcm)
     EXPECT_EQ(plaintext, decrypted);
 }
 
-TEST_F(DataChannelTest, EncryptDecryptWithAes256Gcm)
+TEST_F(CryptoContextTest, EncryptDecryptWithAes256Gcm)
 {
     EncryptionKey key;
     key.cipher_algorithm = CipherAlgorithm::AES_256_GCM;
@@ -481,7 +481,7 @@ TEST_F(DataChannelTest, EncryptDecryptWithAes256Gcm)
     EXPECT_EQ(plaintext, decrypted);
 }
 
-TEST_F(DataChannelTest, EncryptDecryptWithChaCha20Poly1305)
+TEST_F(CryptoContextTest, EncryptDecryptWithChaCha20Poly1305)
 {
     EncryptionKey key;
     key.cipher_algorithm = CipherAlgorithm::CHACHA20_POLY1305;
@@ -511,7 +511,7 @@ TEST_F(DataChannelTest, EncryptDecryptWithChaCha20Poly1305)
     EXPECT_EQ(plaintext, decrypted);
 }
 
-TEST_F(DataChannelTest, AllCiphersProduceDifferentCiphertext)
+TEST_F(CryptoContextTest, AllCiphersProduceDifferentCiphertext)
 {
     auto session = SessionId::Generate();
     std::vector<std::uint8_t> plaintext(100, 0x42); // 100 bytes of data
@@ -526,7 +526,7 @@ TEST_F(DataChannelTest, AllCiphersProduceDifferentCiphertext)
     std::fill(key128.cipher_key.begin(), key128.cipher_key.end(), 0x11);
     std::fill(key128.cipher_iv.begin(), key128.cipher_iv.end(), 0x22);
 
-    DataChannel chan128(*logger_);
+    CryptoContext chan128(*logger_);
     chan128.InstallNewKeys(key128, key128, 0);
     auto encrypted128 = chan128.EncryptPacket(plaintext, session);
 
@@ -540,7 +540,7 @@ TEST_F(DataChannelTest, AllCiphersProduceDifferentCiphertext)
     std::fill(key256.cipher_key.begin(), key256.cipher_key.end(), 0x11);
     std::fill(key256.cipher_iv.begin(), key256.cipher_iv.end(), 0x22);
 
-    DataChannel chan256(*logger_);
+    CryptoContext chan256(*logger_);
     chan256.InstallNewKeys(key256, key256, 0);
     auto encrypted256 = chan256.EncryptPacket(plaintext, session);
 
@@ -554,7 +554,7 @@ TEST_F(DataChannelTest, AllCiphersProduceDifferentCiphertext)
     std::fill(keyChacha.cipher_key.begin(), keyChacha.cipher_key.end(), 0x11);
     std::fill(keyChacha.cipher_iv.begin(), keyChacha.cipher_iv.end(), 0x22);
 
-    DataChannel chanChacha(*logger_);
+    CryptoContext chanChacha(*logger_);
     chanChacha.InstallNewKeys(keyChacha, keyChacha, 0);
     auto encryptedChacha = chanChacha.EncryptPacket(plaintext, session);
 
@@ -569,7 +569,7 @@ TEST_F(DataChannelTest, AllCiphersProduceDifferentCiphertext)
     EXPECT_NE(encrypted256, encryptedChacha);
 }
 
-TEST_F(DataChannelTest, CiphertextCannotBeDecryptedWithWrongAlgorithm)
+TEST_F(CryptoContextTest, CiphertextCannotBeDecryptedWithWrongAlgorithm)
 {
     auto session = SessionId::Generate();
     std::vector<std::uint8_t> plaintext = {0x45, 0x00, 0x00, 0x54};
@@ -582,7 +582,7 @@ TEST_F(DataChannelTest, CiphertextCannotBeDecryptedWithWrongAlgorithm)
     key256.hmac_algorithm = HmacAlgorithm::NONE;
     key256.is_valid = true;
 
-    DataChannel encryptChan(*logger_);
+    CryptoContext encryptChan(*logger_);
     encryptChan.InstallNewKeys(key256, key256, 0);
     auto encrypted = encryptChan.EncryptPacket(plaintext, session);
     ASSERT_FALSE(encrypted.empty());
@@ -595,7 +595,7 @@ TEST_F(DataChannelTest, CiphertextCannotBeDecryptedWithWrongAlgorithm)
     keyChacha.hmac_algorithm = HmacAlgorithm::NONE;
     keyChacha.is_valid = true;
 
-    DataChannel decryptChan(*logger_);
+    CryptoContext decryptChan(*logger_);
     decryptChan.InstallNewKeys(keyChacha, keyChacha, 0);
 
     auto packet = OpenVpnPacket::Parse(encrypted);
@@ -610,7 +610,7 @@ TEST_F(DataChannelTest, CiphertextCannotBeDecryptedWithWrongAlgorithm)
 // In-Place Encrypt/Decrypt Tests (zero-copy arena path)
 // ============================================================================
 
-TEST_F(DataChannelTest, EncryptDecryptInPlace_Aes128Gcm)
+TEST_F(CryptoContextTest, EncryptDecryptInPlace_Aes128Gcm)
 {
     auto key = MakeAes128GcmKey();
     channel().InstallNewKeys(key, key, 0);
@@ -627,7 +627,7 @@ TEST_F(DataChannelTest, EncryptDecryptInPlace_Aes128Gcm)
     EXPECT_EQ(kDataV2Overhead + plaintext.size(), wire_len);
 
     // Decrypt with a separate channel using same keys
-    DataChannel decrypt_chan(*logger_);
+    CryptoContext decrypt_chan(*logger_);
     decrypt_chan.InstallNewKeys(key, key, 0);
 
     auto decrypted = decrypt_chan.DecryptPacketInPlace(std::span<std::uint8_t>(buf.data(), wire_len));
@@ -636,7 +636,7 @@ TEST_F(DataChannelTest, EncryptDecryptInPlace_Aes128Gcm)
     EXPECT_TRUE(std::equal(decrypted.begin(), decrypted.end(), plaintext.begin()));
 }
 
-TEST_F(DataChannelTest, EncryptDecryptInPlace_Aes256Gcm)
+TEST_F(CryptoContextTest, EncryptDecryptInPlace_Aes256Gcm)
 {
     EncryptionKey key;
     key.cipher_algorithm = CipherAlgorithm::AES_256_GCM;
@@ -657,7 +657,7 @@ TEST_F(DataChannelTest, EncryptDecryptInPlace_Aes256Gcm)
     auto wire_len = channel().EncryptPacketInPlace(buf, plaintext.size(), session);
     ASSERT_GT(wire_len, 0u);
 
-    DataChannel decrypt_chan(*logger_);
+    CryptoContext decrypt_chan(*logger_);
     decrypt_chan.InstallNewKeys(key, key, 0);
 
     auto decrypted = decrypt_chan.DecryptPacketInPlace(std::span<std::uint8_t>(buf.data(), wire_len));
@@ -665,7 +665,7 @@ TEST_F(DataChannelTest, EncryptDecryptInPlace_Aes256Gcm)
     EXPECT_TRUE(std::equal(decrypted.begin(), decrypted.end(), plaintext.begin()));
 }
 
-TEST_F(DataChannelTest, EncryptDecryptInPlace_ChaCha20Poly1305)
+TEST_F(CryptoContextTest, EncryptDecryptInPlace_ChaCha20Poly1305)
 {
     EncryptionKey key;
     key.cipher_algorithm = CipherAlgorithm::CHACHA20_POLY1305;
@@ -686,7 +686,7 @@ TEST_F(DataChannelTest, EncryptDecryptInPlace_ChaCha20Poly1305)
     auto wire_len = channel().EncryptPacketInPlace(buf, plaintext.size(), session);
     ASSERT_GT(wire_len, 0u);
 
-    DataChannel decrypt_chan(*logger_);
+    CryptoContext decrypt_chan(*logger_);
     decrypt_chan.InstallNewKeys(key, key, 0);
 
     auto decrypted = decrypt_chan.DecryptPacketInPlace(std::span<std::uint8_t>(buf.data(), wire_len));
@@ -694,7 +694,7 @@ TEST_F(DataChannelTest, EncryptDecryptInPlace_ChaCha20Poly1305)
     EXPECT_TRUE(std::equal(decrypted.begin(), decrypted.end(), plaintext.begin()));
 }
 
-TEST_F(DataChannelTest, CrossCompat_OldEncrypt_NewDecryptInPlace)
+TEST_F(CryptoContextTest, CrossCompat_OldEncrypt_NewDecryptInPlace)
 {
     // Old EncryptPacket → new DecryptPacketInPlace
     auto key = MakeAes128GcmKey();
@@ -706,14 +706,14 @@ TEST_F(DataChannelTest, CrossCompat_OldEncrypt_NewDecryptInPlace)
     ASSERT_FALSE(encrypted.empty());
 
     // Decrypt with in-place method
-    DataChannel decrypt_chan(*logger_);
+    CryptoContext decrypt_chan(*logger_);
     decrypt_chan.InstallNewKeys(key, key, 0);
     auto decrypted = decrypt_chan.DecryptPacketInPlace(encrypted);
     ASSERT_EQ(plaintext.size(), decrypted.size());
     EXPECT_TRUE(std::equal(decrypted.begin(), decrypted.end(), plaintext.begin()));
 }
 
-TEST_F(DataChannelTest, CrossCompat_NewEncryptInPlace_OldDecrypt)
+TEST_F(CryptoContextTest, CrossCompat_NewEncryptInPlace_OldDecrypt)
 {
     // New EncryptPacketInPlace → old DecryptPacket
     auto key = MakeAes128GcmKey();
@@ -728,7 +728,7 @@ TEST_F(DataChannelTest, CrossCompat_NewEncryptInPlace_OldDecrypt)
     ASSERT_GT(wire_len, 0u);
 
     // Parse and decrypt with old method
-    DataChannel decrypt_chan(*logger_);
+    CryptoContext decrypt_chan(*logger_);
     decrypt_chan.InstallNewKeys(key, key, 0);
     auto wire_data = std::vector<std::uint8_t>(buf.begin(), buf.begin() + wire_len);
     auto packet = OpenVpnPacket::Parse(wire_data);
@@ -738,7 +738,7 @@ TEST_F(DataChannelTest, CrossCompat_NewEncryptInPlace_OldDecrypt)
     EXPECT_TRUE(std::equal(decrypted.begin(), decrypted.end(), plaintext.begin()));
 }
 
-TEST_F(DataChannelTest, DecryptPacketInPlace_RejectsReplay)
+TEST_F(CryptoContextTest, DecryptPacketInPlace_RejectsReplay)
 {
     auto key = MakeAes128GcmKey();
     channel().InstallNewKeys(key, key, 0);
@@ -761,7 +761,7 @@ TEST_F(DataChannelTest, DecryptPacketInPlace_RejectsReplay)
     EXPECT_GT(channel().GetReplayedPacketCount(), 0u);
 }
 
-TEST_F(DataChannelTest, EncryptPacketInPlace_FailsWithoutKeys)
+TEST_F(CryptoContextTest, EncryptPacketInPlace_FailsWithoutKeys)
 {
     auto session = SessionId::Generate();
     std::vector<std::uint8_t> buf(kDataV2Overhead + 10);
@@ -769,7 +769,7 @@ TEST_F(DataChannelTest, EncryptPacketInPlace_FailsWithoutKeys)
     EXPECT_EQ(0u, wire_len);
 }
 
-TEST_F(DataChannelTest, DecryptPacketInPlace_TooSmallPacket)
+TEST_F(CryptoContextTest, DecryptPacketInPlace_TooSmallPacket)
 {
     auto key = MakeAes128GcmKey();
     channel().InstallNewKeys(key, key, 0);
@@ -778,13 +778,13 @@ TEST_F(DataChannelTest, DecryptPacketInPlace_TooSmallPacket)
     EXPECT_TRUE(decrypted.empty());
 }
 
-TEST_F(DataChannelTest, EncryptDecryptInPlace_MultipleSequentialPackets)
+TEST_F(CryptoContextTest, EncryptDecryptInPlace_MultipleSequentialPackets)
 {
     auto key = MakeAes128GcmKey();
     channel().InstallNewKeys(key, key, 0);
     auto session = SessionId::Generate();
 
-    DataChannel decrypt_chan(*logger_);
+    CryptoContext decrypt_chan(*logger_);
     decrypt_chan.InstallNewKeys(key, key, 0);
 
     for (int i = 0; i < 100; ++i)
@@ -808,7 +808,7 @@ TEST_F(DataChannelTest, EncryptDecryptInPlace_MultipleSequentialPackets)
 //   recvmmsg → arena slot → DecryptPacketInPlace
 // ---------------------------------------------------------------------------
 
-TEST_F(DataChannelTest, InboundArena_DirectIpNoCompress)
+TEST_F(CryptoContextTest, InboundArena_DirectIpNoCompress)
 {
     // Plaintext IS the raw IP data — no compression framing
     auto key = MakeAes128GcmKey();
@@ -824,7 +824,7 @@ TEST_F(DataChannelTest, InboundArena_DirectIpNoCompress)
     auto wire_len = channel().EncryptPacketInPlace(buf, ip_data.size(), session);
     ASSERT_GT(wire_len, 0u);
 
-    DataChannel inbound_chan(*logger_);
+    CryptoContext inbound_chan(*logger_);
     inbound_chan.InstallNewKeys(key, key, 0);
 
     auto plaintext = inbound_chan.DecryptPacketInPlace(
@@ -838,7 +838,7 @@ TEST_F(DataChannelTest, InboundArena_DirectIpNoCompress)
     EXPECT_TRUE(std::equal(plaintext.begin(), plaintext.end(), ip_data.begin()));
 }
 
-TEST_F(DataChannelTest, InboundArena_KeepaliveDetected)
+TEST_F(CryptoContextTest, InboundArena_KeepaliveDetected)
 {
     // Keepalive magic (16 bytes) should be recognized (not forwarded to TUN)
     auto key = MakeAes128GcmKey();
@@ -855,7 +855,7 @@ TEST_F(DataChannelTest, InboundArena_KeepaliveDetected)
     auto wire_len = channel().EncryptPacketInPlace(buf, payload.size(), session);
     ASSERT_GT(wire_len, 0u);
 
-    DataChannel inbound_chan(*logger_);
+    CryptoContext inbound_chan(*logger_);
     inbound_chan.InstallNewKeys(key, key, 0);
 
     auto plaintext = inbound_chan.DecryptPacketInPlace(
@@ -881,7 +881,7 @@ static EncryptionKey MakeHmacKey(HmacAlgorithm algo, std::size_t key_len)
     return k;
 }
 
-TEST(DataChannelHmac, ComputeHmac_NoneReturnsEmpty)
+TEST(CryptoContextHmac, ComputeHmac_NoneReturnsEmpty)
 {
     EncryptionKey key;
     key.hmac_algorithm = HmacAlgorithm::NONE;
@@ -890,7 +890,7 @@ TEST(DataChannelHmac, ComputeHmac_NoneReturnsEmpty)
     EXPECT_TRUE(tag.empty());
 }
 
-TEST(DataChannelHmac, ComputeHmac_Sha256ProducesCorrectLength)
+TEST(CryptoContextHmac, ComputeHmac_Sha256ProducesCorrectLength)
 {
     auto key = MakeHmacKey(HmacAlgorithm::SHA256, 32);
     const std::vector<std::uint8_t> data = {0x01, 0x02, 0x03, 0x04};
@@ -898,7 +898,7 @@ TEST(DataChannelHmac, ComputeHmac_Sha256ProducesCorrectLength)
     EXPECT_EQ(tag.size(), 32u); // SHA-256 → 32 bytes
 }
 
-TEST(DataChannelHmac, ComputeHmac_Sha512ProducesCorrectLength)
+TEST(CryptoContextHmac, ComputeHmac_Sha512ProducesCorrectLength)
 {
     auto key = MakeHmacKey(HmacAlgorithm::SHA512, 64);
     const std::vector<std::uint8_t> data = {0xDE, 0xAD, 0xBE, 0xEF};
@@ -906,7 +906,7 @@ TEST(DataChannelHmac, ComputeHmac_Sha512ProducesCorrectLength)
     EXPECT_EQ(tag.size(), 64u); // SHA-512 → 64 bytes
 }
 
-TEST(DataChannelHmac, ComputeHmac_Sha256IsDeterministic)
+TEST(CryptoContextHmac, ComputeHmac_Sha256IsDeterministic)
 {
     auto key = MakeHmacKey(HmacAlgorithm::SHA256, 32);
     const std::vector<std::uint8_t> data = {0xCA, 0xFE, 0xBA, 0xBE};
@@ -915,7 +915,7 @@ TEST(DataChannelHmac, ComputeHmac_Sha256IsDeterministic)
     EXPECT_EQ(tag1, tag2);
 }
 
-TEST(DataChannelHmac, ComputeHmac_DifferentDataProducesDifferentTag)
+TEST(CryptoContextHmac, ComputeHmac_DifferentDataProducesDifferentTag)
 {
     auto key = MakeHmacKey(HmacAlgorithm::SHA256, 32);
     const std::vector<std::uint8_t> data1 = {0x01};
@@ -923,7 +923,7 @@ TEST(DataChannelHmac, ComputeHmac_DifferentDataProducesDifferentTag)
     EXPECT_NE(detail::ComputeHmac(key, data1), detail::ComputeHmac(key, data2));
 }
 
-TEST(DataChannelHmac, VerifyHmac_NoneAlwaysTrue)
+TEST(CryptoContextHmac, VerifyHmac_NoneAlwaysTrue)
 {
     EncryptionKey key;
     key.hmac_algorithm = HmacAlgorithm::NONE;
@@ -933,7 +933,7 @@ TEST(DataChannelHmac, VerifyHmac_NoneAlwaysTrue)
     EXPECT_TRUE(detail::VerifyHmac(key, data, any_tag));
 }
 
-TEST(DataChannelHmac, VerifyHmac_Sha256CorrectTagAccepted)
+TEST(CryptoContextHmac, VerifyHmac_Sha256CorrectTagAccepted)
 {
     auto key = MakeHmacKey(HmacAlgorithm::SHA256, 32);
     const std::vector<std::uint8_t> data = {0xAA, 0xBB, 0xCC};
@@ -941,7 +941,7 @@ TEST(DataChannelHmac, VerifyHmac_Sha256CorrectTagAccepted)
     EXPECT_TRUE(detail::VerifyHmac(key, data, tag));
 }
 
-TEST(DataChannelHmac, VerifyHmac_Sha512CorrectTagAccepted)
+TEST(CryptoContextHmac, VerifyHmac_Sha512CorrectTagAccepted)
 {
     auto key = MakeHmacKey(HmacAlgorithm::SHA512, 64);
     const std::vector<std::uint8_t> data = {0x11, 0x22, 0x33, 0x44};
@@ -949,7 +949,7 @@ TEST(DataChannelHmac, VerifyHmac_Sha512CorrectTagAccepted)
     EXPECT_TRUE(detail::VerifyHmac(key, data, tag));
 }
 
-TEST(DataChannelHmac, VerifyHmac_CorruptedTagRejected)
+TEST(CryptoContextHmac, VerifyHmac_CorruptedTagRejected)
 {
     auto key = MakeHmacKey(HmacAlgorithm::SHA256, 32);
     const std::vector<std::uint8_t> data = {0xDE, 0xAD};
@@ -959,7 +959,7 @@ TEST(DataChannelHmac, VerifyHmac_CorruptedTagRejected)
     EXPECT_FALSE(detail::VerifyHmac(key, data, tag));
 }
 
-TEST(DataChannelHmac, VerifyHmac_WrongLengthTagRejected)
+TEST(CryptoContextHmac, VerifyHmac_WrongLengthTagRejected)
 {
     auto key = MakeHmacKey(HmacAlgorithm::SHA256, 32);
     const std::vector<std::uint8_t> data = {0x01, 0x02};
@@ -967,7 +967,7 @@ TEST(DataChannelHmac, VerifyHmac_WrongLengthTagRejected)
     EXPECT_FALSE(detail::VerifyHmac(key, data, short_tag));
 }
 
-TEST(DataChannelHmac, VerifyHmac_EmptyExpectedTagRejected)
+TEST(CryptoContextHmac, VerifyHmac_EmptyExpectedTagRejected)
 {
     auto key = MakeHmacKey(HmacAlgorithm::SHA256, 32);
     const std::vector<std::uint8_t> data = {0x01};
@@ -991,7 +991,7 @@ static EncryptionKey MakeNoneCipherKey()
     return key;
 }
 
-TEST_F(DataChannelTest, EncryptPacket_UnsupportedCipherReturnsEmpty)
+TEST_F(CryptoContextTest, EncryptPacket_UnsupportedCipherReturnsEmpty)
 {
     // Install a key whose cipher algorithm is not a supported AEAD.
     // EncryptPacket must detect this and return early with an empty vector.
@@ -1002,7 +1002,7 @@ TEST_F(DataChannelTest, EncryptPacket_UnsupportedCipherReturnsEmpty)
     EXPECT_TRUE(encrypted.empty());
 }
 
-TEST_F(DataChannelTest, EncryptPacketInPlace_BufferTooSmall)
+TEST_F(CryptoContextTest, EncryptPacketInPlace_BufferTooSmall)
 {
     // Valid key installed; buffer is one byte too small.
     channel().InstallNewKeys(MakeAes128GcmKey(), MakeAes128GcmKey(), 0);
@@ -1014,7 +1014,7 @@ TEST_F(DataChannelTest, EncryptPacketInPlace_BufferTooSmall)
     EXPECT_EQ(0u, wire_len);
 }
 
-TEST_F(DataChannelTest, EncryptPacketInPlace_UnsupportedCipherReturnsZero)
+TEST_F(CryptoContextTest, EncryptPacketInPlace_UnsupportedCipherReturnsZero)
 {
     // With a NONE-cipher key, encrypt_ctx_ is null and IsSupportedAead returns false.
     // EncryptPacketInPlace must return 0 without crashing.
@@ -1026,7 +1026,7 @@ TEST_F(DataChannelTest, EncryptPacketInPlace_UnsupportedCipherReturnsZero)
     EXPECT_EQ(0u, wire_len);
 }
 
-TEST_F(DataChannelTest, DecryptPacketInPlace_NonDataOpcodeReturnsEmpty)
+TEST_F(CryptoContextTest, DecryptPacketInPlace_NonDataOpcodeReturnsEmpty)
 {
     channel().InstallNewKeys(MakeAes128GcmKey(), MakeAes128GcmKey(), 0);
 
@@ -1038,7 +1038,7 @@ TEST_F(DataChannelTest, DecryptPacketInPlace_NonDataOpcodeReturnsEmpty)
     EXPECT_TRUE(decrypted.empty());
 }
 
-TEST_F(DataChannelTest, DecryptPacketInPlace_NoKeyForKeyIdReturnsEmpty)
+TEST_F(CryptoContextTest, DecryptPacketInPlace_NoKeyForKeyIdReturnsEmpty)
 {
     // Install key at key_id=0; present a packet claiming key_id=1 which has no slot.
     channel().InstallNewKeys(MakeAes128GcmKey(), MakeAes128GcmKey(), 0);
@@ -1050,7 +1050,7 @@ TEST_F(DataChannelTest, DecryptPacketInPlace_NoKeyForKeyIdReturnsEmpty)
     EXPECT_TRUE(decrypted.empty());
 }
 
-TEST_F(DataChannelTest, DecryptPacketInPlace_UnsupportedCipherReturnsEmpty)
+TEST_F(CryptoContextTest, DecryptPacketInPlace_UnsupportedCipherReturnsEmpty)
 {
     // Install NONE-cipher key (decrypt_ctx_ will be null, IsSupportedAead false).
     channel().InstallNewKeys(MakeNoneCipherKey(), MakeNoneCipherKey(), 0);
@@ -1062,7 +1062,7 @@ TEST_F(DataChannelTest, DecryptPacketInPlace_UnsupportedCipherReturnsEmpty)
     EXPECT_TRUE(decrypted.empty());
 }
 
-TEST_F(DataChannelTest, DecryptPacketInPlace_AuthenticationFailureReturnsEmpty)
+TEST_F(CryptoContextTest, DecryptPacketInPlace_AuthenticationFailureReturnsEmpty)
 {
     // Encrypt a packet normally, then corrupt the AEAD tag and attempt decryption.
     // The tag occupies bytes [kDataV2HeaderLen+kDataV2PacketIdLen .. kDataV2Overhead).
@@ -1081,13 +1081,13 @@ TEST_F(DataChannelTest, DecryptPacketInPlace_AuthenticationFailureReturnsEmpty)
     constexpr std::size_t kTagOffset = kDataV2HeaderLen + kDataV2PacketIdLen;
     buf[kTagOffset] ^= 0xFF;
 
-    DataChannel decrypt_chan(*logger_);
+    CryptoContext decrypt_chan(*logger_);
     decrypt_chan.InstallNewKeys(key, key, 0);
     auto decrypted = decrypt_chan.DecryptPacketInPlace(std::span<std::uint8_t>(buf.data(), wire_len));
     EXPECT_TRUE(decrypted.empty());
 }
 
-TEST_F(DataChannelTest, DecryptPacket_UnsupportedCipherReturnsEmpty)
+TEST_F(CryptoContextTest, DecryptPacket_UnsupportedCipherReturnsEmpty)
 {
     // Install NONE-cipher key. DecryptPacket must detect !IsSupportedAead and return early.
     channel().InstallNewKeys(MakeNoneCipherKey(), MakeNoneCipherKey(), 0);
@@ -1102,7 +1102,7 @@ TEST_F(DataChannelTest, DecryptPacket_UnsupportedCipherReturnsEmpty)
     EXPECT_TRUE(decrypted.empty());
 }
 
-TEST_F(DataChannelTest, DecryptPacket_PayloadTooSmallReturnsEmpty)
+TEST_F(CryptoContextTest, DecryptPacket_PayloadTooSmallReturnsEmpty)
 {
     // Valid key, but payload smaller than AEAD_TAG_SIZE (16 bytes).
     channel().InstallNewKeys(MakeAes128GcmKey(), MakeAes128GcmKey(), 0);
@@ -1208,14 +1208,14 @@ TEST_F(ReplayWindowTest, Reset_ClearsState)
 }
 
 // ============================================================================
-// DataChannel accessor tests (previously dead)
+// CryptoContext accessor tests (previously dead)
 // ============================================================================
 
-class DataChannelAccessorTest : public DataChannelTest
+class CryptoContextAccessorTest : public CryptoContextTest
 {
 };
 
-TEST_F(DataChannelAccessorTest, SetCurrentKeyId_GetCurrentKeyId)
+TEST_F(CryptoContextAccessorTest, SetCurrentKeyId_GetCurrentKeyId)
 {
     // Default key_id is 0 (set by InstallNewKeys with key_id=0)
     channel().InstallNewKeys(MakeAes128GcmKey(), MakeAes128GcmKey(), 0);
@@ -1229,7 +1229,7 @@ TEST_F(DataChannelAccessorTest, SetCurrentKeyId_GetCurrentKeyId)
     EXPECT_EQ(channel().GetCurrentKeyId(), 1u);
 }
 
-TEST_F(DataChannelAccessorTest, SetDcoKeysInstalled_AffectsHasValidKeys)
+TEST_F(CryptoContextAccessorTest, SetDcoKeysInstalled_AffectsHasValidKeys)
 {
     // No keys installed yet → HasValidKeys is false
     EXPECT_FALSE(channel().HasValidKeys());
@@ -1242,7 +1242,7 @@ TEST_F(DataChannelAccessorTest, SetDcoKeysInstalled_AffectsHasValidKeys)
     EXPECT_FALSE(channel().HasValidKeys());
 }
 
-TEST_F(DataChannelAccessorTest, GetPrimaryEncryptKey_ReflectsInstalledKey)
+TEST_F(CryptoContextAccessorTest, GetPrimaryEncryptKey_ReflectsInstalledKey)
 {
     auto key = MakeAes128GcmKey();
     key.cipher_key = std::vector<std::uint8_t>(16, 0xAB);
@@ -1256,7 +1256,7 @@ TEST_F(DataChannelAccessorTest, GetPrimaryEncryptKey_ReflectsInstalledKey)
     EXPECT_EQ(enc.key_id, 2u);
 }
 
-TEST_F(DataChannelAccessorTest, GetPrimaryDecryptKey_ReflectsInstalledKey)
+TEST_F(CryptoContextAccessorTest, GetPrimaryDecryptKey_ReflectsInstalledKey)
 {
     auto dec_key = MakeAes128GcmKey();
     dec_key.cipher_key = std::vector<std::uint8_t>(16, 0xCD);
@@ -1270,7 +1270,7 @@ TEST_F(DataChannelAccessorTest, GetPrimaryDecryptKey_ReflectsInstalledKey)
     EXPECT_EQ(dec.key_id, 5u);
 }
 
-TEST_F(DataChannelAccessorTest, GetPrimaryEncryptKey_BeforeInstall_IsInvalid)
+TEST_F(CryptoContextAccessorTest, GetPrimaryEncryptKey_BeforeInstall_IsInvalid)
 {
     const auto &enc = channel().GetPrimaryEncryptKey();
     EXPECT_FALSE(enc.is_valid);

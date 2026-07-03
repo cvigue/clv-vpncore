@@ -41,7 +41,7 @@ All parties are `simple_vpn` instances.
 | IT7  | 1 server + 1 client | Client reconnect after abrupt disconnect. Server tears down the stale session and recycles the IP. |
 | IT8  | 1 server + 1 client (TCP) | TCP transport handshake and data path. |
 | IT19 | 1 server + 1 client (IPv6 underlay) | Underlay IPv6 external connectivity. Client connects with `proto=udp` to an IPv6 server address (`fd99::1`), verifying that the resolver picks an IPv6 endpoint and the tunnel data-path ping succeeds. |
-| IT9  | 1 server + 2 clients | `client_to_client=false` — route-withholding isolation. Clients have no route to peer IPs and cannot reach them. |
+| IT9  | 1 server + 2 clients | `client_to_client=false` — peer isolation. Server withholds the tunnel subnet route and enforces intra-pool drop on the data path; clients cannot reach each other. |
 | IT10 | 1 server + 2 clients | `client_to_client=false` — one-sided route injection. Confirms a single return-path absence blocks the ping. |
 | IT11 | 1 server + 2 clients | `client_to_client=false` — full symmetric route injection (expected failure). Both clients self-add the tunnel subnet; tests whether server-side enforcement stops traffic. |
 | IT12 | 1 server + 1 client (V2) | TLS-Crypt-V2 single-client handshake. Validates `P_CONTROL_WKC_V1` packet flow, WKc unwrapping, and per-session key derivation. |
@@ -82,7 +82,8 @@ For mesh tests, `setup_mesh.sh` / `teardown_mesh.sh` create four namespaces
 
 | File | Used by |
 |------|---------|
-| `it_server.json` | IT1, IT2, IT6, IT7, IT8, IT9, IT10, IT11, IT17 (simple_vpn server) |
+| `it_server.json` | IT1, IT2, IT6, IT7, IT8, IT17 (simple_vpn server) |
+| `it_server_no_c2c.json` | IT9, IT10, IT11 (simple_vpn server, `client_to_client=false`) |
 | `it_client.json` | IT1, IT7, IT8, IT16 (simple_vpn client) |
 | `it_server_v2.json` | IT12, IT13 (tls-crypt-v2 server) |
 | `it_client_v2.json` | IT12, IT18 (tls-crypt-v2 client) |

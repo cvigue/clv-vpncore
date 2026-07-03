@@ -39,9 +39,9 @@
 | `openvpn/control_channel_fragment.h` | 28 | 0 | **100%** | 100% |
 | `openvpn/control_plane_helpers.cpp` | 188 | 188 | 0% | 0% |
 | `openvpn/crypto_algorithms.h` | 63 | 4 | 93.65% | 100% |
-| `openvpn/data_channel.cpp` | 434 | 77 | 82.26% | 70.59% |
-| `openvpn/data_channel.h` | 111 | 3 | **97.30%** | 100% |
-| `openvpn/data_channel_hmac.h` | 35 | 7 | 80% | 100% |
+| `openvpn/crypto_context.cpp` | 434 | 77 | 82.26% | 70.59% |
+| `openvpn/crypto_context.h` | 111 | 3 | **97.30%** | 100% |
+| `openvpn/crypto_context_hmac.h` | 35 | 7 | 80% | 100% |
 | `openvpn/dco_data_channel.h` | 13 | 13 | 0% | 0% |
 | `openvpn/key_derivation.cpp` | 214 | 18 | 91.59% | 100% |
 | `openvpn/ovpn_config_parser.cpp` | 423 | 99 | 76.60% | 100% |
@@ -151,7 +151,7 @@ Entire constructor body is dead. All paths require `nft_` (nftables) and root to
 
 ### Currently not achievable
 
-**`openvpn/data_channel.cpp` (77 missed, 82.26%)**
+**`openvpn/crypto_context.cpp` (77 missed, 82.26%)**
 
 - `EncryptAeadDispatch` (file-static): `IsSupportedAead` guard in `EncryptPacket` returns early for all non-AEAD ciphers before reaching the `else` branch; AEAD ciphers always have `encrypt_ctx_` set, taking the `if` branch. Effectively unreachable.
 - `EncryptAeadInPlaceDispatch`, `DecryptAeadInPlaceDispatch` (file-static): never called from any code path.

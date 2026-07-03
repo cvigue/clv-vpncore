@@ -4,8 +4,8 @@ add_executable(test_vpncore
     client_config_generator_tests.cpp
     config_exchange_tests.cpp
     control_channel_tests.cpp
-    data_channel_limits_tests.cpp
-    data_channel_tests.cpp
+    crypto_context_limits_tests.cpp
+    crypto_context_tests.cpp
     ip_pool_manager_tests.cpp
     ipv4_utils_tests.cpp
     key_derivation_tests.cpp
@@ -15,6 +15,8 @@ add_executable(test_vpncore
     ovpn_config_parser_tests.cpp
     routing_table_tests.cpp
     scoped_masquerade_tests.cpp
+    scoped_c2c_isolation_tests.cpp
+    tunnel_zone_tests.cpp
     session_manager_tests.cpp
     tls_context_tests.cpp
     tls_crypt_tests.cpp
@@ -45,7 +47,6 @@ target_link_libraries(test_vpncore
         clv::sslhelp
         clv::nettransport
         clv::netlinux
-        clv::netvpn
         gtest_main
 )
 apply_asan_flags(test_vpncore)

@@ -194,10 +194,12 @@ for i in $(seq 0 $(( NUM_CLIENTS - 1 ))); do
     echo "      Client-${i}: ${TUN_IP}"
 done
 
-# Confirm no c2c subnet route was pushed
+# Confirm no c2c subnet route was pushed (same check as IT10)
+# Only check for explicitly pushed (proto boot) routes; exclude proto kernel
+# connected routes auto-created by the kernel with topology subnet.
 for i in $(seq 0 $(( NUM_CLIENTS - 1 ))); do
-    if ns_exec "ns-vpn-client-${i}" ip route show 2>/dev/null | grep -q "${TUNNEL_SUBNET}"; then
-        fail "Client-${i} already has ${TUNNEL_SUBNET} route — server pushed c2c route unexpectedly"
+    if ns_exec "ns-vpn-client-${i}" ip route show proto boot 2>/dev/null | grep -q "${TUNNEL_SUBNET}"; then
+        fail "Client-${i} already has ${TUNNEL_SUBNET} pushed route — server pushed c2c route unexpectedly"
     fi
 done
 echo "      Confirmed: no ${TUNNEL_SUBNET} route on any client (server withheld correctly)"
@@ -219,7 +221,7 @@ echo "[6/7] Injecting ${TUNNEL_SUBNET} route into both client namespaces..."
 echo "      (simulating a full symmetric self-configuration matching client_to_client=true)"
 
 for i in $(seq 0 $(( NUM_CLIENTS - 1 ))); do
-    ns_exec "ns-vpn-client-${i}" ip route add "${TUNNEL_SUBNET}" dev tun0
+    ns_exec "ns-vpn-client-${i}" ip route replace "${TUNNEL_SUBNET}" dev tun0
     if ! ns_exec "ns-vpn-client-${i}" ip route show | grep -q "${TUNNEL_SUBNET}"; then
         fail "Route injection failed on client-${i} — check permissions"
     fi

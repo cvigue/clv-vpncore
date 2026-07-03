@@ -9,8 +9,8 @@
 #include "openvpn/tcp_data_channel.h"
 #include "openvpn/udp_data_channel.h"
 #include "openvpn/vpn_config.h"
-#include "scoped_masquerade.h"
 #include "server_tcp_control_adapter.h"
+#include "tunnel_zone.h"
 #include "server_udp_control_adapter.h"
 #include "server_dco_control_adapter.h"
 #include "server_data_adapter.h"
@@ -31,14 +31,15 @@ namespace clv::vpn {
 /**
  * @brief Thin factory shell around a fully composed DataTransport.
  *
- * Owns configuration, loggers, masquerade guards, and the running flag.
+ * Owns configuration, loggers, the running flag, and a reference to the process
+ * TunnelZone (kernel policy is installed on hub attachment registration).
  * All control-plane intelligence lives in DataTransport ControlAdapterT template
  * argument.
  */
 class VpnServer
 {
   public:
-    VpnServer(asio::io_context &io_context, const VpnConfig &config);
+    VpnServer(asio::io_context &io_context, const VpnConfig &config, TunnelZone &zone);
     ~VpnServer();
 
     VpnServer(const VpnServer &) = delete;
@@ -70,26 +71,27 @@ class VpnServer
                                              ServerTcpControlAdapter>;
     using DataTransportVariant = std::variant<std::monostate, ServerUdpTransport, ServerDcoTransport, ServerTcpTransport>;
 
-    template <typename F>
-    void WithDataTransport(F &&f)
+    template <typename Self, typename F>
+    static void VisitDataTransport(Self &self, F &&f)
     {
         std::visit([&](auto &dp)
         {
             if constexpr (!std::is_same_v<std::decay_t<decltype(dp)>, std::monostate>)
                 f(dp);
         },
-                   data_transport_);
+                   self.data_transport_);
+    }
+
+    template <typename F>
+    void WithDataTransport(F &&f)
+    {
+        VisitDataTransport(*this, std::forward<F>(f));
     }
 
     template <typename F>
     void WithDataTransport(F &&f) const
     {
-        std::visit([&](auto &dp)
-        {
-            if constexpr (!std::is_same_v<std::decay_t<decltype(dp)>, std::monostate>)
-                f(dp);
-        },
-                   data_transport_);
+        VisitDataTransport(*this, std::forward<F>(f));
     }
 
     asio::io_context &io_context_;
@@ -99,9 +101,6 @@ class VpnServer
     std::atomic<bool> running_ = false;
 
     DataTransportVariant data_transport_;
-
-    std::optional<ScopedMasquerade> masquerade_guard_;
-    std::optional<ScopedMasquerade> masquerade6_guard_;
 };
 
 } // namespace clv::vpn

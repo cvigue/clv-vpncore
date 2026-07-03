@@ -1,7 +1,7 @@
 // Copyright (c) 2025- Charlie Vigue. All rights reserved.
 
-#ifndef CLV_VPN_OPENVPN_DATA_CHANNEL_H
-#define CLV_VPN_OPENVPN_DATA_CHANNEL_H
+#ifndef CLV_VPN_OPENVPN_CRYPTO_CONTEXT_H
+#define CLV_VPN_OPENVPN_CRYPTO_CONTEXT_H
 
 #include "openvpn/crypto_algorithms.h"
 #include "openvpn/data_v2_wire.h"
@@ -198,7 +198,7 @@ struct DecryptKeySlot
 };
 
 /**
- * @brief Data channel packet encryption/decryption
+ * @brief Crypto context packet encryption/decryption
  *
  * Implements OpenVPN data channel protocol:
  * - Packet ID sequencing for anti-replay protection
@@ -206,24 +206,24 @@ struct DecryptKeySlot
  * - Optional HMAC-based authentication (tls-auth)
  * - Sliding window anti-replay validation
  */
-class DataChannel
+class CryptoContext
 {
   public:
     /**
-     * @brief Construct DataChannel with required logger
-     * @param logger Logger instance (must remain valid for lifetime of DataChannel)
+     * @brief Construct CryptoContext with required logger
+     * @param logger Logger instance (must remain valid for lifetime of CryptoContext)
      */
-    explicit DataChannel(spdlog::logger &logger) : logger_(&logger)
+    explicit CryptoContext(spdlog::logger &logger) : logger_(&logger)
     {
     }
 
-    ~DataChannel() = default;
+    ~CryptoContext() = default;
 
     // Non-copyable, movable
-    DataChannel(const DataChannel &) = delete;
-    DataChannel &operator=(const DataChannel &) = delete;
-    DataChannel(DataChannel &&) = delete;
-    DataChannel &operator=(DataChannel &&) = delete;
+    CryptoContext(const CryptoContext &) = delete;
+    CryptoContext &operator=(const CryptoContext &) = delete;
+    CryptoContext(CryptoContext &&) = delete;
+    CryptoContext &operator=(CryptoContext &&) = delete;
 
     /**
      * @brief Encrypt plaintext IP packet for transmission
@@ -543,4 +543,4 @@ class DataChannel
 
 } // namespace clv::vpn::openvpn
 
-#endif // CLV_VPN_OPENVPN_DATA_CHANNEL_H
+#endif // CLV_VPN_OPENVPN_CRYPTO_CONTEXT_H

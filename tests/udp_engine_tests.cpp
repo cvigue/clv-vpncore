@@ -5,7 +5,7 @@
 #include "cpu_affinity.h"
 #include "data_path_stats.h"
 #include "openvpn/connection.h"
-#include "openvpn/data_channel.h"
+#include "openvpn/crypto_context.h"
 #include "openvpn/data_v2_wire.h"
 #include "openvpn/session_manager.h"
 #include "p2p_policy.h"
@@ -382,12 +382,12 @@ static EncryptionKey MakeTestKey()
 }
 
 static void WireOutboundLimits(P2PPolicy &policy,
-                               DataChannel &dc,
+                               CryptoContext &dc,
                                std::uint8_t key_id)
 {
     auto key = MakeTestKey();
     dc.InstallNewKeys(key, key, key_id);
-    policy.SetOutboundLimitsChannel(&dc);
+    policy.SetOutboundLimitsCryptoContext(&dc);
 }
 
 TEST(TxEncryptState, NeedsReinitWhenInvalid)
@@ -467,15 +467,15 @@ TEST(TxEncryptState, EncryptInPlaceReturnsZeroForSmallBuffer)
     EXPECT_EQ(tx.EncryptInPlace(buf, 64, SessionId{1}, 1u), 0u);
 }
 
-TEST(TxEncryptState, EncryptInPlaceDecryptibleByDataChannel)
+TEST(TxEncryptState, EncryptInPlaceDecryptibleByCryptoContext)
 {
-    // Verify wire compatibility: TxEncryptState encrypt → DataChannel decrypt
+    // Verify wire compatibility: TxEncryptState encrypt → CryptoContext decrypt
     auto key = MakeTestKey();
     auto null_sink = std::make_shared<spdlog::sinks::null_sink_mt>();
     spdlog::logger logger("compat_test", null_sink);
 
-    // Set up DataChannel with the same key
-    DataChannel dc(logger);
+    // Set up CryptoContext with the same key
+    CryptoContext dc(logger);
     dc.InstallNewKeys(key, key, 1);
 
     // Encrypt with TxEncryptState
@@ -492,7 +492,7 @@ TEST(TxEncryptState, EncryptInPlaceDecryptibleByDataChannel)
     auto wire_len = tx.EncryptInPlace(buf, pt_len, session, 1u);
     ASSERT_EQ(wire_len, kDataV2Overhead + pt_len);
 
-    // Decrypt with DataChannel
+    // Decrypt with CryptoContext
     auto plaintext = dc.DecryptPacketInPlace(std::span<uint8_t>(buf.data(), wire_len));
     ASSERT_FALSE(plaintext.empty());
     EXPECT_EQ(plaintext.size(), pt_len);
@@ -762,7 +762,7 @@ TEST(P2PPolicy, SetPeer_UpdatesDestAndSession)
 TEST(P2PPolicy, EncryptSlot_ReturnsWireLen)
 {
     P2PPolicy policy{TestLogger()};
-    DataChannel dc{TestLogger()};
+    CryptoContext dc{TestLogger()};
     auto ep = MakeEndpoint("10.0.0.1", 1194);
     SessionId sid{42};
     policy.SetPeer(ep, sid, 5);
@@ -782,7 +782,7 @@ TEST(P2PPolicy, EncryptSlot_ReturnsWireLen)
 TEST(P2PPolicy, EncryptSlot_IncrementsPacketIdEachCall)
 {
     P2PPolicy policy{TestLogger()};
-    DataChannel dc{TestLogger()};
+    CryptoContext dc{TestLogger()};
     policy.SetPeer(MakeEndpoint("10.0.0.1", 1194), SessionId{1}, 5);
     policy.ApplyEncryptKey(MakeTestKey(), 0);
     WireOutboundLimits(policy, dc, 0);
@@ -1434,7 +1434,7 @@ TEST(P2PPolicy, EncryptSlot_NoLimitsChannel_ReturnsZero)
 TEST(P2PPolicy, EncryptSlot_ProducesWirePacket)
 {
     P2PPolicy policy{TestLogger()};
-    DataChannel dc{TestLogger()};
+    CryptoContext dc{TestLogger()};
     auto ep = MakeEndpoint("10.0.0.1", 1194);
     SessionId sid{0xABCD};
     policy.SetPeer(ep, sid, 5);
@@ -1590,7 +1590,7 @@ TEST(SessionIndex, BuildFrom_SkipsSessionsWithoutKeys)
     SessionManager sm;
     // Session exists but has no keys installed → BuildFrom must skip it
     auto &conn = sm.GetOrCreateSession(session_id, ep, true, std::nullopt, *log);
-    ASSERT_FALSE(conn.GetDataChannel().HasValidKeys());
+    ASSERT_FALSE(conn.GetCryptoContext().HasValidKeys());
 
     auto idx = SessionIndex::BuildFrom(sm);
     EXPECT_EQ(idx.size(), 0u); // skipped because no valid keys

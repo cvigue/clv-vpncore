@@ -3,11 +3,13 @@
 #
 # Validates that when client_to_client is disabled on the server:
 #   - All clients can still reach the server tunnel IP (positive)
-#   - No client can reach any peer's tunnel IP (negative — no pushed route)
+#   - No client can reach any peer's tunnel IP (negative)
 #
-# The enforcement mechanism under test: with client_to_client=false the server
-# does not push the tunnel subnet (10.8.0.0/24) in PUSH_REPLY, so clients have
-# no kernel route for peer tunnel IPs and cannot send traffic there.
+# Enforcement under test:
+#   - Route withholding: server does not push 10.8.0.0/24 in PUSH_REPLY
+#   - Server-side data path: TunnelZone installs nftables intra-pool drop rules
+#     on the TUN device, blocking client-to-client forwarding even though subnet
+#     topology gives each client a kernel-connected 10.8.0.0/24 route.
 #
 # Prerequisites:
 #   - Root / CAP_NET_ADMIN
@@ -210,13 +212,8 @@ for i in $(seq 0 $(( NUM_CLIENTS - 1 ))); do
 done
 
 # ── Negative: client → client ─────────────────────────────────────────
-# XFAIL: with topology subnet the kernel auto-creates a connected 10.8.0.0/24
-# route on every client, so ping succeeds regardless of server config.
-# True server-side data-plane enforcement is §29 (not yet implemented).
 
-echo "[6/6] Negative check (XFAIL): c2c isolation via route-withholding only..."
-echo "      NOTE: With topology subnet, kernel auto-route means pings may succeed."
-echo "      Server-side enforcement (§29) is not yet implemented — marking as XFAIL."
+echo "[6/6] Negative check: no client may reach any peer tunnel IP..."
 
 neg_reachable=0
 neg_total=0
@@ -227,17 +224,16 @@ for i in $(seq 0 $(( NUM_CLIENTS - 1 ))); do
         DST_IP="${TUNNEL_IPS[$j]}"
         if ns_exec "ns-vpn-client-${i}" ping -c 1 -W 2 \
                 "${DST_IP}" > "${LOG_DIR}/ping-c${i}-c${j}.log" 2>&1; then
-            echo "      Client-${i} → Client-${j} (${DST_IP}): reachable (expected — §29 not implemented)"
+            echo "      Client-${i} → Client-${j} (${DST_IP}): reachable (FAIL)"
             (( neg_reachable++ )) || true
         else
-            echo "      Client-${i} → Client-${j} (${DST_IP}): unreachable"
+            echo "      Client-${i} → Client-${j} (${DST_IP}): unreachable (OK)"
         fi
     done
 done
 
 if (( neg_reachable > 0 )); then
-    echo "      XFAIL: ${neg_reachable}/${neg_total} c2c pairs reachable (expected until §29 implemented)"
-    exit 77
+    fail "${neg_reachable}/${neg_total} client-to-client pairs reachable — isolation broken"
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────
@@ -247,5 +243,5 @@ echo "=== IT9 PASSED ==="
 echo "    ${NUM_CLIENTS} clients connected"
 echo "    All clients reached server tunnel IP"
 echo "    Route-withholding verified (no pushed 10.8.0.0/24)"
-echo "    c2c negative ping: XFAIL (§29 server-side enforcement pending)"
+echo "    Client-to-client isolation verified (${neg_total}/${neg_total} pairs unreachable)"
 echo "    Logs: ${LOG_DIR}/"

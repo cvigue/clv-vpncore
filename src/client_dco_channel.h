@@ -26,7 +26,7 @@
 #include "dco_core.h"
 #include "openvpn/config_exchange.h"
 #include "openvpn/crypto_algorithms.h"
-#include "openvpn/data_channel.h"
+#include "openvpn/crypto_context.h"
 #include "openvpn/packet.h"
 #include "openvpn/vpn_config.h"
 #include "transport/transport.h"
@@ -134,9 +134,9 @@ class ClientDcoChannel : public DcoClientDataMixin<ClientDcoChannel<Adapter>>
                              openvpn::CipherAlgorithm cipher_algo,
                              openvpn::HmacAlgorithm /*hmac_algo*/,
                              std::uint8_t key_id,
-                             openvpn::DataChannel &data_channel)
+                             openvpn::CryptoContext &crypto_context)
     {
-        limits_dc_ = &data_channel;
+        limits_crypto_ = &crypto_context;
         pending_key_material_ = key_material;
         pending_cipher_algo_ = cipher_algo;
         pending_key_id_ = key_id;
@@ -236,11 +236,11 @@ class ClientDcoChannel : public DcoClientDataMixin<ClientDcoChannel<Adapter>>
         co_return; // DCO kernel handles keepalives autonomously
     }
 
-    openvpn::DataChannel &GetLimitsDataChannel()
+    openvpn::CryptoContext &GetLimitsCryptoContext()
     {
-        if (!limits_dc_)
-            throw std::runtime_error("DCO: outbound limits DataChannel not configured");
-        return *limits_dc_;
+        if (!limits_crypto_)
+            throw std::runtime_error("DCO: outbound limits CryptoContext not configured");
+        return *limits_crypto_;
     }
 
   private:
@@ -258,7 +258,7 @@ class ClientDcoChannel : public DcoClientDataMixin<ClientDcoChannel<Adapter>>
     }
 
     Adapter *adapter_ = nullptr;
-    openvpn::DataChannel *limits_dc_ = nullptr;
+    openvpn::CryptoContext *limits_crypto_ = nullptr;
 
     // -- Pending key state (held until AttachTransport establishes peer) -----
     std::vector<std::uint8_t> pending_key_material_;
