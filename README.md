@@ -121,7 +121,11 @@ clv-vpncore/
 │   ├── ip_pool_manager         Dual-stack IPv4/IPv6 address allocation
 │   ├── routing_table           Longest-prefix-match routing (IPv4 + IPv6)
 │   ├── log_subsystems          Per-subsystem structured logging
+│   ├── crypto_context          Per-session symmetric crypto (AEAD encrypt/decrypt, rekey)
+│   ├── tunnel_zone             Server traffic-policy hub (masquerade + kernel c2c isolation)
+│   ├── platform/linux/nftables nftables client (masquerade + intra-pool drop rules)
 │   ├── scoped_masquerade       RAII nftables masquerade (IPv4 + IPv6)
+│   ├── scoped_nft_rule         RAII nftables intra-pool drop for client isolation
 │   ├── scoped_proc_toggle      RAII sysctl toggle (ip_forward, etc.)
 │   ├── cpu_affinity            Core pinning helpers
 │   ├── data_path_stats         Throughput/batch/buffer statistics
@@ -136,8 +140,8 @@ clv-vpncore/
 │   ├── route_utils             ip-route / ip-rule helpers
 │   ├── socket_utils            Socket option helpers
 │   └── udp_core / dco_core     Shared RX loop core and DCO device management mixins
-├── tests/              2022 unit tests (GoogleTest)
-├── integration/        Network-namespace integration tests (IT1–IT18)
+├── tests/              2242 unit tests (GoogleTest)
+├── integration/        Network-namespace integration tests (IT1–IT19, rekey ITR1–ITR5)
 │   ├── configs/        Per-test server/client JSON configs
 │   └── netns/          Namespace setup/teardown scripts
 ├── demos/              simple_vpn, config generator, .ovpn parser
@@ -277,7 +281,7 @@ sections are present to determine what to start.
 | `routes` | `[]` | IPv4 subnets routed through the tunnel |
 | `routes_v6` | `[]` | IPv6 subnets routed through the tunnel |
 | `push_routes` | `true` | Push routes to clients on connect |
-| `client_to_client` | `false` | Push tunnel subnet route so clients can reach each other through the server |
+| `client_to_client` | `false` | Allow clients to reach each other through the server. `true` pushes the tunnel subnet route and permits inter-client forwarding; `false` enforces isolation with an nftables intra-pool drop rule (not just route withholding) |
 | `client_dns_search_domains` | `[]` | DNS search domains pushed to clients |
 | `tun_mtu` | `1500` | TUN device MTU (pushed to clients in PUSH_REPLY) |
 | `tun_txqueuelen` | `0` | TUN TX queue length (0 = OS default) |

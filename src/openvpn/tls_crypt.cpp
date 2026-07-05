@@ -273,7 +273,9 @@ std::optional<std::vector<std::uint8_t>> TlsCrypt::Unwrap(std::span<const std::u
 
     auto computed_hmac = ComputeHmac(verify_key, hmac_data, *logger_);
 
-    // Constant-time comparison to prevent timing side-channels
+    // Constant-time comparison to prevent timing side-channels.
+    // The length pre-check does not leak: both sides are fixed-size SHA-256
+    // tags (32 bytes) — computed locally and framed by the wire parser (H6).
     bool hmac_ok = (computed_hmac.size() == hmac_tag.size())
                    && (CRYPTO_memcmp(computed_hmac.data(), hmac_tag.data(), hmac_tag.size()) == 0);
 

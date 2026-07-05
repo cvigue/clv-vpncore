@@ -491,6 +491,120 @@ TEST_F(VpnConfigTest, NegativeBatchSizeClampedToZero)
 }
 
 // ============================================================================
+// H3: JSON numeric fields — type checks + bounds before assignment
+// ============================================================================
+
+TEST_F(VpnConfigTest, RejectNonIntegerServerPort)
+{
+    std::string json_str = R"(
+    {
+        "server": { "port": "1194" }
+    })";
+
+    EXPECT_THROW(OpenVpnConfigParser::ParseString(json_str), std::runtime_error);
+}
+
+TEST_F(VpnConfigTest, RejectServerPortOutOfRange)
+{
+    std::string json_str = R"(
+    {
+        "server": { "port": 65536 }
+    })";
+
+    EXPECT_THROW(OpenVpnConfigParser::ParseString(json_str), std::runtime_error);
+}
+
+TEST_F(VpnConfigTest, RejectZeroMaxClients)
+{
+    std::string json_str = R"(
+    {
+        "server": { "max_clients": 0 }
+    })";
+
+    EXPECT_THROW(OpenVpnConfigParser::ParseString(json_str), std::runtime_error);
+}
+
+TEST_F(VpnConfigTest, RejectHugeMaxClients)
+{
+    std::string json_str = R"(
+    {
+        "server": { "max_clients": 10000000 }
+    })";
+
+    EXPECT_THROW(OpenVpnConfigParser::ParseString(json_str), std::runtime_error);
+}
+
+TEST_F(VpnConfigTest, RejectNonIntegerTunMtu)
+{
+    std::string json_str = R"(
+    {
+        "server": { "tun_mtu": 1400.5 }
+    })";
+
+    EXPECT_THROW(OpenVpnConfigParser::ParseString(json_str), std::runtime_error);
+}
+
+TEST_F(VpnConfigTest, RejectNonIntegerKeepaliveEntries)
+{
+    std::string json_str = R"(
+    {
+        "server": { "keepalive": ["10", 120] }
+    })";
+
+    EXPECT_THROW(OpenVpnConfigParser::ParseString(json_str), std::runtime_error);
+}
+
+TEST_F(VpnConfigTest, RejectClientServerPortZero)
+{
+    std::string json_str = R"(
+    {
+        "client": { "server_host": "vpn.example.com", "server_port": 0, "proto": "udp" }
+    })";
+
+    EXPECT_THROW(OpenVpnConfigParser::ParseString(json_str), std::runtime_error);
+}
+
+TEST_F(VpnConfigTest, RejectNegativeClientRenegotiateSeconds)
+{
+    std::string json_str = R"(
+    {
+        "client": { "server_host": "vpn.example.com", "proto": "udp", "renegotiate_seconds": -1 }
+    })";
+
+    EXPECT_THROW(OpenVpnConfigParser::ParseString(json_str), std::runtime_error);
+}
+
+TEST_F(VpnConfigTest, RejectNonIntegerPerformanceField)
+{
+    std::string json_str = R"(
+    {
+        "performance": { "tx_drain_depth": "many" }
+    })";
+
+    EXPECT_THROW(OpenVpnConfigParser::ParseString(json_str), std::runtime_error);
+}
+
+TEST_F(VpnConfigTest, AcceptsValidBoundedFields)
+{
+    std::string json_str = R"(
+    {
+        "server": {
+            "port": 443,
+            "max_clients": 500,
+            "keepalive": [5, 60],
+            "ping_timer_remote": 30
+        }
+    })";
+
+    OpenVpnConfig config = OpenVpnConfigParser::ParseString(json_str);
+    EXPECT_EQ(config.server->port, 443);
+    EXPECT_EQ(config.server->max_clients, 500u);
+    EXPECT_EQ(config.server->keepalive.first, 5);
+    EXPECT_EQ(config.server->keepalive.second, 60);
+    EXPECT_EQ(config.server->ping_timer_remote, 30);
+}
+
+// ============================================================================
 // client_to_client option
 // ============================================================================
 

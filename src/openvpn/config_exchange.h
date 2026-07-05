@@ -32,8 +32,8 @@ enum class ConfigOptionType
     FRAGMENT,         ///< fragment <size> - Fragment packets larger than size
     MSSFIX,           ///< mssfix <size> - Adjust TCP MSS
     PUSH_RESET,       ///< push-reset - Clear previous push options
-    ROUTE,            ///< route <net> <gw> <metric> - Add route to client routing table
-    ROUTE_IPV6,       ///< route-ipv6 <net/mask> <gw> <metric> - IPv6 route
+    ROUTE,            ///< route <net> [netmask] [gateway] [metric] - Add route to client routing table
+    ROUTE_IPV6,       ///< route-ipv6 <net/mask> [gateway] [metric] - IPv6 route
     DHCP_OPTION,      ///< dhcp-option <type> <value> - DHCP option to set
     DNS_OPTION,       ///< dns server/search-domains (OpenVPN 2.6+ structured DNS)
     REDIRECT_GATEWAY, ///< redirect-gateway <flags> - Redirect default gateway through VPN
@@ -116,7 +116,7 @@ struct NegotiatedConfig
     /** MSS fix size (0 = disabled) */
     std::uint16_t mssfix = 0;
 
-    /** Routes to add on client (network, gateway, metric) */
+    /** Routes to add on client (network, netmask, metric). Via uses route_gateway. */
     std::vector<std::tuple<std::string, std::string, int>> routes;
 
     /** IPv6 routes (network/mask, gateway, metric) */

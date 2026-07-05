@@ -517,7 +517,7 @@ ca /nonexistent/path/ca.crt
             }
             catch (const std::runtime_error &e)
             {
-                EXPECT_TRUE(std::string(e.what()).find("ca file not found") != std::string::npos);
+                EXPECT_TRUE(std::string(e.what()).find("file not found") != std::string::npos);
                 throw;
             }
         },
@@ -696,6 +696,112 @@ remote example.com 65536
 <ca>CA</ca>
 )";
 
+    EXPECT_THROW(OvpnConfigParser::ParseString(ovpn_content), std::runtime_error);
+}
+
+// H2: numeric directive parsing must throw the parser's own error type
+// (with line context) instead of leaking raw std::invalid_argument /
+// std::out_of_range from std::stoi.
+
+TEST_F(OvpnConfigParserTest, RejectNonNumericRemotePort)
+{
+    std::string ovpn_content = R"(
+remote example.com not-a-port
+<ca>CA</ca>
+)";
+
+    EXPECT_THROW(OvpnConfigParser::ParseString(ovpn_content), std::runtime_error);
+}
+
+TEST_F(OvpnConfigParserTest, RejectNonNumericKeepalive)
+{
+    std::string ovpn_content = R"(
+remote example.com 1194
+keepalive ten 120
+<ca>CA</ca>
+)";
+
+    EXPECT_THROW(OvpnConfigParser::ParseString(ovpn_content), std::runtime_error);
+}
+
+TEST_F(OvpnConfigParserTest, RejectNegativeKeepalive)
+{
+    std::string ovpn_content = R"(
+remote example.com 1194
+keepalive -10 120
+<ca>CA</ca>
+)";
+
+    EXPECT_THROW(OvpnConfigParser::ParseString(ovpn_content), std::runtime_error);
+}
+
+TEST_F(OvpnConfigParserTest, RejectOversizedRenegSec)
+{
+    std::string ovpn_content = R"(
+remote example.com 1194
+reneg-sec 99999999999999999999
+<ca>CA</ca>
+)";
+
+    EXPECT_THROW(OvpnConfigParser::ParseString(ovpn_content), std::runtime_error);
+}
+
+TEST_F(OvpnConfigParserTest, RejectVerbOutOfRange)
+{
+    std::string ovpn_content = R"(
+remote example.com 1194
+verb 12
+<ca>CA</ca>
+)";
+
+    EXPECT_THROW(OvpnConfigParser::ParseString(ovpn_content), std::runtime_error);
+}
+
+TEST_F(OvpnConfigParserTest, RejectNonNumericSndbuf)
+{
+    std::string ovpn_content = R"(
+remote example.com 1194
+sndbuf big
+<ca>CA</ca>
+)";
+
+    EXPECT_THROW(OvpnConfigParser::ParseString(ovpn_content), std::runtime_error);
+}
+
+TEST_F(OvpnConfigParserTest, NumericErrorIncludesLineNumber)
+{
+    std::string ovpn_content = R"(
+remote example.com 1194
+verb banana
+<ca>CA</ca>
+)";
+
+    try
+    {
+        OvpnConfigParser::ParseString(ovpn_content);
+        FAIL() << "expected std::runtime_error";
+    }
+    catch (const std::runtime_error &e)
+    {
+        EXPECT_TRUE(std::string(e.what()).find("line") != std::string::npos) << e.what();
+        EXPECT_TRUE(std::string(e.what()).find("verb") != std::string::npos) << e.what();
+    }
+}
+
+// M6: external cert/key file reads are size-capped
+
+TEST_F(OvpnConfigParserTest, RejectOversizedExternalCaFile)
+{
+    fs::path big_ca = test_dir / "big_ca.crt";
+    {
+        std::ofstream f(big_ca);
+        std::string chunk(4096, 'A');
+        // One chunk over kMaxInlineBlockBytes
+        for (std::size_t written = 0; written <= OvpnConfigParser::kMaxInlineBlockBytes; written += chunk.size())
+            f << chunk;
+    }
+
+    std::string ovpn_content = "remote example.com 1194\nca " + big_ca.string() + "\n";
     EXPECT_THROW(OvpnConfigParser::ParseString(ovpn_content), std::runtime_error);
 }
 

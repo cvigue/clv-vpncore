@@ -500,7 +500,7 @@ class DcoServerDataMixin : public DcoCore<Derived>
     {
         clv::UniqueFd sock(::socket(AF_INET, SOCK_DGRAM, 0));
         struct ifreq ifr{};
-        std::strncpy(ifr.ifr_name, this->dco_ifname_.c_str(), IFNAMSIZ - 1);
+        iface::CopyIfName(ifr, this->dco_ifname_.c_str());
 
         if (ioctl(sock.get(), SIOCGIFINDEX, &ifr) < 0)
         {

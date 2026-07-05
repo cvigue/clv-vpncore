@@ -4,6 +4,7 @@
 
 #include "data_path_stats.h"
 #include "dco_netlink_ops.h"
+#include "iface_utils.h"
 #include "openvpn/crypto_algorithms.h"
 #include "openvpn/key_derivation.h"
 #include "openvpn/ovpn_dco.h"
@@ -87,7 +88,7 @@ void DcoCoreBase::InitializeNetlink()
     // Get interface index
     clv::UniqueFd sock(::socket(AF_INET, SOCK_DGRAM, 0));
     struct ifreq ifr{};
-    std::strncpy(ifr.ifr_name, dco_ifname_.c_str(), IFNAMSIZ - 1);
+    iface::CopyIfName(ifr, dco_ifname_.c_str());
     if (ioctl(sock.get(), SIOCGIFINDEX, &ifr) < 0)
     {
         throw std::system_error(errno, std::system_category(), "DCO: Failed to get ifindex for " + dco_ifname_);
@@ -547,11 +548,22 @@ void DcoCoreBase::RemovePeerImpl(std::uint32_t peer_id)
     del_attr->nla_len = static_cast<decltype(del_attr->nla_len)>(offset - del_start);
     req.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(struct genlmsghdr)) + static_cast<decltype(req.nlh.nlmsg_len)>(offset);
 
-    // Best effort — don't check response
+    // Check the result so stale kernel peers are visible (H7). Removal can
+    // legitimately race with kernel-side peer expiry, so failures are logged
+    // rather than thrown.
     std::vector<std::uint8_t> response;
-    netlink_helper_.SendAndReceive(&req.nlh, req.nlh.nlmsg_len, response);
+    if (!netlink_helper_.SendAndReceive(&req.nlh, req.nlh.nlmsg_len, response))
+    {
+        logger_->warn("DCO: Failed to send/receive OVPN_CMD_DEL_PEER for peer {}", peer_id);
+        return;
+    }
+    if (!dco::detail::CheckGenlResponse(response, "OVPN_CMD_DEL_PEER", *logger_))
+    {
+        logger_->warn("DCO: Peer {} removal rejected by kernel (may already be gone)", peer_id);
+        return;
+    }
 
-    logger_->debug("DCO: Peer {} removal requested", peer_id);
+    logger_->debug("DCO: Peer {} removed", peer_id);
 }
 
 } // namespace clv::vpn

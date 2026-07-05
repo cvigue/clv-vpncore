@@ -262,6 +262,89 @@ void PadIfname(std::uint8_t *out, const char *ifname)
     std::strncpy(reinterpret_cast<char *>(out), ifname, IFNAMSIZ - 1);
 }
 
+class NftBatchBuilder
+{
+  public:
+    explicit NftBatchBuilder(std::size_t reserve = 2048)
+    {
+        buf_.reserve(reserve);
+    }
+
+    void Begin()
+    {
+        auto pos = BeginNlMsg(buf_, NFNL_MSG_BATCH_BEGIN, NLM_F_REQUEST, seq_++);
+        AppendNfGenMsg(buf_, AF_UNSPEC, NFNL_SUBSYS_NFTABLES);
+        EndNlMsg(buf_, pos);
+    }
+
+    void AddTable(std::uint8_t family, const char *table_name)
+    {
+        auto pos = BeginNlMsg(buf_, NftMsgType(NFT_MSG_NEWTABLE), NLM_F_REQUEST | NLM_F_CREATE, seq_++);
+        AppendNfGenMsg(buf_, family, 0);
+        AppendAttrStr(buf_, NFTA_TABLE_NAME, table_name);
+        EndNlMsg(buf_, pos);
+    }
+
+    void AddChain(std::uint8_t family,
+                  const char *table_name,
+                  const char *chain_name,
+                  const char *chain_type,
+                  int hooknum,
+                  int priority)
+    {
+        auto pos = BeginNlMsg(buf_, NftMsgType(NFT_MSG_NEWCHAIN), NLM_F_REQUEST | NLM_F_CREATE, seq_++);
+        AppendNfGenMsg(buf_, family, 0);
+        AppendAttrStr(buf_, NFTA_CHAIN_TABLE, table_name);
+        AppendAttrStr(buf_, NFTA_CHAIN_NAME, chain_name);
+        AppendAttrStr(buf_, NFTA_CHAIN_TYPE, chain_type);
+        {
+            auto hook_pos = BeginNested(buf_, NFTA_CHAIN_HOOK);
+            AppendAttrU32(buf_, NFTA_HOOK_HOOKNUM, hooknum);
+            AppendAttrU32(buf_, NFTA_HOOK_PRIORITY, priority);
+            EndNested(buf_, hook_pos);
+        }
+        EndNlMsg(buf_, pos);
+    }
+
+    void BeginRule(std::uint8_t family, const char *table_name, const char *chain_name)
+    {
+        rule_pos_ = BeginNlMsg(buf_, NftMsgType(NFT_MSG_NEWRULE), NLM_F_REQUEST | NLM_F_CREATE | NLM_F_APPEND, seq_++);
+        AppendNfGenMsg(buf_, family, 0);
+        AppendAttrStr(buf_, NFTA_RULE_TABLE, table_name);
+        AppendAttrStr(buf_, NFTA_RULE_CHAIN, chain_name);
+        exprs_pos_ = BeginNested(buf_, NFTA_RULE_EXPRESSIONS);
+    }
+
+    void EndRule()
+    {
+        EndNested(buf_, exprs_pos_);
+        EndNlMsg(buf_, rule_pos_);
+    }
+
+    void End()
+    {
+        auto pos = BeginNlMsg(buf_, NFNL_MSG_BATCH_END, NLM_F_REQUEST, seq_++);
+        AppendNfGenMsg(buf_, AF_UNSPEC, NFNL_SUBSYS_NFTABLES);
+        EndNlMsg(buf_, pos);
+    }
+
+    [[nodiscard]] const std::vector<std::uint8_t> &buffer() const
+    {
+        return buf_;
+    }
+
+    std::vector<std::uint8_t> &buffer_mut()
+    {
+        return buf_;
+    }
+
+  private:
+    std::vector<std::uint8_t> buf_;
+    std::uint32_t seq_ = 0;
+    std::size_t rule_pos_ = 0;
+    std::size_t exprs_pos_ = 0;
+};
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -348,94 +431,33 @@ bool NfTablesClient::EnsureMasquerade(std::uint8_t family,
     if (TableExists(family, NftTableRole::Nat))
         DeleteTable(family, NftTableRole::Nat);
 
-    std::vector<std::uint8_t> buf;
-    buf.reserve(2048);
-    std::uint32_t seq = 0;
+    NftBatchBuilder batch;
+    batch.Begin();
+    batch.AddTable(family, info.table_name);
+    batch.AddChain(family, info.table_name, CHAIN_NAME, "nat", NF_INET_POST_ROUTING, 100);
 
-    // ---- BATCH_BEGIN ----
+    batch.BeginRule(family, info.table_name, CHAIN_NAME);
     {
-        auto pos = BeginNlMsg(buf, NFNL_MSG_BATCH_BEGIN, NLM_F_REQUEST, seq++);
-        AppendNfGenMsg(buf, AF_UNSPEC, NFNL_SUBSYS_NFTABLES);
-        EndNlMsg(buf, pos);
-    }
-
-    // ---- NEW TABLE ----
-    {
-        auto pos = BeginNlMsg(buf, NftMsgType(NFT_MSG_NEWTABLE), NLM_F_REQUEST | NLM_F_CREATE, seq++);
-        AppendNfGenMsg(buf, family, 0);
-        AppendAttrStr(buf, NFTA_TABLE_NAME, info.table_name);
-        EndNlMsg(buf, pos);
-    }
-
-    // ---- NEW CHAIN (postrouting, type nat, hook postrouting, priority 100) ----
-    {
-        auto pos = BeginNlMsg(buf, NftMsgType(NFT_MSG_NEWCHAIN), NLM_F_REQUEST | NLM_F_CREATE, seq++);
-        AppendNfGenMsg(buf, family, 0);
-        AppendAttrStr(buf, NFTA_CHAIN_TABLE, info.table_name);
-        AppendAttrStr(buf, NFTA_CHAIN_NAME, CHAIN_NAME);
-        AppendAttrStr(buf, NFTA_CHAIN_TYPE, "nat");
-
-        {
-            auto hook_pos = BeginNested(buf, NFTA_CHAIN_HOOK);
-            AppendAttrU32(buf, NFTA_HOOK_HOOKNUM, NF_INET_POST_ROUTING);
-            AppendAttrU32(buf, NFTA_HOOK_PRIORITY, 100);
-            EndNested(buf, hook_pos);
-        }
-
-        EndNlMsg(buf, pos);
-    }
-
-    // ---- NEW RULE: saddr & mask == network, daddr & mask != network → masquerade ----
-    {
-        auto pos = BeginNlMsg(buf, NftMsgType(NFT_MSG_NEWRULE), NLM_F_REQUEST | NLM_F_CREATE | NLM_F_APPEND, seq++);
-        AppendNfGenMsg(buf, family, 0);
-        AppendAttrStr(buf, NFTA_RULE_TABLE, info.table_name);
-        AppendAttrStr(buf, NFTA_RULE_CHAIN, CHAIN_NAME);
-
         std::uint8_t mask[16];
         PrefixToNetmask(prefix_len, mask, info.addr_size);
 
-        // Canonicalise the network address (clear any host bits)
         std::uint8_t network_masked[16];
         for (std::uint32_t i = 0; i < info.addr_size; ++i)
             network_masked[i] = source_network[i] & mask[i];
 
-        auto exprs = BeginNested(buf, NFTA_RULE_EXPRESSIONS);
-        {
-            // 1. Load source address into NFT_REG_1
-            AppendExprPayload(buf, NFT_REG_1, NFT_PAYLOAD_NETWORK_HEADER, info.saddr_offset, info.addr_size);
-
-            // 2. Bitwise: REG_1 = REG_1 & mask
-            AppendExprBitwiseBytes(buf, NFT_REG_1, NFT_REG_1, mask, info.addr_size);
-
-            // 3. Compare: REG_1 == network  (source must be in VPN subnet)
-            AppendExprCmp(buf, NFT_REG_1, NFT_CMP_EQ, network_masked, info.addr_size);
-
-            // 4. Load destination address into NFT_REG_1
-            AppendExprPayload(buf, NFT_REG_1, NFT_PAYLOAD_NETWORK_HEADER, info.daddr_offset, info.addr_size);
-
-            // 5. Bitwise: REG_1 = REG_1 & mask
-            AppendExprBitwiseBytes(buf, NFT_REG_1, NFT_REG_1, mask, info.addr_size);
-
-            // 6. Compare: REG_1 != network  (destination must NOT be in VPN subnet)
-            AppendExprCmp(buf, NFT_REG_1, NFT_CMP_NEQ, network_masked, info.addr_size);
-
-            // 7. Masquerade verdict
-            AppendExprMasquerade(buf);
-        }
-        EndNested(buf, exprs);
-
-        EndNlMsg(buf, pos);
+        auto &buf = batch.buffer_mut();
+        AppendExprPayload(buf, NFT_REG_1, NFT_PAYLOAD_NETWORK_HEADER, info.saddr_offset, info.addr_size);
+        AppendExprBitwiseBytes(buf, NFT_REG_1, NFT_REG_1, mask, info.addr_size);
+        AppendExprCmp(buf, NFT_REG_1, NFT_CMP_EQ, network_masked, info.addr_size);
+        AppendExprPayload(buf, NFT_REG_1, NFT_PAYLOAD_NETWORK_HEADER, info.daddr_offset, info.addr_size);
+        AppendExprBitwiseBytes(buf, NFT_REG_1, NFT_REG_1, mask, info.addr_size);
+        AppendExprCmp(buf, NFT_REG_1, NFT_CMP_NEQ, network_masked, info.addr_size);
+        AppendExprMasquerade(buf);
     }
+    batch.EndRule();
+    batch.End();
 
-    // ---- BATCH_END ----
-    {
-        auto pos = BeginNlMsg(buf, NFNL_MSG_BATCH_END, NLM_F_REQUEST, seq++);
-        AppendNfGenMsg(buf, AF_UNSPEC, NFNL_SUBSYS_NFTABLES);
-        EndNlMsg(buf, pos);
-    }
-
-    return SendBatch(buf);
+    return SendBatch(batch.buffer());
 }
 
 bool NfTablesClient::RemoveMasquerade(std::uint8_t family)
@@ -548,10 +570,6 @@ bool NfTablesClient::EnsureIntraPoolDrop(std::uint8_t family, const char *ifname
     if (TableExists(family, NftTableRole::Filter))
         DeleteTable(family, NftTableRole::Filter);
 
-    std::vector<std::uint8_t> buf;
-    buf.reserve(4096);
-    std::uint32_t seq = 0;
-
     std::uint8_t mask[16];
     PrefixToNetmask(prefix_len, mask, info.addr_size);
 
@@ -562,73 +580,32 @@ bool NfTablesClient::EnsureIntraPoolDrop(std::uint8_t family, const char *ifname
     std::uint8_t ifname_padded[IFNAMSIZ];
     PadIfname(ifname_padded, ifname);
 
+    NftBatchBuilder batch(4096);
+    batch.Begin();
+    batch.AddTable(family, info.table_name);
+    batch.AddChain(family, info.table_name, FILTER_CHAIN_NAME, "filter", NF_INET_FORWARD, 0);
+
+    batch.BeginRule(family, info.table_name, FILTER_CHAIN_NAME);
     {
-        auto pos = BeginNlMsg(buf, NFNL_MSG_BATCH_BEGIN, NLM_F_REQUEST, seq++);
-        AppendNfGenMsg(buf, AF_UNSPEC, NFNL_SUBSYS_NFTABLES);
-        EndNlMsg(buf, pos);
+        auto &buf = batch.buffer_mut();
+        AppendExprMetaIifname(buf, NFT_REG_1);
+        AppendExprCmp(buf, NFT_REG_1, NFT_CMP_EQ, ifname_padded, IFNAMSIZ);
+        AppendExprPayload(buf, NFT_REG_1, NFT_PAYLOAD_NETWORK_HEADER, info.saddr_offset, info.addr_size);
+        AppendExprBitwiseBytes(buf, NFT_REG_1, NFT_REG_1, mask, info.addr_size);
+        AppendExprCmp(buf, NFT_REG_1, NFT_CMP_EQ, network_masked, info.addr_size);
+        AppendExprPayload(buf, NFT_REG_1, NFT_PAYLOAD_NETWORK_HEADER, info.daddr_offset, info.addr_size);
+        AppendExprBitwiseBytes(buf, NFT_REG_1, NFT_REG_1, mask, info.addr_size);
+        AppendExprCmp(buf, NFT_REG_1, NFT_CMP_EQ, network_masked, info.addr_size);
+        AppendExprPayload(buf, NFT_REG_1, NFT_PAYLOAD_NETWORK_HEADER, info.daddr_offset, info.addr_size);
+        AppendExprCmp(buf, NFT_REG_1, NFT_CMP_NEQ, bridge_ip, info.addr_size);
+        AppendExprPayload(buf, NFT_REG_1, NFT_PAYLOAD_NETWORK_HEADER, info.saddr_offset, info.addr_size);
+        AppendExprCmp(buf, NFT_REG_1, NFT_CMP_NEQ, bridge_ip, info.addr_size);
+        AppendExprImmediateVerdict(buf, NF_DROP);
     }
+    batch.EndRule();
+    batch.End();
 
-    {
-        auto pos = BeginNlMsg(buf, NftMsgType(NFT_MSG_NEWTABLE), NLM_F_REQUEST | NLM_F_CREATE, seq++);
-        AppendNfGenMsg(buf, family, 0);
-        AppendAttrStr(buf, NFTA_TABLE_NAME, info.table_name);
-        EndNlMsg(buf, pos);
-    }
-
-    {
-        auto pos = BeginNlMsg(buf, NftMsgType(NFT_MSG_NEWCHAIN), NLM_F_REQUEST | NLM_F_CREATE, seq++);
-        AppendNfGenMsg(buf, family, 0);
-        AppendAttrStr(buf, NFTA_CHAIN_TABLE, info.table_name);
-        AppendAttrStr(buf, NFTA_CHAIN_NAME, FILTER_CHAIN_NAME);
-        AppendAttrStr(buf, NFTA_CHAIN_TYPE, "filter");
-        {
-            auto hook_pos = BeginNested(buf, NFTA_CHAIN_HOOK);
-            AppendAttrU32(buf, NFTA_HOOK_HOOKNUM, NF_INET_FORWARD);
-            AppendAttrU32(buf, NFTA_HOOK_PRIORITY, 0);
-            EndNested(buf, hook_pos);
-        }
-        EndNlMsg(buf, pos);
-    }
-
-    {
-        auto pos = BeginNlMsg(buf, NftMsgType(NFT_MSG_NEWRULE), NLM_F_REQUEST | NLM_F_CREATE | NLM_F_APPEND, seq++);
-        AppendNfGenMsg(buf, family, 0);
-        AppendAttrStr(buf, NFTA_RULE_TABLE, info.table_name);
-        AppendAttrStr(buf, NFTA_RULE_CHAIN, FILTER_CHAIN_NAME);
-
-        auto exprs = BeginNested(buf, NFTA_RULE_EXPRESSIONS);
-        {
-            AppendExprMetaIifname(buf, NFT_REG_1);
-            AppendExprCmp(buf, NFT_REG_1, NFT_CMP_EQ, ifname_padded, IFNAMSIZ);
-
-            AppendExprPayload(buf, NFT_REG_1, NFT_PAYLOAD_NETWORK_HEADER, info.saddr_offset, info.addr_size);
-            AppendExprBitwiseBytes(buf, NFT_REG_1, NFT_REG_1, mask, info.addr_size);
-            AppendExprCmp(buf, NFT_REG_1, NFT_CMP_EQ, network_masked, info.addr_size);
-
-            AppendExprPayload(buf, NFT_REG_1, NFT_PAYLOAD_NETWORK_HEADER, info.daddr_offset, info.addr_size);
-            AppendExprBitwiseBytes(buf, NFT_REG_1, NFT_REG_1, mask, info.addr_size);
-            AppendExprCmp(buf, NFT_REG_1, NFT_CMP_EQ, network_masked, info.addr_size);
-
-            AppendExprPayload(buf, NFT_REG_1, NFT_PAYLOAD_NETWORK_HEADER, info.daddr_offset, info.addr_size);
-            AppendExprCmp(buf, NFT_REG_1, NFT_CMP_NEQ, bridge_ip, info.addr_size);
-
-            AppendExprPayload(buf, NFT_REG_1, NFT_PAYLOAD_NETWORK_HEADER, info.saddr_offset, info.addr_size);
-            AppendExprCmp(buf, NFT_REG_1, NFT_CMP_NEQ, bridge_ip, info.addr_size);
-
-            AppendExprImmediateVerdict(buf, NF_DROP);
-        }
-        EndNested(buf, exprs);
-
-        EndNlMsg(buf, pos);
-    }
-
-    {
-        auto pos = BeginNlMsg(buf, NFNL_MSG_BATCH_END, NLM_F_REQUEST, seq++);
-        AppendNfGenMsg(buf, AF_UNSPEC, NFNL_SUBSYS_NFTABLES);
-        EndNlMsg(buf, pos);
-    }
-
-    return SendBatch(buf);
+    return SendBatch(batch.buffer());
 }
 
 bool NfTablesClient::RemoveIntraPoolDrop(std::uint8_t family)

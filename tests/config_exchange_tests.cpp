@@ -2,6 +2,7 @@
 
 #include "openvpn/config_exchange.h"
 
+#include <cstdint>
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>
@@ -128,6 +129,51 @@ TEST_F(ConfigExchangeTest, ParseRouteOption)
     EXPECT_EQ("10.8.0.0", std::get<0>(config.routes[0]));
     EXPECT_EQ("255.255.255.0", std::get<1>(config.routes[0]));
     EXPECT_EQ(0, std::get<2>(config.routes[0]));
+}
+
+TEST_F(ConfigExchangeTest, ParseRouteWithGatewayIp)
+{
+    // OpenVPN: route network netmask gateway — third arg is gateway, not metric
+    exchange_.ProcessPushReply("route 10.8.0.0 255.255.255.0 10.8.0.1");
+
+    const auto &config = exchange_.GetNegotiatedConfig();
+    ASSERT_EQ(config.routes.size(), 1u);
+    EXPECT_EQ(std::get<0>(config.routes[0]), "10.8.0.0");
+    EXPECT_EQ(std::get<1>(config.routes[0]), "255.255.255.0");
+    EXPECT_EQ(std::get<2>(config.routes[0]), 0);
+}
+
+TEST_F(ConfigExchangeTest, ParseRouteWithVpnGatewayKeyword)
+{
+    exchange_.ProcessPushReply("route 10.8.0.0 255.255.255.0 vpn_gateway");
+
+    const auto &config = exchange_.GetNegotiatedConfig();
+    ASSERT_EQ(config.routes.size(), 1u);
+    EXPECT_EQ(std::get<0>(config.routes[0]), "10.8.0.0");
+    EXPECT_EQ(std::get<1>(config.routes[0]), "255.255.255.0");
+    EXPECT_EQ(std::get<2>(config.routes[0]), 0);
+}
+
+TEST_F(ConfigExchangeTest, ParseRouteWithGatewayAndMetric)
+{
+    exchange_.ProcessPushReply("route 10.8.0.0 255.255.255.0 10.8.0.1 100");
+
+    const auto &config = exchange_.GetNegotiatedConfig();
+    ASSERT_EQ(config.routes.size(), 1u);
+    EXPECT_EQ(std::get<0>(config.routes[0]), "10.8.0.0");
+    EXPECT_EQ(std::get<1>(config.routes[0]), "255.255.255.0");
+    EXPECT_EQ(std::get<2>(config.routes[0]), 100);
+}
+
+TEST_F(ConfigExchangeTest, ParseRouteIpv6WithGatewayOnly)
+{
+    exchange_.ProcessPushReply("route-ipv6 2001:db8::/32 fd00::1");
+
+    const auto &config = exchange_.GetNegotiatedConfig();
+    ASSERT_EQ(config.routes_ipv6.size(), 1u);
+    EXPECT_EQ(std::get<0>(config.routes_ipv6[0]), "2001:db8::/32");
+    EXPECT_EQ(std::get<1>(config.routes_ipv6[0]), "fd00::1");
+    EXPECT_EQ(std::get<2>(config.routes_ipv6[0]), 0);
 }
 
 TEST_F(ConfigExchangeTest, ParseMultipleRoutes)
@@ -284,14 +330,11 @@ TEST_F(ConfigExchangeTest, RejectsInvalidFragmentSize)
     EXPECT_THROW(exchange_.ProcessPushReply("fragment not-a-number"), ConfigParseError);
 }
 
-TEST_F(ConfigExchangeTest, AcceptsRouteWithInvalidMetric)
+TEST_F(ConfigExchangeTest, RejectsRouteWithInvalidMetric)
 {
-    // Invalid metric is silently ignored (defaults to 0)
-    exchange_.ProcessPushReply("route 10.8.0.0 255.255.255.0 invalid");
-    const auto &config = exchange_.GetNegotiatedConfig();
-    ASSERT_EQ(config.routes.size(), 1u);
-    EXPECT_EQ(std::get<0>(config.routes[0]), "10.8.0.0");
-    EXPECT_EQ(std::get<2>(config.routes[0]), 0); // bad metric -> 0
+    // Non-numeric 3rd arg is a gateway (accepted). Invalid metric is the 4th arg.
+    EXPECT_THROW(exchange_.ProcessPushReply("route 10.8.0.0 255.255.255.0 10.8.0.1 invalid"),
+                 ConfigParseError);
 }
 
 TEST_F(ConfigExchangeTest, AcceptsRouteWithNetworkOnly)
@@ -301,6 +344,16 @@ TEST_F(ConfigExchangeTest, AcceptsRouteWithNetworkOnly)
     const auto &config = exchange_.GetNegotiatedConfig();
     ASSERT_EQ(config.routes.size(), 1u);
     EXPECT_EQ(std::get<0>(config.routes[0]), "10.8.0.0");
+}
+
+TEST_F(ConfigExchangeTest, AcceptsRouteWithNetmaskAndMetric)
+{
+    exchange_.ProcessPushReply("route 192.168.1.0 255.255.255.0 50");
+    const auto &config = exchange_.GetNegotiatedConfig();
+    ASSERT_EQ(config.routes.size(), 1u);
+    EXPECT_EQ(std::get<0>(config.routes[0]), "192.168.1.0");
+    EXPECT_EQ(std::get<1>(config.routes[0]), "255.255.255.0");
+    EXPECT_EQ(std::get<2>(config.routes[0]), 50);
 }
 
 TEST_F(ConfigExchangeTest, RejectsInvalidIpv4RouteNetwork)
@@ -343,6 +396,36 @@ TEST_F(ConfigExchangeTest, RejectsTooManyDnsServers)
         options += "dns server " + std::to_string(i) + " address 8.8.8.8";
     }
     EXPECT_THROW(exchange_.ProcessPushReply(options), ConfigParseError);
+}
+
+TEST_F(ConfigExchangeTest, RejectsInvalidDnsServerAddress)
+{
+    EXPECT_THROW(exchange_.ProcessPushReply("dns server 0 address not-an-ip"), ConfigParseError);
+}
+
+TEST_F(ConfigExchangeTest, RejectsInvalidIfconfigLocalAddress)
+{
+    EXPECT_THROW(exchange_.ProcessPushReply("ifconfig bad 10.8.0.1"), ConfigParseError);
+}
+
+TEST_F(ConfigExchangeTest, RejectsIfconfigIpv6PrefixOutOfRange)
+{
+    EXPECT_THROW(exchange_.ProcessPushReply("ifconfig-ipv6 2001:db8::1/129"), ConfigParseError);
+}
+
+TEST_F(ConfigExchangeTest, RejectsIfconfigIpv6InvalidAddress)
+{
+    EXPECT_THROW(exchange_.ProcessPushReply("ifconfig-ipv6 not-v6/64"), ConfigParseError);
+}
+
+TEST_F(ConfigExchangeTest, RejectsUintOverflowForFragment)
+{
+    EXPECT_THROW(exchange_.ProcessPushReply("fragment 999999"), ConfigParseError);
+}
+
+TEST_F(ConfigExchangeTest, RejectsInvalidPeerIdOverflow)
+{
+    EXPECT_THROW(exchange_.ProcessPushReply("peer-id 9999999999"), ConfigParseError);
 }
 
 TEST_F(ConfigExchangeTest, RejectsOptionTooLong)

@@ -15,6 +15,7 @@
  * Covers factoring items F8 and F18 from goals-plan.md §6.
  */
 
+#include <numeric_util.h>
 #include <scope_guard.h>
 #include <unique_fd.h>
 #include <util/netlink_helper.h>
@@ -42,6 +43,22 @@ namespace clv::vpn::iface {
 using clv::netlink::NetlinkHelper;
 
 /**
+ * @brief Copy an interface name into an ifreq, rejecting oversized names.
+ *
+ * strncpy with a zeroed ifreq is NUL-safe but silently truncates names of
+ * IFNAMSIZ-1 chars or longer, which would target the wrong interface (H5).
+ * Validate the length at the boundary and throw instead.
+ */
+inline void CopyIfName(struct ifreq &ifr, const char *ifname)
+{
+    const std::size_t len = std::strlen(ifname);
+    if (len == 0 || len >= IFNAMSIZ)
+        throw std::invalid_argument("Invalid interface name length: " + std::string(ifname));
+    std::memcpy(ifr.ifr_name, ifname, len);
+    ifr.ifr_name[len] = '\0';
+}
+
+/**
  * @brief Set an interface's IPv4 address via SIOCSIFADDR.
  * @param sock   AF_INET/SOCK_DGRAM socket fd
  * @param ifname Interface name
@@ -56,7 +73,7 @@ inline void SetIpAddress(int sock, const char *ifname, const std::string &ip_str
         throw std::invalid_argument("Invalid IP address: " + ip_str);
 
     struct ifreq ifr{};
-    std::strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
+    CopyIfName(ifr, ifname);
     auto *sa = reinterpret_cast<struct sockaddr_in *>(&ifr.ifr_addr);
     sa->sin_family = AF_INET;
     sa->sin_addr = addr;
@@ -75,7 +92,7 @@ inline void SetIpAddress(int sock, const char *ifname, const std::string &ip_str
 inline void SetNetmask(int sock, const char *ifname, uint32_t mask_host)
 {
     struct ifreq ifr{};
-    std::strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
+    CopyIfName(ifr, ifname);
     auto *sa = reinterpret_cast<struct sockaddr_in *>(&ifr.ifr_addr);
     sa->sin_family = AF_INET;
     sa->sin_addr.s_addr = htonl(mask_host);
@@ -93,7 +110,7 @@ inline void SetNetmask(int sock, const char *ifname, uint32_t mask_host)
 inline void BringUp(int sock, const char *ifname)
 {
     struct ifreq ifr{};
-    std::strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
+    CopyIfName(ifr, ifname);
 
     if (ioctl(sock, SIOCGIFFLAGS, &ifr) < 0)
         throw std::system_error(errno, std::system_category(), "Failed to get interface flags");
@@ -113,7 +130,7 @@ inline void BringUp(int sock, const char *ifname)
 inline void SetMtu(int sock, const char *ifname, std::uint16_t mtu)
 {
     struct ifreq ifr{};
-    std::strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
+    CopyIfName(ifr, ifname);
     ifr.ifr_mtu = mtu;
     if (ioctl(sock, SIOCSIFMTU, &ifr) < 0)
         throw std::system_error(errno, std::system_category(), "Failed to set MTU");
@@ -146,7 +163,7 @@ inline void SetPointToPoint(const char *ifname,
         throw std::invalid_argument("Invalid peer IP address: " + peer_ip);
 
     struct ifreq ifr{};
-    std::strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
+    CopyIfName(ifr, ifname);
     auto *sa = reinterpret_cast<struct sockaddr_in *>(&ifr.ifr_dstaddr);
     sa->sin_family = AF_INET;
     sa->sin_addr = dst;
@@ -159,7 +176,7 @@ inline void SetPointToPoint(const char *ifname,
 
     // 4. Bring up with IFF_POINTOPOINT flag
     std::memset(&ifr, 0, sizeof(ifr));
-    std::strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
+    CopyIfName(ifr, ifname);
     if (ioctl(sock.get(), SIOCGIFFLAGS, &ifr) < 0)
         throw std::system_error(errno, std::system_category(), "Failed to get interface flags");
 
@@ -245,7 +262,11 @@ inline std::vector<std::string> QueryInterfaceAddresses(const std::string &ifnam
         if (nbytes <= 0)
             break;
 
-        int remaining = static_cast<int>(nbytes);
+        // Guard ssize_t → int narrowing for NLMSG_OK arithmetic (H4)
+        auto remaining_opt = clv::checked_cast<int>(nbytes);
+        if (!remaining_opt)
+            break;
+        int remaining = *remaining_opt;
         bool done = false;
 
         for (auto *nlh = reinterpret_cast<struct nlmsghdr *>(buf);

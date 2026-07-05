@@ -5,14 +5,17 @@
 #include "openvpn/crypto_algorithms.h"
 #include "transport/batch_constants.h"
 
+#include <config_io.h>
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
+#include <parse_intake.h>
 
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <filesystem>
-#include <fstream>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -24,45 +27,35 @@
 
 namespace clv::vpn {
 
+namespace {
+
+constexpr std::int64_t kIntMax = std::numeric_limits<int>::max();
+
+[[nodiscard]] std::int64_t GetBoundedInt(const nlohmann::json &json,
+                                         const char *key,
+                                         std::int64_t min_value,
+                                         std::int64_t max_value)
+{
+    return clv::RequireJsonIntOrThrow<std::int64_t>(
+        json,
+        key,
+        min_value,
+        max_value,
+        {.source = "VpnConfigParser", .field = key},
+        [](const std::string &msg)
+    { return std::runtime_error(msg); });
+}
+
+} // namespace
+
 VpnConfig VpnConfigParser::ParseFile(const std::filesystem::path &filepath)
 {
-    if (!std::filesystem::exists(filepath))
-    {
-        throw std::runtime_error("VpnConfigParser: Config file not found: " + filepath.string());
-    }
-
-    std::ifstream file(filepath);
-    if (!file.is_open())
-    {
-        throw std::runtime_error("VpnConfigParser: Cannot open config file: " + filepath.string());
-    }
-
-    nlohmann::json json;
-    try
-    {
-        file >> json;
-    }
-    catch (const nlohmann::json::parse_error &e)
-    {
-        throw std::runtime_error("VpnConfigParser: JSON parse error in " + filepath.string() + ": " + e.what());
-    }
-
-    return ParseJson(json);
+    return ParseJson(config::ParseJsonObjectFile(filepath, "VpnConfigParser"));
 }
 
 VpnConfig VpnConfigParser::ParseString(const std::string &jsonString)
 {
-    nlohmann::json json;
-    try
-    {
-        json = nlohmann::json::parse(jsonString);
-    }
-    catch (const nlohmann::json::parse_error &e)
-    {
-        throw std::runtime_error("VpnConfigParser: JSON parse error: " + std::string(e.what()));
-    }
-
-    return ParseJson(json);
+    return ParseJson(config::ParseJsonString(jsonString, "VpnConfigParser"));
 }
 
 VpnConfig VpnConfigParser::ParseJson(const nlohmann::json &json)
@@ -248,7 +241,7 @@ VpnConfig::ServerConfig VpnConfigParser::ParseServerConfig(const nlohmann::json 
     if (json.contains("host"))
         s.host = json["host"];
     if (json.contains("port"))
-        s.port = json["port"];
+        s.port = static_cast<uint16_t>(GetBoundedInt(json, "port", 1, 65535));
     if (json.contains("proto"))
         s.proto = json["proto"];
     if (json.contains("dev"))
@@ -257,7 +250,11 @@ VpnConfig::ServerConfig VpnConfigParser::ParseServerConfig(const nlohmann::json 
         s.dev_node = json["dev_node"];
     if (json.contains("keepalive") && json["keepalive"].is_array() && json["keepalive"].size() == 2)
     {
-        s.keepalive = {json["keepalive"][0], json["keepalive"][1]};
+        const auto &ka = json["keepalive"];
+        if (!ka[0].is_number_integer() || !ka[1].is_number_integer())
+            throw std::runtime_error("VpnConfigParser: 'keepalive' entries must be integers");
+        s.keepalive = {std::clamp<std::int64_t>(ka[0].get<std::int64_t>(), 0, kIntMax),
+                       std::clamp<std::int64_t>(ka[1].get<std::int64_t>(), 0, kIntMax)};
     }
 
     // Crypto
@@ -268,7 +265,7 @@ VpnConfig::ServerConfig VpnConfigParser::ParseServerConfig(const nlohmann::json 
     if (json.contains("tls_cipher"))
         s.tls_cipher = json["tls_cipher"];
     if (json.contains("keysize"))
-        s.keysize = json["keysize"];
+        s.keysize = static_cast<size_t>(GetBoundedInt(json, "keysize", 128, 4096));
     if (json.contains("ca_cert"))
         s.ca_cert = json["ca_cert"].get<std::string>();
     if (json.contains("tls_crypt_key"))
@@ -320,9 +317,10 @@ VpnConfig::ServerConfig VpnConfigParser::ParseServerConfig(const nlohmann::json 
     if (json.contains("client_to_client"))
         s.client_to_client = json["client_to_client"];
     if (json.contains("tun_mtu"))
-        s.tun_mtu = json["tun_mtu"];
+        s.tun_mtu = static_cast<int>(GetBoundedInt(json, "tun_mtu", std::numeric_limits<int>::min(), kIntMax));
     if (json.contains("tun_txqueuelen"))
-        s.tun_txqueuelen = json["tun_txqueuelen"];
+        s.tun_txqueuelen = static_cast<int>(
+            GetBoundedInt(json, "tun_txqueuelen", std::numeric_limits<int>::min(), kIntMax));
 
     // Validate ranges
     s.tun_mtu = std::clamp(s.tun_mtu, 576, 9000);
@@ -341,11 +339,12 @@ VpnConfig::ServerConfig VpnConfigParser::ParseServerConfig(const nlohmann::json 
 
     // Server-specific tuning
     if (json.contains("max_clients"))
-        s.max_clients = json["max_clients"];
+        s.max_clients = static_cast<size_t>(GetBoundedInt(json, "max_clients", 1, 65536));
     if (json.contains("ping_timer_remote"))
-        s.ping_timer_remote = json["ping_timer_remote"];
+        s.ping_timer_remote = static_cast<int>(GetBoundedInt(json, "ping_timer_remote", 0, kIntMax));
     if (json.contains("renegotiate_seconds"))
-        s.renegotiate_seconds = json["renegotiate_seconds"];
+        s.renegotiate_seconds = static_cast<int>(
+            GetBoundedInt(json, "renegotiate_seconds", std::numeric_limits<int>::min(), kIntMax));
 
     if (s.renegotiate_seconds < 0)
         s.renegotiate_seconds = 0;
@@ -364,7 +363,7 @@ VpnConfig::ClientConfig VpnConfigParser::ParseClientConfig(const nlohmann::json 
     if (json.contains("server_host"))
         c.server_host = json["server_host"];
     if (json.contains("server_port"))
-        c.server_port = static_cast<uint16_t>(json["server_port"].get<int>());
+        c.server_port = static_cast<uint16_t>(GetBoundedInt(json, "server_port", 1, 65535));
     if (json.contains("proto"))
         c.proto = json["proto"];
     else if (json.contains("protocol"))
@@ -423,24 +422,29 @@ VpnConfig::ClientConfig VpnConfigParser::ParseClientConfig(const nlohmann::json 
 
     // Reconnection
     if (json.contains("reconnect_delay_seconds"))
-        c.reconnect_delay_seconds = json["reconnect_delay_seconds"];
+        c.reconnect_delay_seconds = static_cast<int>(
+            GetBoundedInt(json, "reconnect_delay_seconds", 0, kIntMax));
     if (json.contains("max_reconnect_attempts"))
-        c.max_reconnect_attempts = json["max_reconnect_attempts"];
+        c.max_reconnect_attempts = static_cast<int>(
+            GetBoundedInt(json, "max_reconnect_attempts", 0, kIntMax));
 
     // Keepalive
     if (json.contains("keepalive") && json["keepalive"].is_array() && json["keepalive"].size() >= 2)
     {
-        c.keepalive_interval = json["keepalive"][0].get<int>();
-        c.keepalive_timeout = json["keepalive"][1].get<int>();
+        const auto &ka = json["keepalive"];
+        if (!ka[0].is_number_integer() || !ka[1].is_number_integer())
+            throw std::runtime_error("VpnConfigParser: 'keepalive' entries must be integers");
+        c.keepalive_interval = static_cast<int>(std::clamp<std::int64_t>(ka[0].get<std::int64_t>(), 0, kIntMax));
+        c.keepalive_timeout = static_cast<int>(std::clamp<std::int64_t>(ka[1].get<std::int64_t>(), 0, kIntMax));
     }
     if (json.contains("keepalive_interval"))
-        c.keepalive_interval = json["keepalive_interval"];
+        c.keepalive_interval = static_cast<int>(GetBoundedInt(json, "keepalive_interval", 0, kIntMax));
     if (json.contains("keepalive_timeout"))
-        c.keepalive_timeout = json["keepalive_timeout"];
+        c.keepalive_timeout = static_cast<int>(GetBoundedInt(json, "keepalive_timeout", 0, kIntMax));
 
     // Renegotiation
     if (json.contains("renegotiate_seconds"))
-        c.renegotiate_seconds = json["renegotiate_seconds"];
+        c.renegotiate_seconds = static_cast<int>(GetBoundedInt(json, "renegotiate_seconds", 0, kIntMax));
 
     return c;
 }
@@ -449,20 +453,7 @@ VpnConfig::ProcessConfig VpnConfigParser::ParseProcessConfig(const nlohmann::jso
 {
     VpnConfig::ProcessConfig proc;
 
-    if (json.contains("cpu_affinity"))
-    {
-        auto &val = json["cpu_affinity"];
-        if (val.is_string())
-        {
-            auto s = val.get<std::string>();
-            if (s == "off")
-                proc.cpu_affinity = -1;
-            else if (s == "auto")
-                proc.cpu_affinity = -2;
-        }
-        else if (val.is_number_integer())
-            proc.cpu_affinity = val.get<int>();
-    }
+    clv::ParseAffinityField(json, "cpu_affinity", proc.cpu_affinity);
 
     if (json.contains("transit_routing"))
         proc.transit_routing = json["transit_routing"].get<bool>();
@@ -474,45 +465,27 @@ VpnConfig::PerformanceConfig VpnConfigParser::ParsePerformanceConfig(const nlohm
 {
     VpnConfig::PerformanceConfig p;
 
+    constexpr auto kFullIntRange = std::numeric_limits<int>::min();
+    auto read_int = [&json](const char *key, int &out)
+    {
+        if (json.contains(key))
+            out = static_cast<int>(GetBoundedInt(json, key, kFullIntRange, kIntMax));
+    };
+
     if (json.contains("enable_dco"))
         p.enable_dco = json["enable_dco"];
-    if (json.contains("stats_interval_seconds"))
-        p.stats_interval_seconds = json["stats_interval_seconds"];
-    if (json.contains("socket_recv_buffer"))
-        p.socket_recv_buffer = json["socket_recv_buffer"];
-    if (json.contains("socket_send_buffer"))
-        p.socket_send_buffer = json["socket_send_buffer"];
-    if (json.contains("batch_size"))
-        p.batch_size = json["batch_size"];
-    if (json.contains("tx_drain_depth"))
-        p.tx_drain_depth = json["tx_drain_depth"];
-    if (json.contains("tx_send_batch"))
-        p.tx_send_batch = json["tx_send_batch"];
-    if (json.contains("tx_small_pkt_flush"))
-        p.tx_small_pkt_flush = json["tx_small_pkt_flush"];
-    if (json.contains("max_recv"))
-        p.max_recv = json["max_recv"];
-    if (json.contains("rx_process_batch"))
-        p.rx_process_batch = json["rx_process_batch"];
+    read_int("stats_interval_seconds", p.stats_interval_seconds);
+    read_int("socket_recv_buffer", p.socket_recv_buffer);
+    read_int("socket_send_buffer", p.socket_send_buffer);
+    read_int("batch_size", p.batch_size);
+    read_int("tx_drain_depth", p.tx_drain_depth);
+    read_int("tx_send_batch", p.tx_send_batch);
+    read_int("tx_small_pkt_flush", p.tx_small_pkt_flush);
+    read_int("max_recv", p.max_recv);
+    read_int("rx_process_batch", p.rx_process_batch);
 
-    auto parse_affinity = [](const nlohmann::json &j, const char *key, int &out)
-    {
-        if (!j.contains(key))
-            return;
-        auto &val = j[key];
-        if (val.is_string())
-        {
-            auto s = val.get<std::string>();
-            if (s == "off")
-                out = -1;
-            else if (s == "auto")
-                out = -2;
-        }
-        else if (val.is_number_integer())
-            out = val.get<int>();
-    };
-    parse_affinity(json, "rx_thread_affinity", p.rx_thread_affinity);
-    parse_affinity(json, "tx_thread_affinity", p.tx_thread_affinity);
+    clv::ParseAffinityField(json, "rx_thread_affinity", p.rx_thread_affinity);
+    clv::ParseAffinityField(json, "tx_thread_affinity", p.tx_thread_affinity);
 
     // Validate ranges
     if (p.socket_recv_buffer < 0)

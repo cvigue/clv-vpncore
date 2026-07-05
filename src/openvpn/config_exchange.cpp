@@ -5,9 +5,11 @@
 #include "openvpn/crypto_algorithms.h"
 #include "openvpn/protocol_constants.h"
 
+#include <concepts>
 #include <exception>
 #include <net/ipv4_utils.h>
 #include <net/ipv6_utils.h>
+#include <parse_intake.h>
 #include <stdexcept>
 #include <util/byte_packer.h>
 
@@ -17,6 +19,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <span>
 #include <sstream>
@@ -64,6 +67,24 @@ void ValidateIpv6RouteArgs(const std::vector<std::string> &args)
         throw ConfigParseError("invalid IPv6 route gateway '" + args[1] + "'");
 }
 
+void ValidateDnsAddress(std::string_view addr)
+{
+    if (!ipv4::ParseIpv4(addr) && !ipv6::ParseIpv6(addr))
+        throw ConfigParseError("invalid dns server address '" + std::string(addr) + "'");
+}
+
+template <std::integral T>
+T ParseConfigBounded(std::string_view text, std::string_view label, T min_value, T max_value)
+{
+    return clv::ParseBoundedOrThrow<T>(
+        text,
+        min_value,
+        max_value,
+        {.source = "ConfigExchange", .field = label},
+        [](const std::string &msg)
+    { return ConfigParseError(msg); });
+}
+
 } // namespace
 
 // ============================================================================
@@ -93,14 +114,8 @@ void ApplyUint(NegotiatedConfig &c, const std::vector<std::string> &args)
 {
     if (args.empty())
         throw ConfigParseError("missing argument for integer option");
-    try
-    {
-        c.*Field = static_cast<std::remove_reference_t<decltype(c.*Field)>>(std::stoul(args[0]));
-    }
-    catch (const std::exception &)
-    {
-        throw ConfigParseError("invalid integer value '" + args[0] + "'");
-    }
+    using FieldT = std::remove_reference_t<decltype(c.*Field)>;
+    c.*Field = ParseConfigBounded<FieldT>(args[0], "integer option", 0, std::numeric_limits<FieldT>::max());
 }
 
 template <auto Field>
@@ -108,14 +123,8 @@ void ApplyUint64(NegotiatedConfig &c, const std::vector<std::string> &args)
 {
     if (args.empty())
         throw ConfigParseError("missing argument for integer option");
-    try
-    {
-        c.*Field = std::stoull(args[0]);
-    }
-    catch (const std::exception &)
-    {
-        throw ConfigParseError("invalid integer value '" + args[0] + "'");
-    }
+    using FieldT = std::remove_reference_t<decltype(c.*Field)>;
+    c.*Field = ParseConfigBounded<FieldT>(args[0], "integer option", 0, std::numeric_limits<FieldT>::max());
 }
 
 template <auto Field>
@@ -123,14 +132,10 @@ void ApplyInt32(NegotiatedConfig &c, const std::vector<std::string> &args)
 {
     if (args.empty())
         throw ConfigParseError("missing argument for integer option");
-    try
-    {
-        c.*Field = static_cast<std::int32_t>(std::stol(args[0]));
-    }
-    catch (const std::exception &)
-    {
-        throw ConfigParseError("invalid integer value '" + args[0] + "'");
-    }
+    c.*Field = ParseConfigBounded<std::int32_t>(args[0],
+                                                "integer option",
+                                                std::numeric_limits<std::int32_t>::min(),
+                                                std::numeric_limits<std::int32_t>::max());
 }
 
 template <auto Field, char const *Keyword>
@@ -166,7 +171,18 @@ std::string EmitFlag(const NegotiatedConfig &c)
 
 // --- Route helpers (vector of tuples) ----------------------------------------
 
-// Apply route: args = [net, mask_or_gw?, metric?]
+// OpenVPN: route network [netmask] [gateway] [metric]
+// Stored as (network, netmask, metric). Per-route gateway is not retained —
+// clients use route-gateway for via. A non-numeric 3rd arg is treated as
+// gateway (metric 0); only an explicit metric token must be an integer.
+[[nodiscard]] int ParseRouteMetricArg(std::string_view text)
+{
+    return ParseConfigBounded<int>(text,
+                                   "route metric",
+                                   std::numeric_limits<int>::min(),
+                                   std::numeric_limits<int>::max());
+}
+
 template <auto Field>
 void ApplyRoute(NegotiatedConfig &c, const std::vector<std::string> &args)
 {
@@ -185,15 +201,19 @@ void ApplyRoute(NegotiatedConfig &c, const std::vector<std::string> &args)
     std::string net = args[0];
     std::string mask_or_gw = (args.size() >= 2) ? args[1] : "";
     int metric = 0;
-    if (args.size() >= 3)
+    if (args.size() >= 4)
     {
-        try
-        {
-            metric = std::stoi(args[2]);
-        }
-        catch (...)
-        { /* bad metric → 0 */
-        }
+        // route net mask gateway metric — gateway ignored for storage
+        metric = ParseRouteMetricArg(args[3]);
+    }
+    else if (args.size() == 3)
+    {
+        // Ambiguous: metric or gateway. Prefer metric when the token is an
+        // integer; otherwise accept as gateway and keep metric 0.
+        if (const auto parsed = clv::ParseBounded<int>(args[2],
+                                                       std::numeric_limits<int>::min(),
+                                                       std::numeric_limits<int>::max()))
+            metric = *parsed;
     }
     (c.*Field).push_back({net, mask_or_gw, metric});
 }
@@ -238,6 +258,10 @@ void ApplyIfconfig(NegotiatedConfig &c, const std::vector<std::string> &args)
 {
     if (args.size() < 2)
         throw ConfigParseError("ifconfig requires local and remote addresses");
+    if (!ipv4::ParseIpv4(args[0]))
+        throw ConfigParseError("invalid ifconfig local address '" + args[0] + "'");
+    if (!ipv4::ParseIpv4(args[1]))
+        throw ConfigParseError("invalid ifconfig remote address '" + args[1] + "'");
     c.ifconfig = {args[0], args[1]};
 }
 std::string EmitIfconfig(const NegotiatedConfig &c)
@@ -254,23 +278,27 @@ void ApplyIfconfigIpv6(NegotiatedConfig &c, const std::vector<std::string> &args
         throw ConfigParseError("ifconfig-ipv6 requires address/prefix");
     try
     {
+        std::string addr;
+        int prefix = 0;
         auto &addr_prefix = args[0];
         auto slash = addr_prefix.find('/');
         if (slash != std::string::npos)
         {
-            std::string addr = addr_prefix.substr(0, slash);
-            int prefix = std::stoi(addr_prefix.substr(slash + 1));
-            c.ifconfig_ipv6 = {addr, prefix};
+            addr = addr_prefix.substr(0, slash);
+            prefix = ParseConfigBounded<std::int32_t>(addr_prefix.substr(slash + 1), "ifconfig-ipv6 prefix", 0, 128);
         }
         else if (args.size() >= 2)
         {
-            int prefix = std::stoi(args[1]);
-            c.ifconfig_ipv6 = {addr_prefix, prefix};
+            addr = addr_prefix;
+            prefix = ParseConfigBounded<std::int32_t>(args[1], "ifconfig-ipv6 prefix", 0, 128);
         }
         else
         {
             throw ConfigParseError("ifconfig-ipv6 requires address/prefix");
         }
+        if (!ipv6::ParseIpv6(addr))
+            throw ConfigParseError("invalid ifconfig-ipv6 address '" + addr + "'");
+        c.ifconfig_ipv6 = {addr, prefix};
     }
     catch (const ConfigParseError &)
     {
@@ -341,15 +369,10 @@ void ApplyDnsOption(NegotiatedConfig &c, const std::vector<std::string> &args)
         if (args.size() < 4)
             throw ConfigParseError("dns server: requires priority, key, and value");
 
-        int priority = 0;
-        try
-        {
-            priority = std::stoi(args[1]);
-        }
-        catch (...)
-        {
-            throw ConfigParseError("dns server: invalid priority '" + args[1] + "'");
-        }
+        const int priority = ParseConfigBounded<int>(args[1],
+                                                     "dns server priority",
+                                                     std::numeric_limits<int>::min(),
+                                                     std::numeric_limits<int>::max());
 
         const std::string &key = args[2];
         if (key == "address" || key == "resolve-domains")
@@ -376,6 +399,7 @@ void ApplyDnsOption(NegotiatedConfig &c, const std::vector<std::string> &args)
                     if (!args[i].empty())
                     {
                         RequireBelowLimit(entry->addresses, kMaxDnsAddressesPerServer, "dns server addresses");
+                        ValidateDnsAddress(args[i]);
                         entry->addresses.push_back(args[i]);
                     }
                 }
@@ -811,14 +835,16 @@ std::uint32_t ParseClientIvProto(const std::string &peer_info)
     if (pos == std::string::npos)
         return 0;
     pos += kKey.size();
-    try
-    {
-        return static_cast<std::uint32_t>(std::stoul(peer_info.substr(pos)));
-    }
-    catch (...)
-    {
-        return 0;
-    }
+
+    const auto line_end = peer_info.find_first_of("\r\n", pos);
+    const std::string_view token(peer_info.data() + pos,
+                                 line_end == std::string::npos ? peer_info.size() - pos
+                                                               : line_end - pos);
+
+    const auto value = clv::ParseBounded<std::uint32_t>(token,
+                                                        0U,
+                                                        std::numeric_limits<std::uint32_t>::max());
+    return value.value_or(0);
 }
 
 } // namespace clv::vpn::openvpn

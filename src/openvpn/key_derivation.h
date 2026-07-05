@@ -62,7 +62,7 @@ class KeyDerivation
 {
   public:
     /**
-     * @brief Derive key material using OpenVPN PRF
+     * @brief Derive key material using a simple HMAC-SHA256 counter-mode PRF
      * @param master_secret TLS master secret from handshake
      * @param label Label string for PRF (typically "OpenVPN key material")
      * @param output_bytes Number of bytes to derive
@@ -71,6 +71,12 @@ class KeyDerivation
      *
      * Implements: PRF(master_secret, label) = HMAC-SHA256(master_secret, label || counter)
      * Counter increments each iteration if more than 32 bytes needed.
+     *
+     * @warning **Not on the wire key path** (M1, confirmed 2026-07-05). Live
+     * KeyMethod2 derivation uses OpenSSL's TLS 1.0 PRF via
+     * DeriveKeyMaterialWithSecret(). This helper only serves unit tests as a
+     * deterministic key-material generator; do not wire it into protocol code
+     * (use DeriveKeyMethod2 / an EVP_KDF-based HKDF instead).
      */
     static std::vector<std::uint8_t>
     DeriveKeyMaterial(std::span<const std::uint8_t> master_secret,

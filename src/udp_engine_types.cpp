@@ -7,6 +7,7 @@
 #include "openvpn/crypto_algorithms.h"
 #include "openvpn/crypto_log.h"
 #include "openvpn/crypto_context.h"
+#include "openvpn/data_v2_decrypt.h"
 #include "openvpn/data_v2_encrypt.h"
 #include "openvpn/packet.h"
 #include "openvpn/protocol_constants.h"
@@ -194,113 +195,18 @@ void RxDecryptState::ApplySnapshot(const RxDecryptSnapshot &snap)
 
 std::span<std::uint8_t> RxDecryptState::DecryptPacketInPlace(std::span<std::uint8_t> buf)
 {
-    using namespace openvpn;
-
-    if (buf.size() < kDataV2Overhead)
-        return {};
-
-    // Parse opcode and key_id from first byte
-    std::uint8_t opcode_byte = buf[0];
-    auto opcode = static_cast<Opcode>(opcode_byte >> OPCODE_SHIFT);
-    std::uint8_t pkt_key_id = opcode_byte & KEY_ID_MASK;
-
-    if (!IsDataPacket(opcode))
-        return {};
-
-    // Find matching decrypt slot
-    DecryptKeySlot *slot = nullptr;
-    if (primary.key.is_valid && primary.key.key_id == pkt_key_id)
-    {
-        slot = &primary;
-    }
-    else if (lame_duck && lame_duck->key.is_valid && lame_duck->key.key_id == pkt_key_id)
-    {
-        slot = &*lame_duck;
-    }
-
-    if (!slot)
-    {
-        auto now = std::chrono::steady_clock::now();
-        if (no_key_limiter.Due(now) && logger)
-            logger->warn("RxDecryptState: no key found for key_id {}", pkt_key_id);
-        return {};
-    }
-
-    if (!openvpn::IsSupportedAead(slot->key.cipher_algorithm) || !slot->decrypt_ctx)
-        return {};
-
-    // Extract packet_id from [4..8) (big-endian)
-    std::uint32_t pkt_id = (static_cast<std::uint32_t>(buf[4]) << 24)
-                           | (static_cast<std::uint32_t>(buf[5]) << 16)
-                           | (static_cast<std::uint32_t>(buf[6]) << 8)
-                           | static_cast<std::uint32_t>(buf[7]);
-
-    // Anti-replay
-    auto replay_check = slot->replay.Check(pkt_id);
-    if (replay_check == ReplayWindow::CheckResult::TooOld)
-    {
-        auto now = std::chrono::steady_clock::now();
-        if (too_old_limiter.Due(now) && logger)
-            logger->warn("RxDecryptState: packet_id {} too old (highest={})", pkt_id, slot->replay.highest_id());
-        replayed_packets++;
-        return {};
-    }
-    if (replay_check == ReplayWindow::CheckResult::Duplicate)
-    {
-        replayed_packets++;
-        return {};
-    }
-
-    // Nonce: packet_id (4 BE) || cipher_iv salt (8)
-    auto nonce = openvpn::GenerateLegacyDataV2Nonce(pkt_id, slot->key.cipher_iv);
-
-    // AAD = first 8 bytes
-    auto aad = buf.subspan(0, kDataV2HeaderLen + kDataV2PacketIdLen);
-
-    // Tag at [8..24)
-    std::span<const std::uint8_t, OpenSSL::AEAD_TAG_LENGTH> tag{
-        buf.data() + kDataV2HeaderLen + kDataV2PacketIdLen, kDataV2TagLen};
-
-    // Ciphertext at [24..end)
-    std::size_t ct_len = buf.size() - kDataV2Overhead;
-    auto ct_span = buf.subspan(kDataV2Overhead, ct_len);
-
-    try
-    {
-        slot->decrypt_ctx->SetDecryptNonce(nonce);
-        slot->decrypt_ctx->UpdateDecryptAad(aad);
-        slot->decrypt_ctx->UpdateDecryptInPlace(ct_span);
-        bool ok = slot->decrypt_ctx->FinalizeDecryptCheck(tag);
-
-        if (!ok)
-        {
-            if (logger)
-            {
-                auto now = std::chrono::steady_clock::now();
-                if (auth_fail_limiter.Due(now))
-                {
-                    auto suppressed = auth_fail_limiter.SuppressedCount();
-                    logger->error("RxDecryptState: authentication failed (tag mismatch) pkt_key_id={} slot_key_id={} is_lame_duck={} current_key_id={} slot_key_fp={} (+{} suppressed)",
-                                  pkt_key_id,
-                                  slot->key.key_id,
-                                  slot != &primary,
-                                  current_key_id,
-                                  openvpn::KeyMaterialFingerprint(slot->key.cipher_key),
-                                  suppressed);
-                }
-            }
-            return {};
-        }
-
-        slot->replay.Accept(pkt_id);
-        return ct_span;
-    }
-    catch (const OpenSSL::SslException &e)
-    {
-        if (logger)
-            logger->error("RxDecryptState: AEAD decryption failed: {}", e.what());
-        return {};
-    }
+    return openvpn::DecryptDataV2InPlace({&primary, lame_duck ? &*lame_duck : nullptr},
+                                         buf,
+                                         {.logger = logger,
+                                          .no_key_limiter = &no_key_limiter,
+                                          .too_old_limiter = &too_old_limiter,
+                                          .auth_fail_limiter = &auth_fail_limiter,
+                                          .replayed_packets = &replayed_packets,
+                                          .log_prefix = "RxDecryptState",
+                                          .warn_on_duplicate_replay = false,
+                                          .log_packet_too_small = false,
+                                          .log_not_data_packet = false,
+                                          .log_unsupported_cipher = false});
 }
 
 // ============================================================================

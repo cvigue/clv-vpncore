@@ -8,6 +8,7 @@
 #include "openvpn/crypto_log.h"
 #include "openvpn/crypto_algorithms.h"
 #include "openvpn/crypto_context_limits.h"
+#include "openvpn/data_v2_decrypt.h"
 #include "openvpn/data_v2_encrypt.h"
 #include "openvpn/data_v2_wire.h"
 #include "openvpn/packet.h"
@@ -152,7 +153,7 @@ std::optional<std::uint32_t> CryptoContext::AllocateOutboundPacketId() noexcept
 }
 
 void CryptoContext::RecordOutboundEncrypt(std::size_t plaintext_len,
-                                        CipherAlgorithm cipher) noexcept
+                                          CipherAlgorithm cipher) noexcept
 {
     if (!IsLegacyAeadUsageLimited(cipher))
         return;
@@ -190,7 +191,7 @@ bool CryptoContext::IsOutboundEncryptBlocked() const noexcept
 // ============================================================================
 
 std::vector<std::uint8_t> CryptoContext::EncryptPacket(std::span<const std::uint8_t> plaintext,
-                                                     SessionId session_id)
+                                                       SessionId session_id)
 {
     if (!primary_encrypt_.is_valid || IsOutboundEncryptBlocked())
         return {};
@@ -203,8 +204,8 @@ std::vector<std::uint8_t> CryptoContext::EncryptPacket(std::span<const std::uint
 }
 
 std::vector<std::uint8_t> CryptoContext::EncryptPacketWithId(std::span<const std::uint8_t> plaintext,
-                                                           SessionId session_id,
-                                                           std::uint32_t packet_id)
+                                                             SessionId session_id,
+                                                             std::uint32_t packet_id)
 {
     if (!primary_encrypt_.is_valid || IsOutboundEncryptBlocked())
         return {};
@@ -268,9 +269,9 @@ std::vector<std::uint8_t> CryptoContext::EncryptPacketWithId(std::span<const std
 // ============================================================================
 
 std::size_t CryptoContext::EncryptPacketInPlaceWithId(std::span<std::uint8_t> buf,
-                                                    std::size_t payload_len,
-                                                    SessionId session_id,
-                                                    std::uint32_t packet_id)
+                                                      std::size_t payload_len,
+                                                      SessionId session_id,
+                                                      std::uint32_t packet_id)
 {
     if (!primary_encrypt_.is_valid || IsOutboundEncryptBlocked())
         return 0;
@@ -297,8 +298,8 @@ std::size_t CryptoContext::EncryptPacketInPlaceWithId(std::span<std::uint8_t> bu
 }
 
 std::size_t CryptoContext::EncryptPacketInPlace(std::span<std::uint8_t> buf,
-                                              std::size_t payload_len,
-                                              SessionId session_id)
+                                                std::size_t payload_len,
+                                                SessionId session_id)
 {
     if (!primary_encrypt_.is_valid || IsOutboundEncryptBlocked())
         return 0;
@@ -321,112 +322,17 @@ std::size_t CryptoContext::EncryptPacketInPlace(std::span<std::uint8_t> buf,
 
 std::span<std::uint8_t> CryptoContext::DecryptPacketInPlace(std::span<std::uint8_t> buf)
 {
-    if (buf.size() < kDataV2Overhead)
-    {
-        logger_->warn("DecryptPacketInPlace: packet too small ({} bytes)", buf.size());
-        return {};
-    }
-
-    // Parse opcode and key_id from first byte
-    std::uint8_t opcode_byte = buf[0];
-    auto opcode = static_cast<Opcode>(opcode_byte >> OPCODE_SHIFT);
-    std::uint8_t key_id = opcode_byte & KEY_ID_MASK;
-
-    if (!IsDataPacket(opcode))
-    {
-        logger_->debug("DecryptPacketInPlace: not a data packet (opcode={})", static_cast<int>(opcode));
-        return {};
-    }
-
-    // Find the decryption slot matching the packet's key_id
-    DecryptKeySlot *slot = FindDecryptSlot(key_id);
-    if (!slot)
-    {
-        auto now = std::chrono::steady_clock::now();
-        if (no_key_limiter_.Due(now))
-            logger_->warn("DecryptPacketInPlace: no key found for key_id {} (primary valid={}, primary key_id={})",
-                          key_id,
-                          primary_decrypt_.key.is_valid,
-                          primary_decrypt_.key.key_id);
-        return {};
-    }
-
-    const EncryptionKey &key = slot->key;
-
-    if (!IsSupportedAead(key.cipher_algorithm) || !slot->decrypt_ctx)
-    {
-        logger_->error("DecryptPacketInPlace: unsupported cipher or missing context (cipher={})",
-                       static_cast<int>(key.cipher_algorithm));
-        return {};
-    }
-
-    // Extract packet_id from [4..8) (big-endian)
-    std::uint32_t pkt_id = (static_cast<std::uint32_t>(buf[4]) << 24)
-                           | (static_cast<std::uint32_t>(buf[5]) << 16)
-                           | (static_cast<std::uint32_t>(buf[6]) << 8)
-                           | static_cast<std::uint32_t>(buf[7]);
-
-    // Anti-replay validation
-    auto replay_check = slot->replay.Check(pkt_id);
-    if (replay_check == ReplayWindow::CheckResult::TooOld)
-    {
-        auto now = std::chrono::steady_clock::now();
-        if (too_old_limiter_.Due(now))
-            logger_->warn("DecryptPacketInPlace: packet_id {} too old (highest={})", pkt_id, slot->replay.highest_id());
-        replayed_packets_++;
-        return {};
-    }
-    if (replay_check == ReplayWindow::CheckResult::Duplicate)
-    {
-        logger_->warn("DecryptPacketInPlace: replay detected (packet_id={})", pkt_id);
-        replayed_packets_++;
-        return {};
-    }
-
-    // Generate nonce
-    auto nonce = GenerateNonce(pkt_id, key);
-
-    // AAD = first 8 bytes of wire packet
-    auto aad = buf.subspan(0, kDataV2HeaderLen + kDataV2PacketIdLen);
-
-    // Tag is at [8..24)
-    std::span<const std::uint8_t, OpenSSL::AEAD_TAG_LENGTH> tag{buf.data() + kDataV2HeaderLen + kDataV2PacketIdLen,
-                                                                kDataV2TagLen};
-
-    // Ciphertext is at [24..end)
-    std::size_t ct_len = buf.size() - kDataV2Overhead;
-    auto ct_span = buf.subspan(kDataV2Overhead, ct_len);
-
-    try
-    {
-        // Decrypt ciphertext at [24..end) in-place via persistent context
-        slot->decrypt_ctx->SetDecryptNonce(nonce);
-        slot->decrypt_ctx->UpdateDecryptAad(aad);
-        slot->decrypt_ctx->UpdateDecryptInPlace(ct_span);
-        bool ok = slot->decrypt_ctx->FinalizeDecryptCheck(tag);
-
-        if (!ok)
-        {
-            logger_->error("DecryptPacketInPlace: authentication failed (tag mismatch)");
-            logger_->error("  pkt_id={} key_id={} cipher={} buf_size={}",
-                           pkt_id,
-                           key_id,
-                           static_cast<int>(key.cipher_algorithm),
-                           buf.size());
-            return {};
-        }
-
-        // Update anti-replay window after successful decryption
-        slot->replay.Accept(pkt_id);
-
-        // Plaintext is now at [kDataV2Overhead..kDataV2Overhead+ct_len)
-        return ct_span;
-    }
-    catch (const OpenSSL::SslException &e)
-    {
-        logger_->error("DecryptPacketInPlace: AEAD decryption failed: {}", e.what());
-        return {};
-    }
+    return DecryptDataV2InPlace({&primary_decrypt_, lame_duck_decrypt_ ? &*lame_duck_decrypt_ : nullptr},
+                                buf,
+                                {.logger = logger_.get(),
+                                 .no_key_limiter = &no_key_limiter_,
+                                 .too_old_limiter = &too_old_limiter_,
+                                 .replayed_packets = &replayed_packets_,
+                                 .log_prefix = "DecryptPacketInPlace",
+                                 .warn_on_duplicate_replay = true,
+                                 .log_packet_too_small = true,
+                                 .log_not_data_packet = true,
+                                 .log_unsupported_cipher = true});
 }
 
 // Zero-copy arena path uses DecryptPacketInPlace above.  This allocating path
@@ -572,7 +478,7 @@ std::vector<std::uint8_t> CryptoContext::DecryptPacket(const OpenVpnPacket &pack
 }
 
 std::array<std::uint8_t, 12> CryptoContext::GenerateNonce(std::uint32_t packet_id,
-                                                        const EncryptionKey &key)
+                                                          const EncryptionKey &key)
 {
     if (key.IsAead() && key.cipher_iv.size() < 8)
     {
@@ -584,20 +490,20 @@ std::array<std::uint8_t, 12> CryptoContext::GenerateNonce(std::uint32_t packet_i
 }
 
 std::vector<std::uint8_t> CryptoContext::ComputeHmac(const EncryptionKey &key,
-                                                   std::span<const std::uint8_t> packet_data)
+                                                     std::span<const std::uint8_t> packet_data)
 {
     return detail::ComputeHmac(key, packet_data);
 }
 
 bool CryptoContext::VerifyHmac(const EncryptionKey &key, std::span<const std::uint8_t> packet_data,
-                             std::span<const std::uint8_t> expected_hmac)
+                               std::span<const std::uint8_t> expected_hmac)
 {
     return detail::VerifyHmac(key, packet_data, expected_hmac);
 }
 
 void CryptoContext::InstallNewKeys(const EncryptionKey &decrypt_key,
-                                 const EncryptionKey &encrypt_key,
-                                 std::uint8_t new_key_id)
+                                   const EncryptionKey &encrypt_key,
+                                   std::uint8_t new_key_id)
 {
     // If we have a valid primary key, move it to lame duck
     if (primary_decrypt_.key.is_valid)

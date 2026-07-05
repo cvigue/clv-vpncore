@@ -12,6 +12,7 @@
  * socket creation, send, and ACK handling.
  */
 
+#include <numeric_util.h>
 #include <util/netlink_helper.h>
 
 #include <arpa/inet.h>
@@ -263,7 +264,11 @@ inline std::vector<std::string> QueryRoutes(int family)
         if (nbytes <= 0)
             break;
 
-        int remaining = static_cast<int>(nbytes);
+        // Guard ssize_t → int narrowing for NLMSG_OK arithmetic (H4)
+        auto remaining_opt = clv::checked_cast<int>(nbytes);
+        if (!remaining_opt)
+            break;
+        int remaining = *remaining_opt;
         bool done = false;
 
         for (auto *nlh = reinterpret_cast<struct nlmsghdr *>(buf);

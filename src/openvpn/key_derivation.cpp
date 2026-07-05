@@ -314,14 +314,14 @@ bool KeyDerivation::InstallKeys(CryptoContext &crypto_context,
         if (role == PeerRole::Server)
         {
             crypto_context.InstallNewKeys(client_to_server, // decrypt
-                                        server_to_client, // encrypt
-                                        key_id);
+                                          server_to_client, // encrypt
+                                          key_id);
         }
         else
         {
             crypto_context.InstallNewKeys(server_to_client, // decrypt
-                                        client_to_server, // encrypt
-                                        key_id);
+                                          client_to_server, // encrypt
+                                          key_id);
         }
 
         return true;

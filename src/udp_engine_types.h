@@ -4,6 +4,7 @@
 #define CLV_VPN_UDP_ENGINE_TYPES_H
 
 #include "HelpSslCipher.h"
+#include "openvpn/crypto_algorithms.h"
 #include "openvpn/crypto_context.h"
 #include "openvpn/packet.h"
 #include "routing_table.h"
@@ -93,9 +94,9 @@ struct SessionIndex
  */
 struct TxEncryptState
 {
+    openvpn::CipherAlgorithm cipher_algorithm = openvpn::CipherAlgorithm::NONE;
     std::optional<clv::OpenSSL::SslCipherCtx> encrypt_ctx; ///< Persistent AEAD context
     std::uint8_t current_key_id = 0;                       ///< Last-applied key_id
-    openvpn::CipherAlgorithm cipher_algorithm = openvpn::CipherAlgorithm::NONE;
     std::vector<std::uint8_t> cipher_iv;                   ///< Cached IV salt for nonce generation
     bool valid = false;                                    ///< True after first ApplySnapshot
 

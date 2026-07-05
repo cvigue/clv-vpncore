@@ -3,45 +3,367 @@
 #include "openvpn/ovpn_config_parser.h"
 
 #include <ci_string.h>
+#include <config_io.h>
+#include <parse_intake.h>
+
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
-#include <exception>
 #include <filesystem>
-#include <fstream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
-#include <system_error>
 #include <utility>
 #include <variant>
 #include <vector>
 
 namespace clv::vpn {
 
+namespace {
+
+constexpr int kIntMax = std::numeric_limits<int>::max();
+
+[[nodiscard]] int ParseIntToken(const std::string &token,
+                                const char *directive,
+                                int min_value,
+                                int max_value)
+{
+    return clv::ParseBoundedOrThrow<int>(
+        token,
+        min_value,
+        max_value,
+        {.source = "OvpnConfigParser", .field = directive},
+        [](const std::string &msg)
+    { return std::runtime_error(msg); });
+}
+
+[[nodiscard]] std::string TrimString(const std::string &str)
+{
+    std::size_t start = 0;
+    std::size_t end = str.length();
+
+    while (start < end && std::isspace(static_cast<unsigned char>(str[start])))
+        ++start;
+    while (end > start && std::isspace(static_cast<unsigned char>(str[end - 1])))
+        --end;
+
+    return str.substr(start, end - start);
+}
+
+[[nodiscard]] std::string ReadOvpnSidecarFile(const std::string &path, const std::string &file_type)
+{
+    return config::ReadTextFile(path, OvpnConfigParser::kMaxInlineBlockBytes, file_type);
+}
+
+[[nodiscard]] std::vector<std::string> SplitColonList(const std::string &value)
+{
+    std::vector<std::string> parts;
+    std::size_t start = 0;
+    while (start <= value.size())
+    {
+        const std::size_t pos = value.find(':', start);
+        std::string token = (pos == std::string::npos) ? value.substr(start) : value.substr(start, pos - start);
+        token = TrimString(token);
+        if (!token.empty())
+            parts.push_back(token);
+        if (pos == std::string::npos)
+            break;
+        start = pos + 1;
+    }
+    return parts;
+}
+
+void RequireArgCount(const std::vector<std::string> &tokens,
+                     std::size_t min_count,
+                     const char *message)
+{
+    if (tokens.size() < min_count)
+        throw std::runtime_error(message);
+}
+
+void ApplyRemote(ClientConnectionConfig &config, const std::vector<std::string> &tokens)
+{
+    RequireArgCount(tokens, 2, "remote directive requires at least hostname");
+    config.remote.host = tokens[1];
+    if (tokens.size() > 2)
+        config.remote.port = static_cast<std::uint16_t>(ParseIntToken(tokens[2], "remote port", 1, 65535));
+    if (tokens.size() > 3)
+    {
+        clv::ci_string_view proto(tokens[3]);
+        if (proto == "udp")
+            config.remote.proto = "udp";
+        else if (proto == "tcp")
+            config.remote.proto = "tcp";
+        else
+            config.remote.proto = tokens[3];
+    }
+}
+
+void ApplyProto(ClientConnectionConfig &config, const std::vector<std::string> &tokens)
+{
+    RequireArgCount(tokens, 2, "proto directive requires protocol argument");
+    clv::ci_string_view proto(tokens[1]);
+    if (proto == "udp")
+        config.remote.proto = "udp";
+    else if (proto == "tcp")
+        config.remote.proto = "tcp";
+    else
+        config.remote.proto = tokens[1];
+}
+
+void ApplyDev(ClientConnectionConfig &config, const std::vector<std::string> &tokens)
+{
+    RequireArgCount(tokens, 2, "dev directive requires device type");
+    clv::ci_string_view dev(tokens[1]);
+    if (dev == "tun")
+        config.dev = "tun";
+    else if (dev == "tap")
+        config.dev = "tap";
+    else
+        config.dev = tokens[1];
+}
+
+void ApplyDevNode(ClientConnectionConfig &config, const std::vector<std::string> &tokens)
+{
+    RequireArgCount(tokens, 2, "dev-node directive requires path");
+    config.dev_node = tokens[1];
+}
+
+void ApplyCipher(ClientConnectionConfig &config, const std::vector<std::string> &tokens)
+{
+    RequireArgCount(tokens, 2, "cipher directive requires algorithm");
+    config.cipher = tokens[1];
+}
+
+void ApplyDataCiphers(ClientConnectionConfig &config, const std::vector<std::string> &tokens)
+{
+    RequireArgCount(tokens, 2, "data-ciphers directive requires at least one cipher");
+    config.data_ciphers = SplitColonList(tokens[1]);
+    if (config.data_ciphers.empty())
+        throw std::runtime_error("data-ciphers directive resolved to an empty list");
+}
+
+void ApplyAuth(ClientConnectionConfig &config, const std::vector<std::string> &tokens)
+{
+    RequireArgCount(tokens, 2, "auth directive requires algorithm");
+    config.auth = tokens[1];
+}
+
+void ApplyTlsCipher(ClientConnectionConfig &config, const std::vector<std::string> &tokens)
+{
+    RequireArgCount(tokens, 2, "tls-cipher directive requires cipher suite");
+    config.tls_cipher = tokens[1];
+}
+
+void ApplyClient(ClientConnectionConfig &config, const std::vector<std::string> & /*tokens*/)
+{
+    config.client_mode = true;
+}
+
+void ApplyNobind(ClientConnectionConfig &config, const std::vector<std::string> & /*tokens*/)
+{
+    config.nobind = true;
+}
+
+void ApplyPersistKey(ClientConnectionConfig &config, const std::vector<std::string> & /*tokens*/)
+{
+    config.persist_key = true;
+}
+
+void ApplyPersistTun(ClientConnectionConfig &config, const std::vector<std::string> & /*tokens*/)
+{
+    config.persist_tun = true;
+}
+
+void ApplyResolvRetry(ClientConnectionConfig &config, const std::vector<std::string> &tokens)
+{
+    if (tokens.size() > 1 && clv::ci_string_view(tokens[1]) == "infinite")
+        config.resolv_retry_infinite = true;
+}
+
+void ApplyKeepalive(ClientConnectionConfig &config, const std::vector<std::string> &tokens)
+{
+    RequireArgCount(tokens, 3, "keepalive directive requires interval and timeout");
+    config.keepalive_interval = ParseIntToken(tokens[1], "keepalive interval", 0, kIntMax);
+    config.keepalive_timeout = ParseIntToken(tokens[2], "keepalive timeout", 0, kIntMax);
+}
+
+void ApplyRenegSec(ClientConnectionConfig &config, const std::vector<std::string> &tokens)
+{
+    RequireArgCount(tokens, 2, "reneg-sec directive requires seconds");
+    config.reneg_seconds = ParseIntToken(tokens[1], "reneg-sec", 0, kIntMax);
+}
+
+void ApplyCompress(ClientConnectionConfig &config, const std::vector<std::string> &tokens)
+{
+    if (tokens.size() > 1)
+        config.compression = tokens[1];
+}
+
+void ApplyCompLzo(ClientConnectionConfig &config, const std::vector<std::string> & /*tokens*/)
+{
+    config.compression = "comp-lzo";
+}
+
+void ApplyVerb(ClientConnectionConfig &config, const std::vector<std::string> &tokens)
+{
+    RequireArgCount(tokens, 2, "verb directive requires level");
+    config.verbosity = ParseIntToken(tokens[1], "verb", 0, 11);
+}
+
+void ApplyDisableDco(ClientConnectionConfig &config, const std::vector<std::string> & /*tokens*/)
+{
+    config.disable_dco = true;
+}
+
+void ApplySndbuf(ClientConnectionConfig &config, const std::vector<std::string> &tokens)
+{
+    if (tokens.size() >= 2)
+        config.sndbuf = ParseIntToken(tokens[1], "sndbuf", 0, kIntMax);
+}
+
+void ApplyRcvbuf(ClientConnectionConfig &config, const std::vector<std::string> &tokens)
+{
+    if (tokens.size() >= 2)
+        config.rcvbuf = ParseIntToken(tokens[1], "rcvbuf", 0, kIntMax);
+}
+
+void ApplyStatsInterval(ClientConnectionConfig &config, const std::vector<std::string> &tokens)
+{
+    if (tokens.size() >= 2)
+        config.stats_interval = ParseIntToken(tokens[1], "stats-interval", 0, kIntMax);
+}
+
+void ApplyCa(ClientConnectionConfig &config, const std::vector<std::string> &tokens)
+{
+    RequireArgCount(tokens, 2, "ca directive requires file path");
+    config.ca_cert = ReadOvpnSidecarFile(tokens[1], "ca");
+}
+
+void ApplyCert(ClientConnectionConfig &config, const std::vector<std::string> &tokens)
+{
+    RequireArgCount(tokens, 2, "cert directive requires file path");
+    config.client_cert = ReadOvpnSidecarFile(tokens[1], "cert");
+}
+
+void ApplyKey(ClientConnectionConfig &config, const std::vector<std::string> &tokens)
+{
+    RequireArgCount(tokens, 2, "key directive requires file path");
+    config.client_key = ReadOvpnSidecarFile(tokens[1], "key");
+}
+
+void ApplyTlsAuth(ClientConnectionConfig &config, const std::vector<std::string> &tokens)
+{
+    RequireArgCount(tokens, 2, "tls-auth directive requires file path");
+    config.tls_auth = ReadOvpnSidecarFile(tokens[1], "tls-auth");
+}
+
+void ApplyTlsCrypt(ClientConnectionConfig &config, const std::vector<std::string> &tokens)
+{
+    RequireArgCount(tokens, 2, "tls-crypt directive requires file path");
+    config.tls_crypt = ReadOvpnSidecarFile(tokens[1], "tls-crypt");
+}
+
+void ApplyRoute(ClientConnectionConfig &config, const std::vector<std::string> &tokens)
+{
+    RequireArgCount(tokens, 3, "route directive requires network and netmask");
+    std::string route_str = tokens[1] + " " + tokens[2];
+    if (tokens.size() > 3)
+        route_str += " " + tokens[3];
+    config.routes.push_back(route_str);
+}
+
+void ApplyDhcpOption(ClientConnectionConfig &config, const std::vector<std::string> &tokens)
+{
+    if (tokens.size() < 3)
+        return;
+    const std::string &option_type = tokens[1];
+    if (option_type == "DNS")
+        config.dns_servers.push_back(tokens[2]);
+    else if (option_type == "DOMAIN")
+        config.dns_domain = tokens[2];
+}
+
+void ApplyConnectTimeout(ClientConnectionConfig &config, const std::vector<std::string> &tokens)
+{
+    RequireArgCount(tokens, 2, "connect-timeout directive requires seconds");
+    config.connect_timeout = ParseIntToken(tokens[1], "connect-timeout", 0, kIntMax);
+}
+
+void ApplyConnectRetry(ClientConnectionConfig &config, const std::vector<std::string> &tokens)
+{
+    RequireArgCount(tokens, 2, "connect-retry directive requires delay");
+    config.connect_retry_delay = ParseIntToken(tokens[1], "connect-retry", 0, kIntMax);
+}
+
+void ApplyConnectRetryMax(ClientConnectionConfig &config, const std::vector<std::string> &tokens)
+{
+    RequireArgCount(tokens, 2, "connect-retry-max directive requires max attempts");
+    config.connect_retry_max = ParseIntToken(tokens[1], "connect-retry-max", 0, kIntMax);
+}
+
+using OvpnApplyFn = void (*)(ClientConnectionConfig &, const std::vector<std::string> &);
+
+struct OvpnDirectiveSpec
+{
+    const char *keyword;
+    OvpnApplyFn apply;
+};
+
+// NOLINTBEGIN(cppcoreguidelines-avoid-c-arrays)
+constexpr OvpnDirectiveSpec kOvpnDirectives[] = {
+    {"remote", ApplyRemote},
+    {"proto", ApplyProto},
+    {"dev", ApplyDev},
+    {"dev-node", ApplyDevNode},
+    {"cipher", ApplyCipher},
+    {"data-ciphers", ApplyDataCiphers},
+    {"ncp-ciphers", ApplyDataCiphers},
+    {"auth", ApplyAuth},
+    {"tls-cipher", ApplyTlsCipher},
+    {"client", ApplyClient},
+    {"nobind", ApplyNobind},
+    {"persist-key", ApplyPersistKey},
+    {"persist-tun", ApplyPersistTun},
+    {"resolv-retry", ApplyResolvRetry},
+    {"keepalive", ApplyKeepalive},
+    {"reneg-sec", ApplyRenegSec},
+    {"compress", ApplyCompress},
+    {"comp-lzo", ApplyCompLzo},
+    {"verb", ApplyVerb},
+    {"disable-dco", ApplyDisableDco},
+    {"sndbuf", ApplySndbuf},
+    {"rcvbuf", ApplyRcvbuf},
+    {"stats-interval", ApplyStatsInterval},
+    {"ca", ApplyCa},
+    {"cert", ApplyCert},
+    {"key", ApplyKey},
+    {"tls-auth", ApplyTlsAuth},
+    {"tls-crypt", ApplyTlsCrypt},
+    {"route", ApplyRoute},
+    {"dhcp-option", ApplyDhcpOption},
+    {"connect-timeout", ApplyConnectTimeout},
+    {"connect-retry", ApplyConnectRetry},
+    {"connect-retry-max", ApplyConnectRetryMax},
+};
+// NOLINTEND(cppcoreguidelines-avoid-c-arrays)
+
+const OvpnDirectiveSpec *LookupDirective(clv::ci_string_view keyword)
+{
+    for (const auto &spec : kOvpnDirectives)
+    {
+        if (keyword == spec.keyword)
+            return &spec;
+    }
+    return nullptr;
+}
+
+} // namespace
+
 ClientConnectionConfig OvpnConfigParser::ParseFile(const std::filesystem::path &filepath)
 {
-    if (!std::filesystem::exists(filepath))
-    {
-        throw std::runtime_error("OvpnConfigParser: Config file not found: " + filepath.string());
-    }
-
-    std::error_code ec;
-    const auto fsize = std::filesystem::file_size(filepath, ec);
-    if (!ec && fsize > kMaxConfigBytes)
-    {
-        throw std::runtime_error("OvpnConfigParser: Config file too large: " + filepath.string());
-    }
-
-    std::ifstream file(filepath);
-    if (!file.is_open())
-    {
-        throw std::runtime_error("OvpnConfigParser: Cannot open config file: " + filepath.string());
-    }
-
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-    return ParseString(buffer.str());
+    return ParseString(config::ReadTextFile(filepath, kMaxConfigBytes, "OvpnConfigParser"));
 }
 
 ClientConnectionConfig OvpnConfigParser::ParseString(const std::string &content)
@@ -177,325 +499,13 @@ std::pair<std::string, size_t> OvpnConfigParser::ParseInlineBlock(
 
 void OvpnConfigParser::ParseDirective(const std::string &line, ClientConnectionConfig &config)
 {
-    std::vector<std::string> tokens = Tokenize(line);
+    const std::vector<std::string> tokens = Tokenize(line);
     if (tokens.empty())
-    {
         return;
-    }
 
-    clv::ci_string_view keyword(tokens[0]);
-
-    auto split_colon_list = [](const std::string &value)
-    {
-        std::vector<std::string> parts;
-        std::size_t start = 0;
-        while (start <= value.size())
-        {
-            std::size_t pos = value.find(':', start);
-            std::string token = (pos == std::string::npos)
-                                    ? value.substr(start)
-                                    : value.substr(start, pos - start);
-            token = Trim(token);
-            if (!token.empty())
-                parts.push_back(token);
-            if (pos == std::string::npos)
-                break;
-            start = pos + 1;
-        }
-        return parts;
-    };
-
-    // Remote directive: remote <host> [port] [proto]
-    if (keyword == "remote")
-    {
-        if (tokens.size() < 2)
-        {
-            throw std::runtime_error("remote directive requires at least hostname");
-        }
-        config.remote.host = tokens[1];
-        if (tokens.size() > 2)
-        {
-            int parsed_port = std::stoi(tokens[2]);
-            if (parsed_port < 1 || parsed_port > 65535)
-            {
-                throw std::runtime_error("remote port out of range: " + tokens[2]);
-            }
-            config.remote.port = static_cast<std::uint16_t>(parsed_port);
-        }
-        if (tokens.size() > 3)
-        {
-            clv::ci_string_view proto(tokens[3]);
-            if (proto == "udp")
-                config.remote.proto = "udp";
-            else if (proto == "tcp")
-                config.remote.proto = "tcp";
-            else
-                config.remote.proto = tokens[3];
-        }
-    }
-    // Proto directive: proto <udp|tcp>
-    else if (keyword == "proto")
-    {
-        if (tokens.size() < 2)
-        {
-            throw std::runtime_error("proto directive requires protocol argument");
-        }
-        clv::ci_string_view proto(tokens[1]);
-        if (proto == "udp")
-            config.remote.proto = "udp";
-        else if (proto == "tcp")
-            config.remote.proto = "tcp";
-        else
-            config.remote.proto = tokens[1];
-    }
-    // Device directive: dev <tun|tap>
-    else if (keyword == "dev")
-    {
-        if (tokens.size() < 2)
-        {
-            throw std::runtime_error("dev directive requires device type");
-        }
-        clv::ci_string_view dev(tokens[1]);
-        if (dev == "tun")
-            config.dev = "tun";
-        else if (dev == "tap")
-            config.dev = "tap";
-        else
-            config.dev = tokens[1];
-    }
-    // Device node: dev-node <path>
-    else if (keyword == "dev-node")
-    {
-        if (tokens.size() < 2)
-        {
-            throw std::runtime_error("dev-node directive requires path");
-        }
-        config.dev_node = tokens[1];
-    }
-    // Cipher directive: cipher <algorithm>
-    else if (keyword == "cipher")
-    {
-        if (tokens.size() < 2)
-        {
-            throw std::runtime_error("cipher directive requires algorithm");
-        }
-        config.cipher = tokens[1];
-    }
-    // NCP cipher list: data-ciphers <c1:c2:...> (OpenVPN 2.5+) or
-    // legacy alias ncp-ciphers <c1:c2:...>
-    else if (keyword == "data-ciphers" || keyword == "ncp-ciphers")
-    {
-        if (tokens.size() < 2)
-            throw std::runtime_error("data-ciphers directive requires at least one cipher");
-        config.data_ciphers = split_colon_list(tokens[1]);
-        if (config.data_ciphers.empty())
-            throw std::runtime_error("data-ciphers directive resolved to an empty list");
-    }
-    // Auth directive: auth <algorithm>
-    else if (keyword == "auth")
-    {
-        if (tokens.size() < 2)
-        {
-            throw std::runtime_error("auth directive requires algorithm");
-        }
-        config.auth = tokens[1];
-    }
-    // TLS cipher: tls-cipher <cipher-suite>
-    else if (keyword == "tls-cipher")
-    {
-        if (tokens.size() < 2)
-        {
-            throw std::runtime_error("tls-cipher directive requires cipher suite");
-        }
-        config.tls_cipher = tokens[1];
-    }
-    // Client mode
-    else if (keyword == "client")
-    {
-        config.client_mode = true;
-    }
-    // Connection behavior flags
-    else if (keyword == "nobind")
-    {
-        config.nobind = true;
-    }
-    else if (keyword == "persist-key")
-    {
-        config.persist_key = true;
-    }
-    else if (keyword == "persist-tun")
-    {
-        config.persist_tun = true;
-    }
-    else if (keyword == "resolv-retry")
-    {
-        if (tokens.size() > 1 && clv::ci_string_view(tokens[1]) == "infinite")
-        {
-            config.resolv_retry_infinite = true;
-        }
-    }
-    // Keepalive: keepalive <interval> <timeout>
-    else if (keyword == "keepalive")
-    {
-        if (tokens.size() < 3)
-        {
-            throw std::runtime_error("keepalive directive requires interval and timeout");
-        }
-        config.keepalive_interval = std::stoi(tokens[1]);
-        config.keepalive_timeout = std::stoi(tokens[2]);
-    }
-    // Renegotiation: reneg-sec <seconds>
-    else if (keyword == "reneg-sec")
-    {
-        if (tokens.size() < 2)
-        {
-            throw std::runtime_error("reneg-sec directive requires seconds");
-        }
-        config.reneg_seconds = std::stoi(tokens[1]);
-    }
-    // Compression directives
-    else if (keyword == "compress" || keyword == "comp-lzo")
-    {
-        if (keyword == "comp-lzo")
-        {
-            config.compression = "comp-lzo";
-        }
-        else if (tokens.size() > 1)
-        {
-            config.compression = tokens[1]; // e.g., "lz4-v2"
-        }
-    }
-    // Verbosity: verb <level>
-    else if (keyword == "verb")
-    {
-        if (tokens.size() < 2)
-        {
-            throw std::runtime_error("verb directive requires level");
-        }
-        config.verbosity = std::stoi(tokens[1]);
-    }
-    // DCO control
-    else if (keyword == "disable-dco")
-    {
-        config.disable_dco = true;
-    }
-    // Socket buffer sizes: sndbuf <bytes> / rcvbuf <bytes>
-    else if (keyword == "sndbuf")
-    {
-        if (tokens.size() >= 2)
-            config.sndbuf = std::stoi(tokens[1]);
-    }
-    else if (keyword == "rcvbuf")
-    {
-        if (tokens.size() >= 2)
-            config.rcvbuf = std::stoi(tokens[1]);
-    }
-    // Non-standard: stats-interval <seconds>
-    else if (keyword == "stats-interval")
-    {
-        if (tokens.size() >= 2)
-            config.stats_interval = std::stoi(tokens[1]);
-    }
-    // External certificate files
-    else if (keyword == "ca")
-    {
-        if (tokens.size() < 2)
-        {
-            throw std::runtime_error("ca directive requires file path");
-        }
-        config.ca_cert = ReadFile(tokens[1], "ca");
-    }
-    else if (keyword == "cert")
-    {
-        if (tokens.size() < 2)
-        {
-            throw std::runtime_error("cert directive requires file path");
-        }
-        config.client_cert = ReadFile(tokens[1], "cert");
-    }
-    else if (keyword == "key")
-    {
-        if (tokens.size() < 2)
-        {
-            throw std::runtime_error("key directive requires file path");
-        }
-        config.client_key = ReadFile(tokens[1], "key");
-    }
-    else if (keyword == "tls-auth")
-    {
-        if (tokens.size() < 2)
-        {
-            throw std::runtime_error("tls-auth directive requires file path");
-        }
-        config.tls_auth = ReadFile(tokens[1], "tls-auth");
-    }
-    else if (keyword == "tls-crypt")
-    {
-        if (tokens.size() < 2)
-        {
-            throw std::runtime_error("tls-crypt directive requires file path");
-        }
-        config.tls_crypt = ReadFile(tokens[1], "tls-crypt");
-    }
-    // Route: route <network> <netmask> [gateway]
-    else if (keyword == "route")
-    {
-        if (tokens.size() < 3)
-        {
-            throw std::runtime_error("route directive requires network and netmask");
-        }
-        std::string route_str = tokens[1] + " " + tokens[2];
-        if (tokens.size() > 3)
-        {
-            route_str += " " + tokens[3];
-        }
-        config.routes.push_back(route_str);
-    }
-    // DHCP options (DNS, domain, etc.)
-    else if (keyword == "dhcp-option")
-    {
-        if (tokens.size() < 3)
-        {
-            // Some dhcp-option may have different formats, skip for now
-            return;
-        }
-        std::string option_type = tokens[1];
-        if (option_type == "DNS")
-        {
-            config.dns_servers.push_back(tokens[2]);
-        }
-        else if (option_type == "DOMAIN")
-        {
-            config.dns_domain = tokens[2];
-        }
-    }
-    // Connect timeout
-    else if (keyword == "connect-timeout")
-    {
-        if (tokens.size() < 2)
-        {
-            throw std::runtime_error("connect-timeout directive requires seconds");
-        }
-        config.connect_timeout = std::stoi(tokens[1]);
-    }
-    // Connect retry
-    else if (keyword == "connect-retry")
-    {
-        if (tokens.size() < 2)
-        {
-            throw std::runtime_error("connect-retry directive requires delay");
-        }
-        config.connect_retry_delay = std::stoi(tokens[1]);
-    }
-    else if (keyword == "connect-retry-max")
-    {
-        if (tokens.size() < 2)
-        {
-            throw std::runtime_error("connect-retry-max directive requires max attempts");
-        }
-        config.connect_retry_max = std::stoi(tokens[1]);
-    }
-    // Ignore unknown directives (for forward compatibility)
+    const clv::ci_string_view keyword(tokens[0]);
+    if (const OvpnDirectiveSpec *spec = LookupDirective(keyword))
+        spec->apply(config, tokens);
 }
 
 void OvpnConfigParser::Validate(const ClientConnectionConfig &config)
@@ -577,20 +587,7 @@ bool OvpnConfigParser::IsCommentOrEmpty(const std::string &line)
 
 std::string OvpnConfigParser::ReadFile(const std::filesystem::path &file_path, const std::string &file_type)
 {
-    if (!std::filesystem::exists(file_path))
-    {
-        throw std::runtime_error(file_type + " file not found: " + file_path.string());
-    }
-
-    std::ifstream file(file_path);
-    if (!file.is_open())
-    {
-        throw std::runtime_error("Cannot open " + file_type + " file: " + file_path.string());
-    }
-
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-    return buffer.str();
+    return config::ReadTextFile(file_path, kMaxInlineBlockBytes, file_type);
 }
 
 } // namespace clv::vpn

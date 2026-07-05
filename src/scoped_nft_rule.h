@@ -7,6 +7,7 @@
 #include "platform/linux/nftables/nftables_client.h"
 
 #include <not_null.h>
+#include <scoped_ownership.h>
 #include <spdlog/logger.h>
 
 #include <cstdint>
@@ -94,8 +95,11 @@ struct IntraPoolDropNftPolicy
         family = target->family;
         nft.Open();
 
-        if (!nft.EnsureIntraPoolDrop(family, ifname.c_str(), target->network.data(),
-                                     target->prefix_len, target->bridge_ip.data()))
+        if (!nft.EnsureIntraPoolDrop(family,
+                                     ifname.c_str(),
+                                     target->network.data(),
+                                     target->prefix_len,
+                                     target->bridge_ip.data()))
         {
             throw std::runtime_error("ScopedNftIntraPoolDrop: nftables transaction failed for "
                                      + ifname + " " + pool_cidr);
@@ -141,7 +145,7 @@ class ScopedNftRule
 
     ~ScopedNftRule() noexcept
     {
-        if (owns_)
+        if (ownership_.owns())
             Policy::Remove(nft_, logger_, family_, log_context_);
     }
 
@@ -150,24 +154,22 @@ class ScopedNftRule
           nft_(std::move(other.nft_)),
           log_context_(std::move(other.log_context_)),
           family_(other.family_),
-          owns_(other.owns_)
+          ownership_(std::move(other.ownership_))
     {
-        other.owns_ = false;
     }
 
     ScopedNftRule &operator=(ScopedNftRule &&other) noexcept
     {
         if (this != &other)
         {
-            if (owns_)
+            if (ownership_.owns())
                 Policy::Remove(nft_, logger_, family_, log_context_);
 
             logger_ = other.logger_;
             nft_ = std::move(other.nft_);
             log_context_ = std::move(other.log_context_);
             family_ = other.family_;
-            owns_ = other.owns_;
-            other.owns_ = false;
+            ownership_ = std::move(other.ownership_);
         }
         return *this;
     }
@@ -177,7 +179,7 @@ class ScopedNftRule
     NfTablesClient nft_;
     std::string log_context_;
     std::uint8_t family_ = 0;
-    bool owns_ = false;
+    clv::ScopedOwnership ownership_;
 
     ScopedNftRule(not_null<spdlog::logger *> logger, std::string log_context)
         : logger_(logger),
@@ -192,7 +194,9 @@ class ScopedMasquerade : public ScopedNftRule<MasqueradeNftPolicy>
     ScopedMasquerade(const std::string &source_cidr, spdlog::logger &logger)
         : ScopedNftRule<MasqueradeNftPolicy>(not_null{&logger}, source_cidr)
     {
-        MasqueradeNftPolicy::Install(nft_, logger_, owns_, family_, source_cidr);
+        bool owns = ownership_.owns();
+        MasqueradeNftPolicy::Install(nft_, logger_, owns, family_, source_cidr);
+        ownership_.set_owns(owns);
     }
 };
 
@@ -205,7 +209,9 @@ class ScopedNftIntraPoolDrop : public ScopedNftRule<IntraPoolDropNftPolicy>
                            spdlog::logger &logger)
         : ScopedNftRule<IntraPoolDropNftPolicy>(not_null{&logger}, pool_cidr + " on " + ifname)
     {
-        IntraPoolDropNftPolicy::Install(nft_, logger_, owns_, family_, ifname, pool_cidr, bridge_ip);
+        bool owns = ownership_.owns();
+        IntraPoolDropNftPolicy::Install(nft_, logger_, owns, family_, ifname, pool_cidr, bridge_ip);
+        ownership_.set_owns(owns);
     }
 };
 

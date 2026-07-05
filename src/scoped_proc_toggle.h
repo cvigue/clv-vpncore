@@ -4,6 +4,7 @@
 #define CLV_VPN_SCOPED_PROC_TOGGLE_H
 
 #include <not_null.h>
+#include <scoped_ownership.h>
 
 #include <spdlog/logger.h>
 
@@ -102,7 +103,7 @@ class ScopedProcToggle
                 std::string("Failed to enable ") + Policy::label);
         }
 
-        owns_ = true;
+        ownership_.set_owns(true);
         logger_->info("{} enabled (was disabled, will restore on shutdown)", Policy::label);
     }
 
@@ -111,25 +112,7 @@ class ScopedProcToggle
      */
     ~ScopedProcToggle() noexcept
     {
-        if (!owns_)
-        {
-            return;
-        }
-
-        try
-        {
-            std::ofstream out(Policy::proc_path);
-            if (out.is_open())
-            {
-                out << "0";
-                out.flush();
-                logger_->info("{} restored to disabled", Policy::label);
-            }
-        }
-        catch (...)
-        {
-            // Destructor must not throw
-        }
+        Revert();
     }
 
     // Non-copyable
@@ -139,39 +122,54 @@ class ScopedProcToggle
     // Movable
     ScopedProcToggle(ScopedProcToggle &&other) noexcept
         : logger_(other.logger_),
-          owns_(other.owns_)
+          ownership_(std::move(other.ownership_))
     {
-        other.owns_ = false;
     }
 
     ScopedProcToggle &operator=(ScopedProcToggle &&other) noexcept
     {
         if (this != &other)
         {
-            // Revert our current state if we own it
-            if (owns_)
-            {
-                try
-                {
-                    std::ofstream out(Policy::proc_path);
-                    if (out.is_open())
-                        out << "0";
-                }
-                catch (...)
-                {
-                }
-            }
-
+            Revert();
             logger_ = other.logger_;
-            owns_ = other.owns_;
-            other.owns_ = false;
+            ownership_ = std::move(other.ownership_);
         }
         return *this;
     }
 
   private:
+    /** Restore the toggle to disabled if this instance owns it (noexcept). */
+    void Revert() noexcept
+    {
+        if (!ownership_.owns())
+            return;
+        ownership_.release();
+
+        try
+        {
+            std::ofstream out(Policy::proc_path);
+            if (!out.is_open())
+            {
+                logger_->warn("Cannot open {} to restore {}", Policy::proc_path, Policy::label);
+                return;
+            }
+            out << "0";
+            out.flush();
+            if (!out.good())
+            {
+                logger_->warn("Failed to restore {} to disabled", Policy::label);
+                return;
+            }
+            logger_->info("{} restored to disabled", Policy::label);
+        }
+        catch (...)
+        {
+            // Must not throw (used from destructor / move-assign)
+        }
+    }
+
     not_null<spdlog::logger *> logger_;
-    bool owns_ = false; ///< Whether this instance enabled the toggle (and must restore it)
+    clv::ScopedOwnership ownership_;
 };
 
 // ---------------------------------------------------------------------------

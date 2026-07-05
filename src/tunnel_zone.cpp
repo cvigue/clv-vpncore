@@ -1,8 +1,13 @@
 // Copyright (c) 2026- Charlie Vigue. All rights reserved.
 
 #include "tunnel_zone.h"
+#include "scoped_nft_rule.h"
+#include "traffic_policy.h"
 
+#include <cstddef>
+#include <optional>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 namespace clv::vpn {
@@ -39,9 +44,9 @@ void TunnelZone::InstallHubKernelPolicy(HubAttachmentState &state)
             spec.pool_v4,
             spec.pool_v6,
             [&](const TunnelPool &pool)
-            {
-                return ScopedMasquerade(pool.cidr, logger_);
-            });
+        {
+            return ScopedMasquerade(pool.cidr, logger_);
+        });
     }
 
     if (!spec.client_to_client)
@@ -50,12 +55,12 @@ void TunnelZone::InstallHubKernelPolicy(HubAttachmentState &state)
             spec.pool_v4,
             spec.pool_v6,
             [&](const TunnelPool &pool)
-            {
-                return ScopedNftIntraPoolDrop(spec.data_dev,
-                                              pool.cidr,
-                                              pool.bridge_ip,
-                                              logger_);
-            });
+        {
+            return ScopedNftIntraPoolDrop(spec.data_dev,
+                                          pool.cidr,
+                                          pool.bridge_ip,
+                                          logger_);
+        });
     }
 }
 
