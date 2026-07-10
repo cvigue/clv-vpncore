@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 #include <spdlog/sinks/null_sink.h>
 #include <spdlog/spdlog.h>
+#include <util/byte_packer.h>
 
 #include <algorithm>
 #include <arpa/inet.h>
@@ -79,10 +80,9 @@ class TlsCryptV2Test : public ::testing::Test
     {
         std::vector<std::uint8_t> meta;
         meta.push_back(TLS_CRYPT_METADATA_TYPE_TIMESTAMP);
-        auto now = static_cast<std::int64_t>(std::time(nullptr));
-        // big-endian
-        for (int i = 7; i >= 0; --i)
-            meta.push_back(static_cast<std::uint8_t>((now >> (i * 8)) & 0xFF));
+        auto now = static_cast<std::uint64_t>(std::time(nullptr));
+        auto ts_bytes = clv::netcore::uint_to_bytes(now);
+        meta.insert(meta.end(), ts_bytes.begin(), ts_bytes.end());
         return meta;
     }
 
@@ -512,7 +512,8 @@ TEST_F(TlsCryptV2Test, SessionCrypt_DifferentKcCannotCrossDecrypt)
     ASSERT_TRUE(wrapped);
 
     // Unwrapping with different key should fail HMAC
-    auto unwrapped = crypt2->Unwrap(*wrapped, true);
+    TlsCryptReplayState replay;
+    auto unwrapped = crypt2->Unwrap(*wrapped, true, replay);
     EXPECT_FALSE(unwrapped.has_value());
 }
 

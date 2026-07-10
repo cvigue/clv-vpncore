@@ -240,6 +240,7 @@ class ClientControlAdapter
     std::optional<openvpn::ControlChannel> control_channel_; ///< TLS + reliability layer for control messages
     std::optional<openvpn::CryptoContext> crypto_context_;   ///< Symmetric-key encrypt/decrypt for data packets
     std::optional<openvpn::TlsCrypt> tls_crypt_;             ///< TLS-Crypt HMAC wrapper (V1 or V2 client key)
+    openvpn::TlsCryptReplayState tls_crypt_replay_;          ///< Inbound tls-crypt anti-replay (single session)
     std::vector<std::uint8_t> tls_crypt_v2_wkc_;             ///< TLS-Crypt-V2 wrapped-client-key blob appended to HARD_RESET
     openvpn::ConfigExchange config_exchange_;                ///< PUSH_REQUEST / PUSH_REPLY negotiated-config state
 
@@ -458,6 +459,7 @@ void ClientControlAdapter<Derived>::Disconnect()
     if (control_channel_)
         control_channel_->Reset();
     tls_crypt_.reset();
+    tls_crypt_replay_.Reset();
 
     client_random_.clear();
     server_random_.clear();
@@ -633,7 +635,7 @@ asio::awaitable<void> ClientControlAdapter<Derived>::ProcessServerPacket(std::ve
 
     TouchLastRx();
 
-    auto packet = UnwrapAndParse(data, tls_crypt_, openvpn::PeerRole::Client, *logger_);
+    auto packet = UnwrapAndParse(data, tls_crypt_, openvpn::PeerRole::Client, *logger_, tls_crypt_replay_);
     if (!packet)
         co_return;
 

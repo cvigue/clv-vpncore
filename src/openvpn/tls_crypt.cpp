@@ -33,7 +33,7 @@ namespace {
 constexpr size_t OPENVPN_KEY_SIZE = 256;
 constexpr size_t TLS_CRYPT_KEY_SIZE = 32;      // 256 bits
 constexpr size_t TLS_CRYPT_TAG_SIZE = 32;      // HMAC-SHA256
-constexpr size_t TLS_CRYPT_PACKET_ID_SIZE = 8; // 4-byte timestamp + 4-byte counter
+constexpr size_t TLS_CRYPT_PACKET_ID_SIZE = 8; // 4-byte counter + 4-byte timestamp
 
 /**
  * Parse hex-encoded key data from a sequence of lines.
@@ -197,7 +197,8 @@ std::optional<TlsCrypt> TlsCrypt::FromKeyData(std::span<const std::uint8_t> key_
 }
 
 std::optional<std::vector<std::uint8_t>> TlsCrypt::Unwrap(std::span<const std::uint8_t> wrapped,
-                                                          bool server_mode)
+                                                          bool server_mode,
+                                                          TlsCryptReplayState &replay)
 {
     // OpenVPN tls-crypt wire format:
     // [opcode:1] [session_id:8] [packet_id:8] [hmac:32] [ciphertext]
@@ -296,32 +297,20 @@ std::optional<std::vector<std::uint8_t>> TlsCrypt::Unwrap(std::span<const std::u
         return std::nullopt;
     }
 
-    // Validate packet ID (replay protection for TLS-Crypt wrapper)
-    // packet_id is at header bytes 9-16 (after opcode and session_id)
-    std::uint64_t packet_id = 0;
-    for (size_t i = 0; i < TLS_CRYPT_PACKET_ID_SIZE; ++i)
-    {
-        packet_id = (packet_id << 8) | header[1 + SESSION_ID_SIZE + i];
-    }
+    // Validate packet ID (replay protection for TLS-Crypt wrapper).
+    // packet_id is at header bytes 9-16: [4-byte counter][4-byte timestamp].
+    // Sliding window tracks the 32-bit counter only (TlsCryptReplayState).
+    const std::uint64_t packet_id = netcore::read_uint<8>(
+        std::span<const std::uint8_t>(header).subspan(1 + SESSION_ID_SIZE, TLS_CRYPT_PACKET_ID_SIZE));
 
-    // Extract session_id for per-session replay protection
-    std::uint64_t session_id = 0;
-    for (size_t i = 0; i < SESSION_ID_SIZE; ++i)
+    if (!replay.CheckAndAccept(packet_id))
     {
-        session_id = (session_id << 8) | header[1 + i];
-    }
-
-    // Check replay per-session
-    auto &last_packet_id = session_packet_ids_[session_id];
-    if (packet_id <= last_packet_id)
-    {
-        logger_->warn("Replay attack detected: session {:016x} tls_crypt packet_id {} <= {}",
-                      session_id,
-                      packet_id,
-                      last_packet_id);
+        const auto counter = static_cast<std::uint32_t>(packet_id >> 32);
+        logger_->warn("Replay attack detected: tls_crypt counter {} (highest {})",
+                      counter,
+                      replay.highest());
         return std::nullopt;
     }
-    last_packet_id = packet_id;
 
     // Return: [opcode] [session_id] [plaintext]
     // The tls_crypt packet_id is NOT included - it's only for wrapper replay protection

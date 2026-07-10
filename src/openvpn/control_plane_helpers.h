@@ -182,13 +182,15 @@ DeriveDataChannelKeys(openvpn::ControlChannel &control_channel,
  * @param tls_crypt  TLS-Crypt instance (may be nullopt if not configured).
  * @param role       Caller's peer role (Server or Client).
  * @param logger     Logger for diagnostics.
+ * @param replay     Session-scoped tls-crypt anti-replay state (required when tls_crypt is set).
  * @return Parsed OpenVpnPacket on success, or std::nullopt on error.
  */
 std::optional<openvpn::OpenVpnPacket> UnwrapAndParse(
     std::vector<std::uint8_t> &data,
     std::optional<openvpn::TlsCrypt> &tls_crypt,
     openvpn::PeerRole role,
-    spdlog::logger &logger);
+    spdlog::logger &logger,
+    openvpn::TlsCryptReplayState &replay);
 
 /**
  * @brief Callbacks for role-specific operations during session control-packet dispatch.

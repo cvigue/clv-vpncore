@@ -34,12 +34,12 @@
 
 #include <not_null.h>
 #include <optional>
-#include <stdexcept>
 #include <string>
 #include "platform/linux/tun/tun_device.h"
 #include "platform/linux/tun/tun_setup.h"
 #include <net/ipv4_utils.h>
 #include <net/ipv6_utils.h>
+#include <util/byte_packer.h>
 
 #include <asio/awaitable.hpp>
 #include <asio/co_spawn.hpp>
@@ -371,10 +371,8 @@ class TcpDataChannel
 
             if (ip_ver == 4 && ip_len >= openvpn::IPV4_MIN_HEADER_SIZE)
             {
-                std::uint32_t dst = (static_cast<std::uint32_t>(ip_data[16]) << 24)
-                                    | (static_cast<std::uint32_t>(ip_data[17]) << 16)
-                                    | (static_cast<std::uint32_t>(ip_data[18]) << 8)
-                                    | static_cast<std::uint32_t>(ip_data[19]);
+                const auto dst = clv::netcore::read_uint<4>(
+                    std::span<const std::uint8_t>(ip_data + 16, 4));
                 session_id_opt = routing_table_.Lookup(dst);
             }
             else if (ip_ver == 6 && ip_len >= 40)

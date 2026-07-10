@@ -197,7 +197,8 @@ std::optional<openvpn::OpenVpnPacket> UnwrapAndParse(
     std::vector<std::uint8_t> &data,
     std::optional<openvpn::TlsCrypt> &tls_crypt,
     openvpn::PeerRole role,
-    spdlog::logger &logger)
+    spdlog::logger &logger,
+    openvpn::TlsCryptReplayState &replay)
 {
     if (data.empty())
     {
@@ -211,7 +212,7 @@ std::optional<openvpn::OpenVpnPacket> UnwrapAndParse(
     // encryption and pass through unchanged.
     if (!openvpn::IsDataPacket(opcode) && tls_crypt)
     {
-        auto unwrapped = tls_crypt->Unwrap(data, role == openvpn::PeerRole::Server);
+        auto unwrapped = tls_crypt->Unwrap(data, role == openvpn::PeerRole::Server, replay);
         if (!unwrapped)
         {
             logger.warn("TLS-Crypt unwrap failed for control packet (opcode {})",

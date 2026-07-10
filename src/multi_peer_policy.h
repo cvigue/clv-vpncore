@@ -26,6 +26,7 @@
 
 #include <not_null.h>
 #include <net/ipv6_utils.h>
+#include <util/byte_packer.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -222,10 +223,8 @@ struct MultiPeerPolicy
 
         if (ip_ver == 4)
         {
-            std::uint32_t dst = (static_cast<std::uint32_t>(ip_data[16]) << 24)
-                                | (static_cast<std::uint32_t>(ip_data[17]) << 16)
-                                | (static_cast<std::uint32_t>(ip_data[18]) << 8)
-                                | static_cast<std::uint32_t>(ip_data[19]);
+            const auto dst = clv::netcore::read_uint<4>(
+                std::span<const std::uint8_t>(ip_data + 16, 4));
             session_id_opt = snap_v4_->Lookup(dst);
         }
         else if (ip_ver == 6)

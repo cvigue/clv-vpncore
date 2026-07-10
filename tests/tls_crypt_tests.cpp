@@ -3,6 +3,8 @@
 #include "openvpn/tls_crypt.h"
 #include "openvpn/packet.h"
 
+#include <util/byte_packer.h>
+
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
@@ -82,6 +84,7 @@ class TlsCryptTest : public ::testing::Test
   protected:
     void SetUp() override
     {
+        replay_.Reset();
         auto null_sink = std::make_shared<spdlog::sinks::null_sink_mt>();
         logger_ = std::make_unique<spdlog::logger>("test_tls_crypt", null_sink);
 
@@ -103,14 +106,15 @@ class TlsCryptTest : public ::testing::Test
     {
         std::vector<std::uint8_t> buf;
         buf.push_back(MakeOpcodeByte(opcode, key_id));
-        for (int i = 7; i >= 0; --i)
-            buf.push_back(static_cast<std::uint8_t>((session_id >> (i * 8)) & 0xFF));
+        auto sid_bytes = clv::netcore::uint_to_bytes(session_id);
+        buf.insert(buf.end(), sid_bytes.begin(), sid_bytes.end());
         buf.insert(buf.end(), payload.begin(), payload.end());
         return buf;
     }
 
     std::unique_ptr<spdlog::logger> logger_;
     fs::path temp_dir_;
+    TlsCryptReplayState replay_;
 };
 
 // ─── Construction / Key Loading ─────────────────────────────────────
@@ -205,7 +209,7 @@ TEST_F(TlsCryptTest, WrapUnwrapRoundTripClientToServer)
     ASSERT_TRUE(wrapped.has_value());
     EXPECT_GT(wrapped->size(), plaintext.size()); // encrypted + HMAC overhead
 
-    auto unwrapped = tc_server->Unwrap(*wrapped, true);
+    auto unwrapped = tc_server->Unwrap(*wrapped, true, replay_);
     ASSERT_TRUE(unwrapped.has_value());
 
     // Unwrap returns: [opcode] [session_id:8] [payload]
@@ -229,7 +233,7 @@ TEST_F(TlsCryptTest, WrapUnwrapRoundTripServerToClient)
     auto wrapped = tc_server->Wrap(plaintext, true);
     ASSERT_TRUE(wrapped.has_value());
 
-    auto unwrapped = tc_client->Unwrap(*wrapped, false);
+    auto unwrapped = tc_client->Unwrap(*wrapped, false, replay_);
     ASSERT_TRUE(unwrapped.has_value());
     EXPECT_EQ(*unwrapped, plaintext);
 }
@@ -246,7 +250,7 @@ TEST_F(TlsCryptTest, WrapUnwrapEmptyPayload)
     auto wrapped = tc_client->Wrap(plaintext, false);
     ASSERT_TRUE(wrapped.has_value());
 
-    auto unwrapped = tc_server->Unwrap(*wrapped, true);
+    auto unwrapped = tc_server->Unwrap(*wrapped, true, replay_);
     ASSERT_TRUE(unwrapped.has_value());
     EXPECT_EQ(*unwrapped, plaintext);
 }
@@ -265,7 +269,7 @@ TEST_F(TlsCryptTest, WrapUnwrapLargePayload)
     auto wrapped = tc_client->Wrap(plaintext, false);
     ASSERT_TRUE(wrapped.has_value());
 
-    auto unwrapped = tc_server->Unwrap(*wrapped, true);
+    auto unwrapped = tc_server->Unwrap(*wrapped, true, replay_);
     ASSERT_TRUE(unwrapped.has_value());
     EXPECT_EQ(*unwrapped, plaintext);
 }
@@ -285,7 +289,7 @@ TEST_F(TlsCryptTest, UnwrapWithWrongDirectionFails)
     ASSERT_TRUE(wrapped.has_value());
 
     // Try to unwrap as client too (should fail — wrong key direction)
-    auto bad_unwrap = tc2->Unwrap(*wrapped, false);
+    auto bad_unwrap = tc2->Unwrap(*wrapped, false, replay_);
     EXPECT_FALSE(bad_unwrap.has_value());
 }
 
@@ -301,7 +305,7 @@ TEST_F(TlsCryptTest, UnwrapServerWrappedAsServerFails)
     ASSERT_TRUE(wrapped.has_value());
 
     // Try to unwrap as server (should fail — server wraps for client, not server)
-    auto bad_unwrap = tc2->Unwrap(*wrapped, true);
+    auto bad_unwrap = tc2->Unwrap(*wrapped, true, replay_);
     EXPECT_FALSE(bad_unwrap.has_value());
 }
 
@@ -322,7 +326,7 @@ TEST_F(TlsCryptTest, TamperedCiphertextFails)
     if (tampered.size() > 50)
         tampered[50] ^= 0xFF;
 
-    auto result = tc_server->Unwrap(tampered, true);
+    auto result = tc_server->Unwrap(tampered, true, replay_);
     EXPECT_FALSE(result.has_value());
 }
 
@@ -340,7 +344,7 @@ TEST_F(TlsCryptTest, TamperedHmacFails)
     auto tampered = *wrapped;
     tampered[20] ^= 0x01;
 
-    auto result = tc_server->Unwrap(tampered, true);
+    auto result = tc_server->Unwrap(tampered, true, replay_);
     EXPECT_FALSE(result.has_value());
 }
 
@@ -358,7 +362,7 @@ TEST_F(TlsCryptTest, TamperedHeaderFails)
     auto tampered = *wrapped;
     tampered[0] ^= 0x08;
 
-    auto result = tc_server->Unwrap(tampered, true);
+    auto result = tc_server->Unwrap(tampered, true, replay_);
     EXPECT_FALSE(result.has_value());
 }
 
@@ -375,7 +379,7 @@ TEST_F(TlsCryptTest, TruncatedPacketFails)
     // Truncate to less than minimum packet size (49 bytes)
     std::vector<std::uint8_t> truncated(wrapped->begin(), wrapped->begin() + 30);
 
-    auto result = tc_server->Unwrap(truncated, true);
+    auto result = tc_server->Unwrap(truncated, true, replay_);
     EXPECT_FALSE(result.has_value());
 }
 
@@ -396,7 +400,7 @@ TEST_F(TlsCryptTest, WrongKeyDecryptFails)
     ASSERT_TRUE(wrapped.has_value());
 
     // Try to unwrap with wrong key
-    auto result = tc_other->Unwrap(*wrapped, true);
+    auto result = tc_other->Unwrap(*wrapped, true, replay_);
     EXPECT_FALSE(result.has_value());
 }
 
@@ -414,11 +418,11 @@ TEST_F(TlsCryptTest, ReplayDetection)
     ASSERT_TRUE(wrapped.has_value());
 
     // First unwrap succeeds
-    auto result1 = tc_server->Unwrap(*wrapped, true);
+    auto result1 = tc_server->Unwrap(*wrapped, true, replay_);
     ASSERT_TRUE(result1.has_value());
 
     // Replaying same packet fails (same session_id, same packet_id)
-    auto result2 = tc_server->Unwrap(*wrapped, true);
+    auto result2 = tc_server->Unwrap(*wrapped, true, replay_);
     EXPECT_FALSE(result2.has_value());
 }
 
@@ -439,13 +443,13 @@ TEST_F(TlsCryptTest, MonotonicallyIncreasingPacketIdsAccepted)
         auto wrapped = tc_client->Wrap(pt, false);
         ASSERT_TRUE(wrapped.has_value()) << "Wrap failed at iteration " << i;
 
-        auto unwrapped = tc_server->Unwrap(*wrapped, true);
+        auto unwrapped = tc_server->Unwrap(*wrapped, true, replay_);
         ASSERT_TRUE(unwrapped.has_value()) << "Unwrap failed at iteration " << i;
         EXPECT_EQ(*unwrapped, pt);
     }
 }
 
-TEST_F(TlsCryptTest, OutOfOrderPacketIdRejected)
+TEST_F(TlsCryptTest, ReorderWithinWindowAccepted)
 {
     auto tc_client = TlsCrypt::FromKeyString(kTestKeyString, *logger_);
     auto tc_server = TlsCrypt::FromKeyString(kTestKeyString, *logger_);
@@ -453,7 +457,7 @@ TEST_F(TlsCryptTest, OutOfOrderPacketIdRejected)
 
     const std::uint64_t session_id = 0xCCCCCCCCCCCCCCCCULL;
 
-    // Wrap two packets in order
+    // Wrap two packets in order (counters 1 then 2)
     auto pt1 = MakePlaintext(Opcode::P_CONTROL_V1, 0, session_id, std::vector<std::uint8_t>{0x01});
     auto pt2 = MakePlaintext(Opcode::P_CONTROL_V1, 0, session_id, std::vector<std::uint8_t>{0x02});
 
@@ -461,13 +465,40 @@ TEST_F(TlsCryptTest, OutOfOrderPacketIdRejected)
     auto wrapped2 = tc_client->Wrap(pt2, false);
     ASSERT_TRUE(wrapped1 && wrapped2);
 
-    // Unwrap packet 2 first (higher packet_id)
-    auto r2 = tc_server->Unwrap(*wrapped2, true);
+    // Unwrap higher counter first, then lower — sliding window accepts reorder
+    auto r2 = tc_server->Unwrap(*wrapped2, true, replay_);
     ASSERT_TRUE(r2.has_value());
+    auto r1 = tc_server->Unwrap(*wrapped1, true, replay_);
+    ASSERT_TRUE(r1.has_value());
+    EXPECT_EQ(*r1, pt1);
 
-    // Now unwrap packet 1 (lower packet_id) — should be rejected as replay
-    auto r1 = tc_server->Unwrap(*wrapped1, true);
-    EXPECT_FALSE(r1.has_value());
+    // Exact-byte replay of either is rejected
+    EXPECT_FALSE(tc_server->Unwrap(*wrapped1, true, replay_).has_value());
+    EXPECT_FALSE(tc_server->Unwrap(*wrapped2, true, replay_).has_value());
+}
+
+TEST_F(TlsCryptTest, CounterFarBehindWindowRejected)
+{
+    auto tc_client = TlsCrypt::FromKeyString(kTestKeyString, *logger_);
+    auto tc_server = TlsCrypt::FromKeyString(kTestKeyString, *logger_);
+    ASSERT_TRUE(tc_client && tc_server);
+
+    const std::uint64_t session_id = 0xDDDDDDDDDDDDDDDDULL;
+
+    // Advance the window past ReplayWindow::kBits so counter 1 is too old.
+    std::optional<std::vector<std::uint8_t>> first_wrapped;
+    for (std::uint32_t i = 0; i < ReplayWindow::kBits + 2; ++i)
+    {
+        auto pt = MakePlaintext(Opcode::P_CONTROL_V1, 0, session_id, std::vector<std::uint8_t>{static_cast<std::uint8_t>(i & 0xff)});
+        auto wrapped = tc_client->Wrap(pt, false);
+        ASSERT_TRUE(wrapped.has_value());
+        if (!first_wrapped)
+            first_wrapped = wrapped;
+        ASSERT_TRUE(tc_server->Unwrap(*wrapped, true, replay_).has_value()) << "i=" << i;
+    }
+
+    // First packet's counter is now outside the window
+    EXPECT_FALSE(tc_server->Unwrap(*first_wrapped, true, replay_).has_value());
 }
 
 // ─── Wire Format Invariants ─────────────────────────────────────────
@@ -492,10 +523,7 @@ TEST_F(TlsCryptTest, WrapProducesCorrectWireFormat)
     EXPECT_EQ((*wrapped)[0], MakeOpcodeByte(Opcode::P_CONTROL_HARD_RESET_CLIENT_V3, 0));
 
     // Session ID should be in bytes 1-8
-    std::uint64_t wire_sid = 0;
-    for (int i = 0; i < 8; ++i)
-        wire_sid = (wire_sid << 8) | (*wrapped)[1 + i];
-    EXPECT_EQ(wire_sid, session_id);
+    EXPECT_EQ(clv::netcore::read_uint<8>(std::span(*wrapped).subspan(1)), session_id);
 }
 
 TEST_F(TlsCryptTest, WrapTooSmallInputFails)
@@ -516,7 +544,7 @@ TEST_F(TlsCryptTest, UnwrapTooSmallFails)
 
     // Less than minimum 49 bytes
     std::vector<std::uint8_t> tiny(10, 0x00);
-    auto result = tc->Unwrap(tiny, true);
+    auto result = tc->Unwrap(tiny, true, replay_);
     EXPECT_FALSE(result.has_value());
 }
 
@@ -528,9 +556,11 @@ TEST_F(TlsCryptTest, DifferentSessionsHaveIndependentReplayWindows)
     auto tc_server = TlsCrypt::FromKeyString(kTestKeyString, *logger_);
     ASSERT_TRUE(tc_client && tc_server);
 
-    // Two different session IDs
+    // Two different session IDs — each owns its own TlsCryptReplayState
     const std::uint64_t sid1 = 0x1111111111111111ULL;
     const std::uint64_t sid2 = 0x2222222222222222ULL;
+    TlsCryptReplayState replay1;
+    TlsCryptReplayState replay2;
 
     auto pt1 = MakePlaintext(Opcode::P_CONTROL_V1, 0, sid1, std::vector<std::uint8_t>{0x01});
     auto pt2 = MakePlaintext(Opcode::P_CONTROL_V1, 0, sid2, std::vector<std::uint8_t>{0x02});
@@ -539,12 +569,88 @@ TEST_F(TlsCryptTest, DifferentSessionsHaveIndependentReplayWindows)
     auto w2 = tc_client->Wrap(pt2, false);
     ASSERT_TRUE(w1 && w2);
 
-    // Unwrap both — different sessions, both should succeed even though
-    // w2 has higher packet_id than w1 (they're in different session buckets)
-    auto r1 = tc_server->Unwrap(*w1, true);
-    auto r2 = tc_server->Unwrap(*w2, true);
+    // Independent windows: both succeed even though w2 has a higher send counter
+    auto r1 = tc_server->Unwrap(*w1, true, replay1);
+    auto r2 = tc_server->Unwrap(*w2, true, replay2);
     EXPECT_TRUE(r1.has_value());
     EXPECT_TRUE(r2.has_value());
+
+    // Replay into the other session's window still fails on its own state
+    EXPECT_FALSE(tc_server->Unwrap(*w1, true, replay1).has_value());
+    EXPECT_FALSE(tc_server->Unwrap(*w2, true, replay2).has_value());
+}
+
+TEST_F(TlsCryptTest, MoveSeedPreservesHighest)
+{
+    TlsCryptReplayState scratch;
+    ASSERT_TRUE(scratch.CheckAndAccept(std::uint64_t{3} << 32));
+    EXPECT_EQ(scratch.highest(), 3u);
+
+    TlsCryptReplayState seeded = std::move(scratch);
+    EXPECT_EQ(seeded.highest(), 3u);
+    // Exact counter replay rejected after move-seed
+    EXPECT_FALSE(seeded.CheckAndAccept(std::uint64_t{3} << 32));
+    // Next counter accepted
+    EXPECT_TRUE(seeded.CheckAndAccept(std::uint64_t{4} << 32));
+}
+
+TEST_F(TlsCryptTest, PeekWireSessionId)
+{
+    const std::uint64_t sid = 0x0102030405060708ULL;
+    auto pt = MakePlaintext(Opcode::P_CONTROL_V1, 0, sid, std::vector<std::uint8_t>{0x01});
+    auto peeked = PeekWireSessionId(pt);
+    ASSERT_TRUE(peeked.has_value());
+    EXPECT_EQ(*peeked, sid);
+    EXPECT_FALSE(PeekWireSessionId(std::span<const std::uint8_t>{}).has_value());
+}
+
+// Characterizes the peer-id gate invariant (server_control_base.h ProcessNetworkPacket;
+// _planning/tls-crypt-replay-state.md §4.2). The gate itself is not unit-reachable, so
+// this locks the primitive-level property it relies on: two sessions each start their
+// wrapper counter at 1, and the sliding window keys only on that counter — so reusing an
+// advanced window for a new session's first packet is a DETERMINISTIC replay reject. The
+// gate must therefore route a mismatched wire session_id to a fresh (scratch) window.
+// Guards against regressing the gate to `session ? member : scratch`.
+TEST_F(TlsCryptTest, PeerIdGateInvariant_NewClientNotReplayRejected)
+{
+    auto tc_server = TlsCrypt::FromKeyString(kTestKeyString, *logger_);
+    ASSERT_TRUE(tc_server);
+
+    // Established session X advances its window well past counter 1.
+    auto tc_client_x = TlsCrypt::FromKeyString(kTestKeyString, *logger_);
+    ASSERT_TRUE(tc_client_x);
+    const std::uint64_t sid_x = 0xAAAAAAAAAAAAAAAAULL;
+    TlsCryptReplayState window_x;
+    for (int i = 0; i < 4; ++i)
+    {
+        auto pt = MakePlaintext(Opcode::P_CONTROL_V1, 0, sid_x, std::vector<std::uint8_t>{static_cast<std::uint8_t>(i)});
+        auto w = tc_client_x->Wrap(pt, false);
+        ASSERT_TRUE(w);
+        ASSERT_TRUE(tc_server->Unwrap(*w, true, window_x).has_value());
+    }
+    ASSERT_GT(window_x.highest(), 1u);
+
+    // New client (fresh instance → wrapper counter restarts at 1), new session id,
+    // arriving on the same endpoint while X is still established.
+    auto tc_client_y = TlsCrypt::FromKeyString(kTestKeyString, *logger_);
+    ASSERT_TRUE(tc_client_y);
+    const std::uint64_t sid_y = 0xBBBBBBBBBBBBBBBBULL;
+    auto pt_y = MakePlaintext(Opcode::P_CONTROL_HARD_RESET_CLIENT_V2, 0, sid_y, std::vector<std::uint8_t>{0x01});
+    auto w_y = tc_client_y->Wrap(pt_y, false);
+    ASSERT_TRUE(w_y);
+
+    // The mismatched wire session_id is visible pre-HMAC — the gate's discriminator.
+    auto wire_sid = PeekWireSessionId(*w_y);
+    ASSERT_TRUE(wire_sid.has_value());
+    EXPECT_NE(*wire_sid, sid_x); // != established peer id → gate must select scratch
+
+    // Correct (scratch) path: the new client's HARD_RESET is accepted.
+    TlsCryptReplayState scratch;
+    EXPECT_TRUE(tc_server->Unwrap(*w_y, true, scratch).has_value());
+
+    // Wrong (`session ? member : scratch`) path: counter 1 against X's advanced window
+    // is a deterministic replay reject — the failure this gate prevents.
+    EXPECT_FALSE(tc_server->Unwrap(*w_y, true, window_x).has_value());
 }
 
 // ─── CTR Mode Produces Different Ciphertext For Same Plaintext ──────

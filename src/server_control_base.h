@@ -492,8 +492,9 @@ class ServerControlBase
                           sender.port);
         }
 
-        // Choose the correct TlsCrypt for unwrapping
-        Connection *session = nullptr;
+        // Choose the correct TlsCrypt for unwrapping, and resolve the session
+        // before unwrap so the peer-id gate can select the replay window.
+        Connection *session = session_manager_.FindSessionByEndpoint(endpoint);
         std::optional<openvpn::TlsCrypt> *unwrap_key = &tls_crypt_;
 
         if (tls_crypt_v2_)
@@ -502,22 +503,34 @@ class ServerControlBase
             {
                 unwrap_key = &v2_session_key;
             }
-            else
+            else if (session)
             {
-                session = session_manager_.FindSessionByEndpoint(endpoint);
-                if (session)
-                    unwrap_key = &session->GetSessionTlsCrypt();
+                unwrap_key = &session->GetSessionTlsCrypt();
             }
         }
 
-        auto packet_opt = UnwrapAndParse(data, *unwrap_key, openvpn::PeerRole::Server, *logger_);
+        // Peer-id gate: use Connection's window only when the cleartext wire
+        // session_id matches the established peer id. Otherwise scratch
+        // (first packet, or same-endpoint new client session id).
+        openvpn::TlsCryptReplayState scratch;
+        openvpn::TlsCryptReplayState *replay = &scratch;
+        bool used_scratch = true;
+        if (*unwrap_key)
+        {
+            auto wire_sid = openvpn::PeekWireSessionId(data);
+            auto peer = session ? session->GetControlChannel().GetPeerSessionId() : std::nullopt;
+            if (session && peer && wire_sid && *wire_sid == peer->value)
+            {
+                replay = &session->TlsCryptReplay();
+                used_scratch = false;
+            }
+        }
+
+        auto packet_opt = UnwrapAndParse(data, *unwrap_key, openvpn::PeerRole::Server, *logger_, *replay);
         if (!packet_opt)
             co_return;
 
         auto &packet = *packet_opt;
-
-        if (!tls_crypt_v2_)
-            session = session_manager_.FindSessionByEndpoint(endpoint);
 
         if (session && !session->HasTransport())
             session->SetTransport(transport);
@@ -529,7 +542,17 @@ class ServerControlBase
 
         if (openvpn::IsControlPacket(packet.opcode_))
         {
-            co_await HandleControlPacket(session, packet, sender, endpoint, std::move(transport), std::move(v2_session_key));
+            // Only the first-packet / peer-mismatch path needs the scratch for move-seed.
+            std::optional<openvpn::TlsCryptReplayState> seed;
+            if (used_scratch)
+                seed.emplace(std::move(scratch));
+            co_await HandleControlPacket(session,
+                                         packet,
+                                         sender,
+                                         endpoint,
+                                         std::move(transport),
+                                         std::move(v2_session_key),
+                                         std::move(seed));
         }
         else if (openvpn::IsDataPacket(packet.opcode_))
         {
@@ -547,14 +570,20 @@ class ServerControlBase
                                               const transport::PeerEndpoint &sender,
                                               const Connection::Endpoint &endpoint,
                                               transport::TransportHandle transport,
-                                              std::optional<openvpn::TlsCrypt> v2_session_key)
+                                              std::optional<openvpn::TlsCrypt> v2_session_key,
+                                              std::optional<openvpn::TlsCryptReplayState> replay_seed)
     {
         logger_->debug("Received control packet (opcode {})", static_cast<int>(packet.opcode_));
 
         if (packet.opcode_ == openvpn::Opcode::P_CONTROL_HARD_RESET_CLIENT_V2
             || packet.opcode_ == openvpn::Opcode::P_CONTROL_HARD_RESET_CLIENT_V3)
         {
-            session = co_await HandleHardReset(packet, sender, endpoint, std::move(transport), std::move(v2_session_key));
+            session = co_await HandleHardReset(packet,
+                                               sender,
+                                               endpoint,
+                                               std::move(transport),
+                                               std::move(v2_session_key),
+                                               std::move(replay_seed));
             co_return;
         }
 
@@ -616,7 +645,8 @@ class ServerControlBase
         const transport::PeerEndpoint &sender,
         const Connection::Endpoint &endpoint,
         transport::TransportHandle transport,
-        std::optional<openvpn::TlsCrypt> v2_session_key)
+        std::optional<openvpn::TlsCrypt> v2_session_key,
+        std::optional<openvpn::TlsCryptReplayState> replay_seed)
     {
         logger_->info("Client initiating handshake from {}:{}",
                       sender.addr.to_string(),
@@ -664,6 +694,9 @@ class ServerControlBase
         session = &session_manager_.GetOrCreateSession(
             server_session_id, endpoint, true, cert_config, *logger_);
         session->SetTransport(std::move(transport));
+        // Move-seed: scratch holds the post-accept state from packet #1.
+        if (replay_seed)
+            session->SetTlsCryptReplay(std::move(*replay_seed));
 
         if (v2_session_key)
         {

@@ -484,6 +484,20 @@ class Connection
         return session_tls_crypt_;
     }
 
+    /**
+     * @brief Inbound tls-crypt anti-replay window for this session (V1 and V2).
+     */
+    openvpn::TlsCryptReplayState &TlsCryptReplay()
+    {
+        return tls_crypt_replay_;
+    }
+
+    /** Seed / replace the replay window (move-seed from first-packet scratch). */
+    void SetTlsCryptReplay(openvpn::TlsCryptReplayState replay)
+    {
+        tls_crypt_replay_ = std::move(replay);
+    }
+
   private:
     openvpn::SessionId session_id_;
     Endpoint endpoint_;
@@ -517,6 +531,7 @@ class Connection
     std::vector<uint8_t> client_random_;                  // Client's 48-byte random for key derivation
     std::optional<transport::TransportHandle> transport_; // Per-session transport handle (UDP or TCP)
     std::optional<openvpn::TlsCrypt> session_tls_crypt_;  // Per-session TlsCrypt from V2 Kc (nullopt for V1)
+    openvpn::TlsCryptReplayState tls_crypt_replay_;       // Inbound tls-crypt anti-replay (session-scoped)
     clv::not_null<spdlog::logger *> logger_;              // Structured logger (never null)
 };
 

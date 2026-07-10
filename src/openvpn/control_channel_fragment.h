@@ -3,6 +3,8 @@
 #ifndef CLV_VPN_OPENVPN_CONTROL_CHANNEL_FRAGMENT_H
 #define CLV_VPN_OPENVPN_CONTROL_CHANNEL_FRAGMENT_H
 
+#include <util/byte_packer.h>
+
 #include <cstdint>
 #include <cstring>
 #include <span>
@@ -35,8 +37,7 @@ GroupTlsRecords(std::span<const std::uint8_t> tls_data, std::size_t mtu)
     for (std::size_t pos = 0; pos + 5 <= tls_data.size();)
     {
         // TLS record header: [type:1][version:2][length:2] (big-endian)
-        std::uint16_t record_length = static_cast<std::uint16_t>(
-            (static_cast<std::uint16_t>(tls_data[pos + 3]) << 8) | static_cast<std::uint16_t>(tls_data[pos + 4]));
+        const auto record_length = clv::netcore::read_uint<2>(tls_data.subspan(pos + 3));
         std::size_t total = 5 + record_length;
 
         if (pos + total > tls_data.size())

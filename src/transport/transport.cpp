@@ -12,6 +12,8 @@
 
 #include <unistd.h>
 
+#include <util/byte_packer.h>
+
 #include <array>
 #include <cstdint>
 #include <memory>
@@ -137,10 +139,7 @@ asio::awaitable<void> TcpTransport::Send(std::span<const std::uint8_t> data)
         throw std::overflow_error("TCP frame payload exceeds 65535 bytes");
 
     // 2-byte big-endian length prefix (OpenVPN TCP framing)
-    auto len = static_cast<std::uint16_t>(data.size());
-    std::array<std::uint8_t, 2> lengthPrefix = {
-        static_cast<std::uint8_t>((len >> 8) & 0xFF),
-        static_cast<std::uint8_t>(len & 0xFF)};
+    auto lengthPrefix = clv::netcore::uint_to_bytes(static_cast<std::uint16_t>(data.size()));
 
     // Gather write: prefix + payload sent atomically
     std::array<asio::const_buffer, 2> bufs = {
@@ -155,8 +154,7 @@ asio::awaitable<std::vector<std::uint8_t>> TcpTransport::Receive()
     std::array<std::uint8_t, 2> lengthPrefix{};
     co_await asio::async_read(*socket_, asio::buffer(lengthPrefix), asio::use_awaitable);
 
-    auto payloadLen = static_cast<std::uint16_t>(
-        (static_cast<std::uint16_t>(lengthPrefix[0]) << 8) | lengthPrefix[1]);
+    auto payloadLen = clv::netcore::read_uint<2>(lengthPrefix);
 
     if (payloadLen == 0)
         co_return std::vector<std::uint8_t>{};

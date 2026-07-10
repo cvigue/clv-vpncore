@@ -8,6 +8,7 @@
 #include "openvpn/data_v2_wire.h"
 #include "openvpn/packet.h"
 #include "openvpn/protocol_constants.h"
+#include "util/byte_packer.h"
 
 #include <HelpSslCipher.h>
 #include <chrono>
@@ -96,10 +97,7 @@ struct DataV2DecryptLog
         return {};
     }
 
-    const std::uint32_t pkt_id = (static_cast<std::uint32_t>(buf[4]) << 24)
-                                 | (static_cast<std::uint32_t>(buf[5]) << 16)
-                                 | (static_cast<std::uint32_t>(buf[6]) << 8)
-                                 | static_cast<std::uint32_t>(buf[7]);
+    const std::uint32_t pkt_id = clv::netcore::read_uint<4>(buf.subspan(4));
 
     const auto replay_check = slot->replay.Check(pkt_id);
     if (replay_check == ReplayWindow::CheckResult::TooOld)
