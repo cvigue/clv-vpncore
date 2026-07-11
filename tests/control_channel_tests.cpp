@@ -398,12 +398,15 @@ TEST_F(ControlChannelTest, RejectedPacketDoesNotQueueAck_MissingPacketId)
 // ============================================================================
 
 // Helper: build a minimal P_CONTROL_SOFT_RESET_V1 packet.
-static OpenVpnPacket MakeSoftResetPacket(std::uint32_t packet_id = 1)
+static OpenVpnPacket MakeSoftResetPacket(std::uint32_t packet_id = 1,
+                                         std::optional<std::uint64_t> peer_session = std::nullopt)
 {
     OpenVpnPacket pkt;
     pkt.opcode_ = Opcode::P_CONTROL_SOFT_RESET_V1;
     pkt.key_id_ = 0;
     pkt.packet_id_ = packet_id;
+    if (peer_session)
+        pkt.session_id_ = *peer_session;
     return pkt;
 }
 
@@ -468,6 +471,210 @@ TEST_F(ControlChannelTest, HandleSoftReset_DuplicateDuringTlsHandshakeReturnsAck
     auto ack = channel().HandleSoftReset(MakeSoftResetPacket(2), empty_cfg);
     EXPECT_FALSE(ack.empty());                                            // Should produce an ACK
     EXPECT_EQ(channel().GetState(), ControlChannel::State::TlsHandshake); // State unchanged
+}
+
+// ============================================================================
+// Soft reset success paths via real TLS handshake (plan §4.8 RK2/RK3)
+//
+// ControlChannel's OpenVPN-framed TLS pump currently truncates large handshake
+// flights (GroupTlsRecords / fragment path) — tracked separately.  EstablishPair
+// therefore: hard-reset for session IDs, pump TLS via GetTlsContext() (same as
+// tls_context_tests), then PromoteToKeyMaterialReady() to sync control state.
+// ============================================================================
+
+static TlsCertConfig ServerTestCertConfig()
+{
+    return TlsCertConfig{
+        .ca_cert = "test_data/certs/ca.crt",
+        .local_cert = "test_data/certs/server.crt",
+        .local_key = "test_data/certs/server.key",
+    };
+}
+
+static TlsCertConfig ClientTestCertConfig()
+{
+    return TlsCertConfig{
+        .ca_cert = "test_data/certs/ca.crt",
+        .local_cert = "test_data/certs/client.crt",
+        .local_key = "test_data/certs/client.key",
+    };
+}
+
+struct EstablishedPair
+{
+    std::unique_ptr<spdlog::logger> logger;
+    std::unique_ptr<ControlChannel> server;
+    std::unique_ptr<ControlChannel> client;
+};
+
+/** In-memory TLS 1.2 pump (mirrors tls_context_tests::RunFullHandshake). */
+static bool PumpTlsHandshake(TlsContext &server_tls, TlsContext &client_tls)
+{
+    auto client_output = client_tls.ProcessIncomingData({});
+    if (!client_output)
+        return false;
+
+    std::vector<std::uint8_t> to_server = *client_output;
+    std::vector<std::uint8_t> to_client;
+
+    for (int i = 0; i < 20; ++i)
+    {
+        if (!to_server.empty())
+        {
+            auto from_server = server_tls.ProcessIncomingData(to_server);
+            if (!from_server)
+                return false;
+            to_client = *from_server;
+            to_server.clear();
+        }
+        if (server_tls.IsHandshakeComplete() && client_tls.IsHandshakeComplete())
+            return true;
+        if (!to_client.empty())
+        {
+            auto from_client = client_tls.ProcessIncomingData(to_client);
+            if (!from_client)
+                return false;
+            to_server = *from_client;
+            to_client.clear();
+        }
+        if (server_tls.IsHandshakeComplete() && client_tls.IsHandshakeComplete())
+            return true;
+    }
+    return server_tls.IsHandshakeComplete() && client_tls.IsHandshakeComplete();
+}
+
+static bool EstablishPair(EstablishedPair &pair)
+{
+    auto null_sink = std::make_shared<spdlog::sinks::null_sink_mt>();
+    pair.logger = std::make_unique<spdlog::logger>("cc_pair", null_sink);
+    pair.server = std::make_unique<ControlChannel>(*pair.logger);
+    pair.client = std::make_unique<ControlChannel>(*pair.logger);
+
+    if (!pair.server->Initialize(PeerRole::Server, SessionId::Generate(), ServerTestCertConfig()))
+        return false;
+    if (!pair.client->Initialize(PeerRole::Client, SessionId::Generate(), ClientTestCertConfig()))
+        return false;
+
+    auto hard_reset = pair.client->StartHardReset(0);
+    if (hard_reset.empty())
+        return false;
+    auto hr_pkt = OpenVpnPacket::Parse(hard_reset);
+    if (!hr_pkt || !pair.server->HandleHardReset(*hr_pkt))
+        return false;
+
+    auto hr_resp = pair.server->GenerateHardResetResponse(hr_pkt->opcode_);
+    if (hr_resp.empty())
+        return false;
+    auto hr_resp_pkt = OpenVpnPacket::Parse(hr_resp);
+    if (!hr_resp_pkt || !pair.client->HandleHardReset(*hr_resp_pkt))
+        return false;
+
+    // Apply hard-reset ACKs so GenerateExplicitAck works after soft reset.
+    if (auto ack = pair.client->GenerateExplicitAck(); !ack.empty())
+    {
+        auto ack_pkt = OpenVpnPacket::Parse(ack);
+        if (!ack_pkt || !pair.server->HandleAck(*ack_pkt))
+            return false;
+    }
+    if (auto ack = pair.server->GenerateExplicitAck(); !ack.empty())
+    {
+        auto ack_pkt = OpenVpnPacket::Parse(ack);
+        if (!ack_pkt || !pair.client->HandleAck(*ack_pkt))
+            return false;
+    }
+
+    auto *server_tls = pair.server->GetTlsContext();
+    auto *client_tls = pair.client->GetTlsContext();
+    if (!server_tls || !client_tls)
+        return false;
+    if (!PumpTlsHandshake(*server_tls, *client_tls))
+        return false;
+
+    return pair.server->PromoteToKeyMaterialReady() && pair.client->PromoteToKeyMaterialReady();
+}
+
+TEST(ControlChannelHandshakeTest, EstablishPair_ReachesKeyMaterialReady)
+{
+    EstablishedPair pair;
+    ASSERT_TRUE(EstablishPair(pair));
+    EXPECT_EQ(pair.server->GetState(), ControlChannel::State::KeyMaterialReady);
+    EXPECT_EQ(pair.client->GetState(), ControlChannel::State::KeyMaterialReady);
+    EXPECT_EQ(pair.server->GetKeyId(), 0);
+    EXPECT_EQ(pair.client->GetKeyId(), 0);
+    EXPECT_TRUE(pair.server->GetPeerSessionId().has_value());
+    EXPECT_TRUE(pair.client->GetPeerSessionId().has_value());
+}
+
+TEST(ControlChannelHandshakeTest, HandleSoftReset_FromKeyMaterialReady_AdvancesKeyIdAndAcks)
+{
+    EstablishedPair pair;
+    ASSERT_TRUE(EstablishPair(pair));
+
+    const auto pkt_id = pair.server->GetLastReceivedPacketId() + 1;
+    auto ack = pair.server->HandleSoftReset(MakeSoftResetPacket(pkt_id), ServerTestCertConfig());
+    ASSERT_FALSE(ack.empty());
+    EXPECT_EQ(pair.server->GetState(), ControlChannel::State::TlsHandshake);
+    EXPECT_EQ(pair.server->GetKeyId(), 1);
+    EXPECT_EQ(pair.server->GetLastReceivedPacketId(), pkt_id);
+}
+
+TEST(ControlChannelHandshakeTest, RequestSoftReset_Client_AdvancesKeyIdAndEntersTlsHandshake)
+{
+    EstablishedPair pair;
+    ASSERT_TRUE(EstablishPair(pair));
+
+    auto soft_reset = pair.client->RequestSoftReset(PeerRole::Client, ClientTestCertConfig());
+    ASSERT_FALSE(soft_reset.empty());
+    EXPECT_EQ(pair.client->GetState(), ControlChannel::State::TlsHandshake);
+    EXPECT_EQ(pair.client->GetKeyId(), 1);
+
+    auto parsed = OpenVpnPacket::Parse(soft_reset);
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_EQ(parsed->opcode_, Opcode::P_CONTROL_SOFT_RESET_V1);
+    EXPECT_EQ(parsed->key_id_, 1);
+}
+
+TEST(ControlChannelHandshakeTest, CrossedSoftReset_PeerResetWhileTlsHandshake_AcksWithoutKeyIdBump)
+{
+    EstablishedPair pair;
+    ASSERT_TRUE(EstablishPair(pair));
+
+    auto ours = pair.server->RequestSoftReset(PeerRole::Server, ServerTestCertConfig());
+    ASSERT_FALSE(ours.empty());
+    ASSERT_EQ(pair.server->GetState(), ControlChannel::State::TlsHandshake);
+    ASSERT_EQ(pair.server->GetKeyId(), 1);
+
+    const auto pkt_id = pair.server->GetLastReceivedPacketId() + 1;
+    auto ack = pair.server->HandleSoftReset(MakeSoftResetPacket(pkt_id), ServerTestCertConfig());
+    ASSERT_FALSE(ack.empty());
+    EXPECT_EQ(pair.server->GetState(), ControlChannel::State::TlsHandshake);
+    EXPECT_EQ(pair.server->GetKeyId(), 1);
+}
+
+TEST(ControlChannelHandshakeTest, CrossedSoftReset_RespondToSoftResetWhileTlsHandshake_AcksWithoutKeyIdBump)
+{
+    EstablishedPair pair;
+    ASSERT_TRUE(EstablishPair(pair));
+
+    auto ours = pair.client->RequestSoftReset(PeerRole::Client, ClientTestCertConfig());
+    ASSERT_FALSE(ours.empty());
+    ASSERT_EQ(pair.client->GetKeyId(), 1);
+
+    const auto pkt_id = pair.client->GetLastReceivedPacketId() + 1;
+    auto ack = pair.client->RespondToSoftReset(MakeSoftResetPacket(pkt_id), ClientTestCertConfig());
+    ASSERT_FALSE(ack.empty());
+    EXPECT_EQ(pair.client->GetState(), ControlChannel::State::TlsHandshake);
+    EXPECT_EQ(pair.client->GetKeyId(), 1);
+}
+
+TEST(ControlChannelHandshakeTest, RequestSoftReset_WhileTlsHandshake_ReturnsEmpty)
+{
+    EstablishedPair pair;
+    ASSERT_TRUE(EstablishPair(pair));
+    ASSERT_FALSE(pair.server->RequestSoftReset(PeerRole::Server, ServerTestCertConfig()).empty());
+
+    EXPECT_TRUE(pair.server->RequestSoftReset(PeerRole::Server, ServerTestCertConfig()).empty());
+    EXPECT_EQ(pair.server->GetKeyId(), 1);
 }
 
 // ============================================================================

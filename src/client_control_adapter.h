@@ -702,7 +702,6 @@ template <typename Derived>
 asio::awaitable<void>
 ClientControlAdapter<Derived>::HandleSoftResetFromServer(const openvpn::OpenVpnPacket &packet)
 {
-    logger_->info("Received soft reset from server — starting key renegotiation");
     last_server_rekey_at_ = std::chrono::steady_clock::now();
 
     openvpn::TlsCertConfig cert_config{
@@ -712,6 +711,21 @@ ClientControlAdapter<Derived>::HandleSoftResetFromServer(const openvpn::OpenVpnP
         .ca_cert_pem = config_->client->ca_cert_pem,
         .local_cert_pem = config_->client->cert_pem,
         .local_key_pem = config_->client->key_pem};
+
+    // Crossed soft-reset (plan §4.8 RK2): we already called RequestSoftReset /
+    // InitiateTlsHandshake. ControlChannel::RespondToSoftReset will ACK without
+    // advancing key_id again — do not clear randoms or re-fire ClientHello, or
+    // we corrupt the in-flight TLS state.
+    if (control_channel_->GetState() == openvpn::ControlChannel::State::TlsHandshake)
+    {
+        logger_->info("Crossed soft reset: already renegotiating, ACKing server reset");
+        auto response = control_channel_->RespondToSoftReset(packet, cert_config);
+        if (!response.empty())
+            co_await SendWrappedPacket(std::move(response));
+        co_return;
+    }
+
+    logger_->info("Received soft reset from server — starting key renegotiation");
 
     auto response = control_channel_->RespondToSoftReset(packet, cert_config);
     if (!response.empty())
@@ -778,6 +792,14 @@ asio::awaitable<void> ClientControlAdapter<Derived>::ClientRekeyLoop(std::uint32
         logger_->info("Client rekey suppressed: server rekeyed {}s ago, re-arming in {}s",
                       std::chrono::duration_cast<std::chrono::seconds>(elapsed).count(),
                       reneg_seconds);
+        asio::co_spawn(*io_context_, ClientRekeyLoop(reneg_seconds, generation), asio::detached);
+        co_return;
+    }
+
+    // Server already drove a soft reset (or we are mid-handshake) — yield.
+    if (control_channel_->GetState() == openvpn::ControlChannel::State::TlsHandshake)
+    {
+        logger_->info("Client rekey suppressed: already renegotiating");
         asio::co_spawn(*io_context_, ClientRekeyLoop(reneg_seconds, generation), asio::detached);
         co_return;
     }

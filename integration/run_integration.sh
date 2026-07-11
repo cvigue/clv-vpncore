@@ -199,12 +199,12 @@ fi
 run_test "IT-R1: Server-Initiated Rekey (UDP)" 1 \
     "${SCRIPT_DIR}/test_itr1_server_rekey.sh"
 
-# IT-R2/IT-R3: Client-initiated rekey — known bug, XFAIL
+# IT-R2/IT-R3: Client-initiated rekey (server reneg=0; client timer drives)
 run_test "IT-R2: Client-Initiated Rekey (UDP)" 1 \
-    "${SCRIPT_DIR}/test_itr2_client_rekey.sh" 1
+    "${SCRIPT_DIR}/test_itr2_client_rekey.sh"
 
 run_test "IT-R3: Two Rekey Cycles (UDP)" 1 \
-    "${SCRIPT_DIR}/test_itr3_two_rekey_cycles.sh" 1
+    "${SCRIPT_DIR}/test_itr3_two_rekey_cycles.sh"
 
 # IT-R4: DCO rekey — skip if kernel module unavailable (test itself exits 77)
 run_test "IT-R4: DCO Server-Initiated Rekey" 1 \

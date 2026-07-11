@@ -1,9 +1,8 @@
 #!/bin/bash
-# ctest_itr3.sh — CTest wrapper for IT-R3: Two Rekey Cycles (UDP, XFAIL)
+# ctest_itr3.sh — CTest wrapper for IT-R3: Two Rekey Cycles (UDP)
 #
 # Called by CTest via: ctest -L integration
 # Escalates to root via sudo if needed.
-# XFAIL: expected to fail until the client-initiated rekey path is fixed.
 
 set -euo pipefail
 

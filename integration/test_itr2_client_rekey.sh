@@ -1,20 +1,14 @@
 #!/bin/bash
 # test_itr2_client_rekey.sh — IT-R2: Client-initiated rekey, tunnel continuity
 #
-# EXPECTED TO FAIL (XFAIL) until the client-initiated rekey path is fixed.
-#
 # The client's renegotiate_seconds fires ClientRekeyLoop, which sends
 # P_CONTROL_SOFT_RESET_V1 to the server and then initiates the TLS handshake.
 # The server responds and the key-method-2 exchange should complete on the live
 # session without dropping the tunnel.
 #
-# Known gap: the client-initiated path currently has a bug in the
-# ProcessReceivedPlaintext / DeriveAndInstallKeys renegotiation branch.
-# This test documents that gap and will flip to PASS as part of the
-# InstallDataPathKeys refactor (Step 2 of cca_cleanup).
-#
-# Server has renegotiate_seconds=0 so it does NOT drive a rekey; only the
-# client fires — this isolates the client-initiated path cleanly.
+# Server has renegotiate_seconds=0 so it neither arms a rekey timer nor pushes
+# reneg-sec. The client therefore uses its local renegotiate_seconds=30 — this
+# isolates the client-initiated soft-reset path cleanly (plan §4.8 RK1).
 #
 # Prerequisites:
 #   - Root / CAP_NET_ADMIN
@@ -29,8 +23,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="${1:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
 BINARY="${PROJECT_ROOT}/build/demos/simple_vpn"
 
-# Standard server (no reneg); client fires its own rekey at 30s.
-SERVER_CONFIG="${PROJECT_ROOT}/integration/configs/it_server.json"
+# Server reneg=0 (no push of reneg-sec); client fires its own rekey at 30s.
+SERVER_CONFIG="${PROJECT_ROOT}/integration/configs/it_server_no_reneg.json"
 CLIENT_CONFIG="${PROJECT_ROOT}/integration/configs/it_client_rekey.json"
 
 NS_SERVER="ns-vpn-server"
@@ -85,9 +79,7 @@ fail() {
 
 # ── Preconditions ────────────────────────────────────────────────────
 
-echo "=== IT-R2: Client-Initiated Rekey — Tunnel Continuity (XFAIL) ==="
-echo "    NOTE: This test is expected to fail until the client-initiated rekey"
-echo "    path is fixed (InstallDataPathKeys refactor, Step 2 of cca_cleanup)."
+echo "=== IT-R2: Client-Initiated Rekey — Tunnel Continuity ==="
 
 if [[ $(id -u) -ne 0 ]]; then
     exec sudo --preserve-env=PATH "$0" "$@"

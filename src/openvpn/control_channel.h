@@ -293,6 +293,17 @@ class ControlChannel
     }
 
     /**
+     * @brief Promote TlsHandshake → KeyMaterialReady when the TLS layer has finished.
+     *
+     * Normally invoked from ProcessTlsData once IsHandshakeComplete() becomes true.
+     * Also usable when the TLS handshake was advanced via GetTlsContext() directly
+     * (e.g. in-memory test pumps) so the control-channel state machine stays in sync.
+     *
+     * @return true if the transition occurred
+     */
+    bool PromoteToKeyMaterialReady();
+
+    /**
      * @brief Check if control channel is ready to transmit data
      */
     bool IsActive() const
@@ -372,6 +383,11 @@ class ControlChannel
      *
      * Use this to access TLS exporter functionality for key derivation.
      */
+    openvpn::TlsContext *GetTlsContext()
+    {
+        return tls_context_ ? &(*tls_context_) : nullptr;
+    }
+
     const openvpn::TlsContext *GetTlsContext() const
     {
         return tls_context_ ? &(*tls_context_) : nullptr;

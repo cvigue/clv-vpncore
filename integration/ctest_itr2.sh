@@ -1,9 +1,8 @@
 #!/bin/bash
-# ctest_itr2.sh — CTest wrapper for IT-R2: Client-Initiated Rekey (UDP, XFAIL)
+# ctest_itr2.sh — CTest wrapper for IT-R2: Client-Initiated Rekey (UDP)
 #
 # Called by CTest via: ctest -L integration
 # Escalates to root via sudo if needed.
-# XFAIL: expected to fail until the client-initiated rekey path is fixed.
 
 set -euo pipefail
 

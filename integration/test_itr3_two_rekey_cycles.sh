@@ -1,8 +1,6 @@
 #!/bin/bash
 # test_itr3_two_rekey_cycles.sh — IT-R3: Two client-initiated rekey cycles
 #
-# EXPECTED TO FAIL (XFAIL) until the client-initiated rekey path is fixed.
-#
 # Exercises the same client-initiated rekey path as IT-R2, but waits for two
 # full rekey cycles on the same session. Specifically targets state-accumulation
 # bugs that only surface on the second cycle:
@@ -12,7 +10,7 @@
 #   - pending DCO key state not reset after first cycle
 #
 # With client reneg=30 the two cycles fire at ~30s and ~60s. Total test
-# duration is ~90s.
+# duration is ~90s. Server reneg=0 so only the client drives rekey (plan §4.8 RK1).
 #
 # Prerequisites:
 #   - Root / CAP_NET_ADMIN
@@ -27,7 +25,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="${1:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
 BINARY="${PROJECT_ROOT}/build/demos/simple_vpn"
 
-SERVER_CONFIG="${PROJECT_ROOT}/integration/configs/it_server.json"
+# Server reneg=0 (no push of reneg-sec); client fires its own rekey at 30s.
+SERVER_CONFIG="${PROJECT_ROOT}/integration/configs/it_server_no_reneg.json"
 CLIENT_CONFIG="${PROJECT_ROOT}/integration/configs/it_client_rekey.json"
 
 NS_SERVER="ns-vpn-server"
@@ -82,9 +81,7 @@ fail() {
 
 # ── Preconditions ────────────────────────────────────────────────────
 
-echo "=== IT-R3: Two Client-Initiated Rekey Cycles (XFAIL) ==="
-echo "    NOTE: This test is expected to fail until the client-initiated rekey"
-echo "    path is fixed (InstallDataPathKeys refactor, Step 2 of cca_cleanup)."
+echo "=== IT-R3: Two Client-Initiated Rekey Cycles ==="
 
 if [[ $(id -u) -ne 0 ]]; then
     exec sudo --preserve-env=PATH "$0" "$@"

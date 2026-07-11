@@ -950,12 +950,20 @@ class ServerControlBase
                 .local_cert = config_->server->cert,
                 .local_key = config_->server->key};
 
+            // Crossed soft-reset (plan §4.8 RK2): client may already have put
+            // the channel into TlsHandshake. RequestSoftReset returns empty in
+            // that state — yield and let the in-flight renegotiation finish.
             auto soft_reset = session->GetControlChannel().RequestSoftReset(openvpn::PeerRole::Server, cert_config);
             if (soft_reset.empty())
             {
-                logger_->warn("Rekey {:016x}: RequestSoftReset failed (state={})",
-                              sid.value,
-                              static_cast<int>(session->GetControlChannel().GetState()));
+                const auto st = session->GetControlChannel().GetState();
+                if (st == openvpn::ControlChannel::State::TlsHandshake)
+                    logger_->info("Rekey {:016x}: skipped — already renegotiating (client-driven)",
+                                  sid.value);
+                else
+                    logger_->warn("Rekey {:016x}: RequestSoftReset failed (state={})",
+                                  sid.value,
+                                  static_cast<int>(st));
                 RearmRekeyTimer(sid, reneg_seconds);
                 co_return;
             }

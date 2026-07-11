@@ -274,6 +274,14 @@ std::vector<std::uint8_t> ControlChannel::GenerateExplicitAck()
     return ack_packet.Serialize();
 }
 
+bool ControlChannel::PromoteToKeyMaterialReady()
+{
+    if (state_ != State::TlsHandshake || !tls_context_ || !tls_context_->IsHandshakeComplete())
+        return false;
+    state_ = State::KeyMaterialReady;
+    return true;
+}
+
 std::optional<std::vector<std::uint8_t>> ControlChannel::InitiateTlsHandshake()
 {
     logger_->debug("InitiateTlsHandshake called, state={}", static_cast<int>(state_));
@@ -749,11 +757,8 @@ std::optional<std::vector<std::vector<std::uint8_t>>> ControlChannel::ProcessTls
     logger_->debug("  TLS handshake complete: {}", tls_context_->IsHandshakeComplete() ? "yes" : "no");
 
     // --- State transition ---
-    if (tls_context_->IsHandshakeComplete() && state_ == State::TlsHandshake)
-    {
-        state_ = State::KeyMaterialReady;
+    if (PromoteToKeyMaterialReady())
         logger_->debug("TLS handshake complete!");
-    }
 
     // --- Fragment and queue response ---
     if (tls_response->empty())
