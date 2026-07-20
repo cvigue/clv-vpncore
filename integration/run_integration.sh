@@ -190,9 +190,15 @@ if command -v openvpn >/dev/null 2>&1; then
 
     run_test "IT18: OpenVPN Server + simple_vpn Client (tls-crypt-v2)" 1 \
         "${SCRIPT_DIR}/test_it18_ovpn_server_v2.sh"
+
+    run_test "IT18b: OpenVPN Server force-cookie + simple_vpn Client (v2)" 1 \
+        "${SCRIPT_DIR}/test_it18b_ovpn_server_v2_force_cookie.sh"
+
+    run_test "IT20: simple_vpn V2 force-cookie Server + OpenVPN Client" 1 \
+        "${SCRIPT_DIR}/test_it20_ovpn_client_v2.sh"
 else
     echo ""
-    echo "  SKIP: IT16/IT17/IT18 (openvpn not installed)"
+    echo "  SKIP: IT16/IT17/IT18/IT18b/IT20 (openvpn not installed)"
 fi
 
 # IT-R1/IT-R5: Server-initiated rekey (UDP + TCP)

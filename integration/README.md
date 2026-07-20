@@ -57,9 +57,11 @@ machines where it is absent.
 
 | Test | Topology | Description |
 |------|----------|-------------|
-| IT16 | `openvpn` server + `simple_vpn` client | tls-crypt v1. Validates NCP cipher negotiation, `PUSH_REPLY` parsing, and data channel connectivity against the upstream implementation. |
-| IT17 | `simple_vpn` server + `openvpn` client | Our server receives a connection from `openvpn`. Exercises server-side robustness to openvpn's richer `IV_PROTO` bitmask and verbose peer-info. |
-| IT18 | `openvpn` server + `simple_vpn` client | tls-crypt-v2. Cross-implementation packet format validation. Complements IT12/IT13 which test our own server. |
+| IT16 | `openvpn` server + `simple_vpn` client | tls-crypt v1. Validates NCP cipher negotiation, `PUSH_REPLY` parsing, and data channel connectivity against the upstream implementation. (OpenVPN cookies default-on.) |
+| IT17 | `simple_vpn` server + `openvpn` client | Our server receives a connection from `openvpn`. Asserts psid cookie challenge + accept. |
+| IT18 | `openvpn` server + `simple_vpn` client | tls-crypt-v2 (`allow-noncookie`). Asserts client `P_CONTROL_WKC_V1` when server challenges. |
+| IT18b | `openvpn` server + `simple_vpn` client | tls-crypt-v2 **`force-cookie`**. Early-neg + WKc resend gate. |
+| IT20 | `simple_vpn` V2 server + `openvpn` client | vpncore **`force-cookie`** server + OpenVPN tls-crypt-v2 client; cookie log asserts. |
 
 ## Namespace Topology
 

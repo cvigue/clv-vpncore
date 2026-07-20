@@ -324,7 +324,8 @@ std::optional<std::vector<std::uint8_t>> TlsCrypt::Unwrap(std::span<const std::u
 }
 
 std::optional<std::vector<std::uint8_t>> TlsCrypt::Wrap(std::span<const std::uint8_t> plaintext,
-                                                        bool server_mode)
+                                                        bool server_mode,
+                                                        std::optional<std::uint32_t> counter_override)
 {
     // OpenVPN tls-crypt wire format:
     // Input plaintext: [opcode:1] [session_id:8] [payload...]
@@ -348,13 +349,19 @@ std::optional<std::vector<std::uint8_t>> TlsCrypt::Wrap(std::span<const std::uin
     std::uint64_t session_id = netcore::read_uint<8>(plaintext.subspan(1, SESSION_ID_SIZE));
     auto payload = std::span<const std::uint8_t>(plaintext.begin() + 1 + SESSION_ID_SIZE, plaintext.end());
 
-    // Increment TLS-Crypt wrapper packet ID counter
-    ++tls_crypt_packet_id_send_;
-
     // Build header: opcode || session_id || packet_id (counter || timestamp)
     // packet_id format: [4-byte counter][4-byte timestamp] (network byte order)
     auto now = static_cast<std::uint32_t>(std::time(nullptr));
-    auto counter = static_cast<std::uint32_t>(tls_crypt_packet_id_send_);
+    std::uint32_t counter = 0;
+    if (counter_override)
+    {
+        counter = *counter_override;
+    }
+    else
+    {
+        ++tls_crypt_packet_id_send_;
+        counter = static_cast<std::uint32_t>(tls_crypt_packet_id_send_);
+    }
     auto header = netcore::multi_uint_to_bytes(opcode, session_id, counter, now);
 
     // Build HMAC data: header || payload (BEFORE encryption!)

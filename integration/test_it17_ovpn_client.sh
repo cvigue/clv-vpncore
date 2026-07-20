@@ -200,6 +200,15 @@ else
     echo "      Tunnel ping correctly failed after VPN stopped"
 fi
 
+# ── Psid cookie path assertions (vpncore server + openvpn client) ────
+if ! grep -q "psid cookie challenge sent" "${SERVER_LOG}" 2>/dev/null; then
+    fail "Server log missing 'psid cookie challenge sent'"
+fi
+if ! grep -q "psid cookie accepted, creating session" "${SERVER_LOG}" 2>/dev/null; then
+    fail "Server log missing 'psid cookie accepted, creating session'"
+fi
+echo "      Psid cookie challenge + accept confirmed in server log"
+
 echo ""
 echo "=== IT17 PASSED ==="
 echo "    Logs: ${LOG_DIR}/"

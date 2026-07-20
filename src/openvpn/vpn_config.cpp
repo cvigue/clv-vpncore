@@ -353,6 +353,22 @@ VpnConfig::ServerConfig VpnConfigParser::ParseServerConfig(const nlohmann::json 
         s.renegotiate_seconds = VpnConfig::ServerConfig::kMinRenegotiateSeconds;
     }
 
+    if (json.contains("psid_cookie"))
+        s.psid_cookie = json["psid_cookie"].get<bool>();
+    if (json.contains("handshake_window"))
+        s.handshake_window = static_cast<int>(GetBoundedInt(json, "handshake_window", 1, 86400));
+    if (json.contains("tls_crypt_v2_cookie_mode"))
+    {
+        s.tls_crypt_v2_cookie_mode = json["tls_crypt_v2_cookie_mode"].get<std::string>();
+        if (s.tls_crypt_v2_cookie_mode != "force-cookie"
+            && s.tls_crypt_v2_cookie_mode != "allow-noncookie")
+        {
+            throw std::runtime_error(
+                "VpnConfigParser: tls_crypt_v2_cookie_mode must be "
+                "'force-cookie' or 'allow-noncookie'");
+        }
+    }
+
     return s;
 }
 

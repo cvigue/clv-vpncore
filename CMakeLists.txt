@@ -41,6 +41,7 @@ add_library(clv_vpncore STATIC
     src/openvpn/key_derivation.cpp
     src/openvpn/ovpn_config_parser.cpp
     src/openvpn/packet.cpp
+    src/openvpn/psid_cookie.cpp
     src/openvpn/session_manager.cpp
     src/openvpn/tls_context.cpp
     src/openvpn/tls_crypt.cpp

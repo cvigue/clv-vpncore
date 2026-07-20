@@ -211,6 +211,18 @@ else
     echo "      Tunnel correctly unreachable after VPN stopped"
 fi
 
+# ── Psid cookie + WKc resend (client advertises early-neg) ───────────
+if ! grep -q "psid cookie challenge sent" "${SERVER_LOG}" 2>/dev/null; then
+    fail "Server log missing 'psid cookie challenge sent'"
+fi
+if ! grep -q "psid cookie accepted, creating session" "${SERVER_LOG}" 2>/dev/null; then
+    fail "Server log missing 'psid cookie accepted, creating session'"
+fi
+if ! grep -q "Sent P_CONTROL_WKC_V1" "${CLIENT_LOG}" 2>/dev/null; then
+    fail "Client log missing 'Sent P_CONTROL_WKC_V1' (cookie WKc resend)"
+fi
+echo "      Psid cookie + WKc resend confirmed"
+
 echo ""
 echo "=== IT12 PASSED ==="
 echo "    Mode: tls-crypt-v2 (per-client key)"

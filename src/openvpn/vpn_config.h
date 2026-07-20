@@ -78,6 +78,23 @@ struct VpnConfig
         size_t max_clients = 100;
         int ping_timer_remote = 60;
         int renegotiate_seconds = 3600;
+
+        /**
+         * @brief Enable HMAC session-id (psid) cookie handshake on UDP.
+         * Default true: defer Connection/TLS until the client echoes the cookie.
+         * Ignored for TCP (anti-spoof defense is UDP-oriented).
+         */
+        bool psid_cookie = true;
+
+        /** @brief OpenVPN handshake_window (seconds); also sizes the cookie time bucket. */
+        int handshake_window = 60;
+
+        /**
+         * @brief tls-crypt-v2 cookie policy (OpenVPN: force-cookie / allow-noncookie).
+         * "allow-noncookie" (default): clients without early-neg may create state on HARD_RESET.
+         * "force-cookie": require early-neg + WKc resend; drop otherwise.
+         */
+        std::string tls_crypt_v2_cookie_mode = "allow-noncookie";
     };
     std::optional<ServerConfig> server;
 

@@ -46,6 +46,7 @@
 #include "openvpn/key_derivation.h"
 #include "openvpn/packet.h"
 #include "openvpn/protocol_constants.h"
+#include "openvpn/psid_cookie.h"
 #include "openvpn/push_exchange_helpers.h"
 #include "openvpn/tls_context.h"
 #include "openvpn/tls_crypt.h"
@@ -610,7 +611,12 @@ asio::awaitable<void> ClientControlAdapter<Derived>::SendHardReset()
 
     if (tls_crypt_)
     {
-        auto wrapped = tls_crypt_->Wrap(serialized, false);
+        // Advertise early negotiation for tls-crypt-v2 (psid cookie / WKc resend).
+        std::optional<std::uint32_t> counter_override;
+        if (v2_mode)
+            counter_override = openvpn::EARLY_NEG_START;
+
+        auto wrapped = tls_crypt_->Wrap(serialized, false, counter_override);
         if (!wrapped)
         {
             logger_->error("Failed to wrap hard reset");
@@ -656,11 +662,45 @@ asio::awaitable<void> ClientControlAdapter<Derived>::HandleControlPacket(const o
         remote_session_id_ = packet.session_id_.value_or(0);
         control_channel_->HandleHardReset(packet);
 
-        auto ack = control_channel_->GenerateExplicitAck();
-        if (!ack.empty())
-            co_await SendWrappedPacket(std::move(ack));
+        const auto flags = openvpn::ParseEarlyNegFlagsTlv(packet.payload_);
+        const bool resend_wkc = flags
+                                && ((*flags & openvpn::EARLY_NEG_FLAG_RESEND_WKC) != 0)
+                                && !tls_crypt_v2_wkc_.empty();
 
         SetState(VpnClientState::TlsHandshake);
+
+        if (resend_wkc)
+        {
+            // OpenVPN cookie path: P_CONTROL_WKC_V1 with ACK + empty payload + WKc.
+            auto serialized = control_channel_->GenerateWkcResendPacket();
+            if (serialized.empty())
+            {
+                logger_->error("Failed to build P_CONTROL_WKC_V1");
+                SetState(VpnClientState::Error);
+                co_return;
+            }
+            if (tls_crypt_)
+            {
+                auto wrapped = tls_crypt_->Wrap(serialized, false);
+                if (!wrapped)
+                {
+                    logger_->error("Failed to wrap P_CONTROL_WKC_V1");
+                    SetState(VpnClientState::Error);
+                    co_return;
+                }
+                serialized = std::move(*wrapped);
+            }
+            serialized.insert(serialized.end(), tls_crypt_v2_wkc_.begin(), tls_crypt_v2_wkc_.end());
+            co_await SendRawPacket(serialized);
+            logger_->info("Sent P_CONTROL_WKC_V1 (psid cookie WKc resend)");
+        }
+        else
+        {
+            auto ack = control_channel_->GenerateExplicitAck();
+            if (!ack.empty())
+                co_await SendWrappedPacket(std::move(ack));
+        }
+
         auto client_hello = control_channel_->InitiateTlsHandshake();
         if (client_hello && !client_hello->empty())
             co_await SendWrappedPacket(std::move(*client_hello));

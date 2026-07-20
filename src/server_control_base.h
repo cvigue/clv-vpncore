@@ -37,6 +37,7 @@
 #include "openvpn/key_derivation.h"
 #include "openvpn/packet.h"
 #include "openvpn/protocol_constants.h"
+#include "openvpn/psid_cookie.h"
 #include "openvpn/push_exchange_helpers.h"
 #include "openvpn/session_manager.h"
 #include "openvpn/tls_context.h"
@@ -70,6 +71,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <ctime>
 #include <future>
 #include <memory>
 #include <optional>
@@ -239,6 +241,10 @@ class ServerControlBase
 
         // TLS-Crypt keys
         LoadTlsCryptKeys();
+
+        // Psid cookie HMAC key (UDP DoS defense; unused when psid_cookie is off)
+        if (server_cfg.psid_cookie)
+            psid_cookie_key_ = openvpn::PsidCookieKey::Generate();
 
         // Config exchange
         config_exchange_ = std::make_unique<openvpn::ConfigExchange>();
@@ -455,14 +461,18 @@ class ServerControlBase
 
         Connection::Endpoint endpoint{.addr = sender.addr, .port = sender.port};
 
-        // V2 hard-reset: extract WKc, derive per-session key
+        // V2 hard-reset / WKc-resend: extract WKc, derive per-session key
         std::optional<openvpn::TlsCrypt> v2_session_key;
-        if (tls_crypt_v2_ && raw_opcode == openvpn::Opcode::P_CONTROL_HARD_RESET_CLIENT_V3)
+        const bool needs_wkc = tls_crypt_v2_
+                               && (raw_opcode == openvpn::Opcode::P_CONTROL_HARD_RESET_CLIENT_V3
+                                   || raw_opcode == openvpn::Opcode::P_CONTROL_WKC_V1);
+        if (needs_wkc)
         {
             auto wkc_len_opt = detail::ExtractV3WKcLength(data);
             if (!wkc_len_opt)
             {
-                logger_->warn("V3 hard reset: packet too short or invalid WKc length (packet={} bytes)",
+                logger_->warn("V2 WKc packet: too short or invalid WKc length (opcode={}, packet={} bytes)",
+                              static_cast<int>(raw_opcode),
                               data.size());
                 co_return;
             }
@@ -475,7 +485,7 @@ class ServerControlBase
             auto unwrap_result = tls_crypt_v2_->UnwrapClientKey(wkc_blob);
             if (!unwrap_result)
             {
-                logger_->warn("V3 hard reset: WKc unwrap failed");
+                logger_->warn("V2 WKc unwrap failed (opcode={})", static_cast<int>(raw_opcode));
                 co_return;
             }
 
@@ -491,6 +501,14 @@ class ServerControlBase
                           sender.addr.to_string(),
                           sender.port);
         }
+
+        // Peek early-negotiation advertisement from tls-crypt wrapper counter (before unwrap).
+        // Done here: counter is cleartext, and HandleHardReset needs the flag after unwrap.
+        const bool early_negotiation = [&]()
+        {
+            auto counter = openvpn::PeekWireTlsCryptCounter(data);
+            return counter && openvpn::SupportsEarlyNegotiation(*counter);
+        }();
 
         // Choose the correct TlsCrypt for unwrapping, and resolve the session
         // before unwrap so the peer-id gate can select the replay window.
@@ -552,10 +570,15 @@ class ServerControlBase
                                          endpoint,
                                          std::move(transport),
                                          std::move(v2_session_key),
-                                         std::move(seed));
+                                         std::move(seed),
+                                         early_negotiation);
         }
         else if (openvpn::IsDataPacket(packet.opcode_))
         {
+            // Slow path: TCP still posts all frames here (see TcpDataChannel
+            // ClientReceiveLoop REVIEW). UDP split-datapath handles data on the
+            // RX thread; DCO keeps data in-kernel. After TCP demux, treat this
+            // as unexpected (warn + drop), matching DCO.
             if (!session)
             {
                 logger_->warn("Received data packet without active session");
@@ -565,13 +588,155 @@ class ServerControlBase
         }
     }
 
+    [[nodiscard]] bool PsidCookieEnabled() const
+    {
+        if (!config_ || !config_->server || !psid_cookie_key_)
+            return false;
+        if (!config_->server->psid_cookie)
+            return false;
+        // UDP-oriented anti-spoof defense; TCP keeps eager create.
+        return config_->server->proto == "udp" || config_->server->proto == "udp6";
+    }
+
+    [[nodiscard]] bool ForceV2Cookie() const
+    {
+        return config_ && config_->server
+               && config_->server->tls_crypt_v2_cookie_mode == "force-cookie";
+    }
+
+    asio::awaitable<void> SendCookieChallenge(const openvpn::OpenVpnPacket &client_hr,
+                                              openvpn::SessionId client_sid,
+                                              openvpn::SessionId server_sid,
+                                              const transport::PeerEndpoint &sender,
+                                              transport::TransportHandle &transport,
+                                              std::optional<openvpn::TlsCrypt> &wrap_key,
+                                              bool v2_early_negotiation)
+    {
+        const std::uint32_t ack_id = client_hr.packet_id_.value_or(0);
+        std::vector<std::uint8_t> payload;
+        if (v2_early_negotiation)
+            payload = openvpn::BuildEarlyNegFlagsTlv(openvpn::EARLY_NEG_FLAG_RESEND_WKC);
+
+        auto pkt = openvpn::BuildCookieHardResetResponse(client_hr.opcode_,
+                                                         server_sid.value,
+                                                         client_sid.value,
+                                                         ack_id,
+                                                         client_hr.key_id_,
+                                                         std::move(payload),
+                                                         /*our_packet_id=*/0,
+                                                         /*force_server_v2=*/v2_early_negotiation);
+        auto serialized = pkt.Serialize();
+        if (serialized.empty())
+        {
+            logger_->warn("Failed to serialize psid cookie challenge");
+            co_return;
+        }
+
+        if (!wrap_key)
+        {
+            logger_->warn("psid cookie challenge: no tls-crypt key to wrap with");
+            co_return;
+        }
+
+        auto wrapped = wrap_key->Wrap(serialized, /*server_mode=*/true);
+        if (!wrapped)
+        {
+            logger_->warn("psid cookie challenge: tls-crypt wrap failed");
+            co_return;
+        }
+
+        try
+        {
+            co_await transport.Send(*wrapped);
+        }
+        catch (const std::exception &e)
+        {
+            logger_->error("psid cookie challenge send failed: {}", e.what());
+            co_return;
+        }
+
+        // Stable log line for IT17 / IT20 assertions.
+        logger_->info("psid cookie challenge sent to {}:{} (server_sid={:016x})",
+                      sender.addr.to_string(),
+                      sender.port,
+                      server_sid.value);
+    }
+
+    asio::awaitable<Connection *> TryAcceptCookieSession(
+        const openvpn::OpenVpnPacket &packet,
+        const transport::PeerEndpoint &sender,
+        const Connection::Endpoint &endpoint,
+        transport::TransportHandle transport,
+        std::optional<openvpn::TlsCrypt> v2_session_key,
+        std::optional<openvpn::TlsCryptReplayState> replay_seed)
+    {
+        if (!PsidCookieEnabled() || !packet.session_id_ || !packet.remote_session_id_)
+            co_return nullptr;
+
+        const bool has_own_pid = packet.opcode_ != openvpn::Opcode::P_ACK_V1;
+        if (!openvpn::IsEarlyHandshakeCookieEcho(packet, has_own_pid))
+            co_return nullptr;
+
+        openvpn::SessionId client_sid{packet.session_id_.value()};
+        openvpn::SessionId cookie_sid{packet.remote_session_id_.value()};
+        openvpn::PsidCookieEndpoint pep{.addr = sender.addr, .port = sender.port};
+        const auto now = static_cast<std::uint32_t>(std::time(nullptr));
+        const int handwindow = config_->server->handshake_window;
+
+        if (!openvpn::CheckSessionIdHmac(
+                *psid_cookie_key_, cookie_sid, client_sid, pep, handwindow, now))
+        {
+            logger_->warn("psid cookie reject from {}:{} (invalid HMAC session id)",
+                          sender.addr.to_string(),
+                          sender.port);
+            co_return nullptr;
+        }
+
+        // M4: only replace an existing endpoint session after cookie proof.
+        if (Connection *existing = session_manager_.FindSessionByEndpoint(endpoint))
+        {
+            logger_->info("Cookie-proven new client; replacing session {:016x}",
+                          existing->GetSessionId().value);
+            RemoveSessionSafe(existing->GetSessionId());
+            SplitPublishSessions();
+        }
+
+        openvpn::TlsCertConfig cert_config{
+            .ca_cert = config_->server->ca_cert,
+            .local_cert = config_->server->cert,
+            .local_key = config_->server->key};
+
+        Connection *session = &session_manager_.GetOrCreateSession(
+            cookie_sid, endpoint, true, cert_config, *logger_);
+        session->SetTransport(std::move(transport));
+        if (replay_seed)
+            session->SetTlsCryptReplay(std::move(*replay_seed));
+        if (v2_session_key)
+            session->SetSessionTlsCrypt(std::move(*v2_session_key));
+
+        if (!session->GetControlChannel().CompleteCookieHandshake(client_sid, packet.key_id_))
+        {
+            logger_->error("CompleteCookieHandshake failed for {:016x}", cookie_sid.value);
+            RemoveSessionSafe(cookie_sid);
+            SplitPublishSessions();
+            co_return nullptr;
+        }
+
+        logger_->info("psid cookie accepted, creating session {:016x} from {}:{}",
+                      cookie_sid.value,
+                      sender.addr.to_string(),
+                      sender.port);
+        co_return session;
+    }
+
     asio::awaitable<void> HandleControlPacket(Connection *session,
                                               const openvpn::OpenVpnPacket &packet,
                                               const transport::PeerEndpoint &sender,
                                               const Connection::Endpoint &endpoint,
                                               transport::TransportHandle transport,
                                               std::optional<openvpn::TlsCrypt> v2_session_key,
-                                              std::optional<openvpn::TlsCryptReplayState> replay_seed)
+                                              std::optional<openvpn::TlsCryptReplayState> replay_seed,
+                                              bool early_negotiation)
     {
         logger_->debug("Received control packet (opcode {})", static_cast<int>(packet.opcode_));
 
@@ -583,8 +748,26 @@ class ServerControlBase
                                                endpoint,
                                                std::move(transport),
                                                std::move(v2_session_key),
-                                               std::move(replay_seed));
+                                               std::move(replay_seed),
+                                               early_negotiation);
             co_return;
+        }
+
+        // Pre-session cookie echo (ACK / CONTROL / WKC).
+        if (!session
+            && (packet.opcode_ == openvpn::Opcode::P_ACK_V1
+                || packet.opcode_ == openvpn::Opcode::P_CONTROL_V1
+                || packet.opcode_ == openvpn::Opcode::P_CONTROL_WKC_V1))
+        {
+            session = co_await TryAcceptCookieSession(packet,
+                                                      sender,
+                                                      endpoint,
+                                                      std::move(transport),
+                                                      std::move(v2_session_key),
+                                                      std::move(replay_seed));
+            if (!session)
+                co_return;
+            // Fall through to dispatch the same packet into the new session.
         }
 
         if (session)
@@ -595,6 +778,11 @@ class ServerControlBase
                                       ? session->GetSessionTlsCrypt()
                                       : tls_crypt_;
             auto sess_transport = session->GetTransport();
+
+            // WKC is CONTROL_V1 for dispatch purposes (same layout after WKc strip).
+            openvpn::OpenVpnPacket dispatch_pkt = packet;
+            if (dispatch_pkt.opcode_ == openvpn::Opcode::P_CONTROL_WKC_V1)
+                dispatch_pkt.opcode_ = openvpn::Opcode::P_CONTROL_V1;
 
             SessionControlCallbacks callbacks{
                 .on_soft_reset = [this, session](const openvpn::OpenVpnPacket &pkt) -> asio::awaitable<void>
@@ -616,7 +804,7 @@ class ServerControlBase
                                                   session_crypt,
                                                   openvpn::PeerRole::Server,
                                                   sess_transport,
-                                                  packet,
+                                                  dispatch_pkt,
                                                   *logger_,
                                                   callbacks);
 
@@ -633,8 +821,7 @@ class ServerControlBase
                 logger_->info("TX keys activated (client ACKed KEY_METHOD_2)");
             }
         }
-        else if (packet.opcode_ != openvpn::Opcode::P_CONTROL_HARD_RESET_CLIENT_V2
-                 && packet.opcode_ != openvpn::Opcode::P_CONTROL_HARD_RESET_CLIENT_V3)
+        else
         {
             logger_->warn("Received control packet without active session");
         }
@@ -646,7 +833,8 @@ class ServerControlBase
         const Connection::Endpoint &endpoint,
         transport::TransportHandle transport,
         std::optional<openvpn::TlsCrypt> v2_session_key,
-        std::optional<openvpn::TlsCryptReplayState> replay_seed)
+        std::optional<openvpn::TlsCryptReplayState> replay_seed,
+        bool early_negotiation)
     {
         logger_->info("Client initiating handshake from {}:{}",
                       sender.addr.to_string(),
@@ -672,12 +860,76 @@ class ServerControlBase
                     co_await SendWrappedPacket(std::move(hard_reset_response), session);
                 co_return session;
             }
-            else
+
+            // Different client sid on same endpoint.
+            // Without cookies: replace (legacy). With cookies: drop — do not
+            // challenge or evict. OpenVPN only runs the cookie path when no
+            // instance exists for the real address; challenging here would
+            // reflect a HARD_RESET_SERVER at a live peer (spoofed source).
+            // Legitimate reuse of the endpoint waits for dead-peer cleanup.
+            if (!PsidCookieEnabled())
             {
                 logger_->info("New client session ID, replacing existing session");
                 RemoveSessionSafe(session->GetSessionId());
                 SplitPublishSessions();
                 session = nullptr;
+            }
+            else
+            {
+                logger_->warn(
+                    "Ignoring HARD_RESET with new client sid {:016x} from {}:{} — "
+                    "endpoint already has session {:016x} (peer sid {:016x})",
+                    client_session_id.value,
+                    sender.addr.to_string(),
+                    sender.port,
+                    session->GetSessionId().value,
+                    peer_session ? peer_session->value : 0);
+                co_return session;
+            }
+        }
+
+        const bool is_v2_hr = packet.opcode_ == openvpn::Opcode::P_CONTROL_HARD_RESET_CLIENT_V3;
+
+        if (PsidCookieEnabled())
+        {
+            // tls-crypt-v2 without early negotiation: force-cookie drops; allow-noncookie eager-creates.
+            if (is_v2_hr && !early_negotiation)
+            {
+                if (ForceV2Cookie())
+                {
+                    logger_->warn(
+                        "V2 hard reset without early negotiation rejected (force-cookie) from {}:{}",
+                        sender.addr.to_string(),
+                        sender.port);
+                    co_return nullptr;
+                }
+                // allow-noncookie: fall through to eager create below
+            }
+            else
+            {
+                // Shared-key tls-crypt, or V2 with early negotiation: send cookie, no state.
+                openvpn::PsidCookieEndpoint pep{.addr = sender.addr, .port = sender.port};
+                const auto now = static_cast<std::uint32_t>(std::time(nullptr));
+                openvpn::SessionId cookie_sid = openvpn::CalculateSessionIdHmac(
+                    *psid_cookie_key_,
+                    client_session_id,
+                    pep,
+                    config_->server->handshake_window,
+                    /*offset=*/0,
+                    now);
+
+                std::optional<openvpn::TlsCrypt> *wrap_key = &tls_crypt_;
+                if (v2_session_key)
+                    wrap_key = &v2_session_key;
+
+                co_await SendCookieChallenge(packet,
+                                             client_session_id,
+                                             cookie_sid,
+                                             sender,
+                                             transport,
+                                             *wrap_key,
+                                             /*v2_early_negotiation=*/is_v2_hr && early_negotiation);
+                co_return nullptr;
             }
         }
 
@@ -1145,6 +1397,7 @@ class ServerControlBase
     std::unique_ptr<openvpn::ConfigExchange> config_exchange_;
     std::optional<openvpn::TlsCrypt> tls_crypt_;
     std::optional<openvpn::TlsCryptV2> tls_crypt_v2_;
+    std::optional<openvpn::PsidCookieKey> psid_cookie_key_;
 
     DataPathStats::RxCounters rx_counters_{};
     DataPathStats::TxCounters tx_counters_{};

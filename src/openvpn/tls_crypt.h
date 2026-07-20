@@ -136,10 +136,14 @@ class TlsCrypt
      * @brief Wrap (encrypt and authenticate) a control packet
      * @param plaintext Plaintext packet (including opcode)
      * @param server_mode Whether we're operating as server
+     * @param counter_override If set, use this tls-crypt wrapper counter instead of
+     *        the internal send counter (e.g. EARLY_NEG_START = 0x0f000000). Does not
+     *        advance the internal counter when overridden.
      * @return Wrapped packet data or nullopt on error
      */
     std::optional<std::vector<std::uint8_t>> Wrap(std::span<const std::uint8_t> plaintext,
-                                                  bool server_mode);
+                                                  bool server_mode,
+                                                  std::optional<std::uint32_t> counter_override = std::nullopt);
 
   private:
     TlsCrypt(std::vector<std::uint8_t> key_material, spdlog::logger &logger);

@@ -1,15 +1,10 @@
 #!/bin/bash
-# test_it1_handshake.sh — IT1: Single client handshake + tunnel ping
+# test_it18b_ovpn_server_v2_force_cookie.sh — IT18b: openvpn server force-cookie + simple_vpn client
 #
-# Validates the full VPN stack end-to-end:
-#   TLS handshake → TLS-Crypt → PUSH_REPLY → data channel → TUN routing
+# Like IT18 but openvpn server uses tls-crypt-v2 force-cookie, requiring the
+# client to complete early-neg + P_CONTROL_WKC_V1 WKc resend.
 #
-# Prerequisites:
-#   - Root / CAP_NET_ADMIN
-#   - simple_vpn built at build/demos/simple_vpn
-#   - Network namespaces set up via integration/netns/setup_vpn.sh 1
-#
-# Usage: sudo ./test_it1_handshake.sh [PROJECT_ROOT]
+# Usage: sudo ./test_it18b_ovpn_server_v2_force_cookie.sh [PROJECT_ROOT]
 
 set -euo pipefail
 
@@ -17,19 +12,19 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="${1:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
 BINARY="${PROJECT_ROOT}/build/demos/simple_vpn"
 
-SERVER_CONFIG="${PROJECT_ROOT}/integration/configs/it_server.json"
-CLIENT_CONFIG="${PROJECT_ROOT}/integration/configs/it_client.json"
+OVPN_SERVER_CONF="${SCRIPT_DIR}/configs/openvpn/it18_server_force_cookie.conf"
+CLIENT_CONFIG="${PROJECT_ROOT}/integration/configs/it_client_v2.json"
 
 NS_SERVER="ns-vpn-server"
 NS_CLIENT="ns-vpn-client-0"
 
 TUNNEL_SERVER_IP="10.8.0.1"
-HANDSHAKE_TIMEOUT=15        # seconds to wait for handshake
+SERVER_READY_TIMEOUT=15
+HANDSHAKE_TIMEOUT=20
 PING_COUNT=5
-PING_TIMEOUT=3              # per-ping deadline
+PING_TIMEOUT=3
 
-# Log locations
-LOG_DIR="/tmp/vpn-it1"
+LOG_DIR="/tmp/vpn-it18b"
 SERVER_LOG="${LOG_DIR}/server.log"
 CLIENT_LOG="${LOG_DIR}/client.log"
 
@@ -39,9 +34,7 @@ CLIENT_PID=""
 # ── Helpers ──────────────────────────────────────────────────────────
 
 ns_exec() { ip netns exec "$1" "${@:2}"; }
-
-# Background variant: exec ensures $! == actual process PID (no intermediate fork)
-ns_bg() { exec nsenter --net="/run/netns/$1" -- "${@:2}"; }
+ns_bg()   { exec nsenter --net="/run/netns/$1" -- "${@:2}"; }
 
 cleanup() {
     echo ""
@@ -68,11 +61,15 @@ fail() {
 
 # ── Preconditions ────────────────────────────────────────────────────
 
-echo "=== IT1: Single Client Handshake + Ping ==="
+echo "=== IT18b: OpenVPN Server force-cookie + simple_vpn Client (tls-crypt-v2) ==="
 
-# Escalate to root if not already (supports direct invocation)
 if [[ $(id -u) -ne 0 ]]; then
     exec sudo --preserve-env=PATH "$0" "$@"
+fi
+
+if ! command -v openvpn >/dev/null 2>&1; then
+    echo "SKIP: openvpn not found on PATH"
+    exit 77
 fi
 
 if [[ ! -x "${BINARY}" ]]; then
@@ -81,7 +78,13 @@ if [[ ! -x "${BINARY}" ]]; then
     exit 1
 fi
 
-# Verify namespaces exist
+# Verify tls-crypt-v2 key material exists
+if [[ ! -f "${PROJECT_ROOT}/test_data/certs/tls-crypt-v2-server.key" ]]; then
+    echo "Error: tls-crypt-v2 keys not found."
+    echo "       Run test_data/certs/gen_tls_crypt_v2_keys.sh first."
+    exit 1
+fi
+
 for ns in "${NS_SERVER}" "${NS_CLIENT}"; do
     if ! ip netns list | grep -qw "${ns}"; then
         echo "Error: Namespace ${ns} not found."
@@ -93,25 +96,39 @@ done
 mkdir -p "${LOG_DIR}"
 rm -f "${SERVER_LOG}" "${CLIENT_LOG}"
 
-# Ensure relative paths in configs (test_data/certs/...) resolve correctly
 cd "${PROJECT_ROOT}"
 
-# ── Start server ─────────────────────────────────────────────────────
+# ── Start openvpn server (tls-crypt-v2) ──────────────────────────────
 
-echo "[1/5] Starting server in ${NS_SERVER}..."
-ns_bg "${NS_SERVER}" "${BINARY}" "${SERVER_CONFIG}" \
+echo "[1/6] Starting openvpn server (tls-crypt-v2) in ${NS_SERVER}..."
+ns_bg "${NS_SERVER}" openvpn \
+    --cd "${PROJECT_ROOT}" \
+    --config "${OVPN_SERVER_CONF}" \
     > "${SERVER_LOG}" 2>&1 &
 SERVER_PID=$!
-sleep 2
 
-if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
-    fail "Server exited immediately"
+server_ready=0
+elapsed=0
+while (( elapsed < SERVER_READY_TIMEOUT )); do
+    if grep -q "Initialization Sequence Completed" "${SERVER_LOG}" 2>/dev/null; then
+        server_ready=1
+        break
+    fi
+    if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
+        fail "openvpn server exited before initialising"
+    fi
+    sleep 1
+    (( elapsed++ )) || true
+done
+
+if (( server_ready == 0 )); then
+    fail "openvpn server did not initialise within ${SERVER_READY_TIMEOUT}s"
 fi
-echo "      Server PID: ${SERVER_PID}"
+echo "      openvpn server ready in ~${elapsed}s (PID: ${SERVER_PID})"
 
-# ── Start client ─────────────────────────────────────────────────────
+# ── Start simple_vpn client with tls-crypt-v2 key ────────────────────
 
-echo "[2/5] Starting client in ${NS_CLIENT}..."
+echo "[2/6] Starting simple_vpn client (tls-crypt-v2) in ${NS_CLIENT}..."
 ns_bg "${NS_CLIENT}" "${BINARY}" "${CLIENT_CONFIG}" \
     > "${CLIENT_LOG}" 2>&1 &
 CLIENT_PID=$!
@@ -119,23 +136,21 @@ echo "      Client PID: ${CLIENT_PID}"
 
 # ── Wait for handshake ───────────────────────────────────────────────
 
-echo "[3/5] Waiting up to ${HANDSHAKE_TIMEOUT}s for handshake..."
+echo "[3/6] Waiting up to ${HANDSHAKE_TIMEOUT}s for handshake..."
 
 handshake_ok=0
 elapsed=0
 while (( elapsed < HANDSHAKE_TIMEOUT )); do
-    # Check client log for "Connected" state transition
     if grep -qi "client connected\|state.*connected\|connected to server\|PUSH_REPLY.*received\|tunnel established" \
          "${CLIENT_LOG}" 2>/dev/null; then
         handshake_ok=1
         break
     fi
-    # Check if either process died
     if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
-        fail "Server process died during handshake"
+        fail "openvpn server died during handshake"
     fi
     if ! kill -0 "${CLIENT_PID}" 2>/dev/null; then
-        fail "Client process died during handshake"
+        fail "simple_vpn client died during handshake"
     fi
     sleep 1
     (( elapsed++ )) || true
@@ -148,16 +163,13 @@ echo "      Handshake completed in ~${elapsed}s"
 
 # ── Ping through tunnel ─────────────────────────────────────────────
 
-echo "[4/5] Pinging tunnel gateway ${TUNNEL_SERVER_IP} from client..."
-
-# Small settle time for routes to install
+echo "[4/6] Pinging openvpn server tunnel IP ${TUNNEL_SERVER_IP} from client..."
 sleep 1
 
 if ns_exec "${NS_CLIENT}" ping -c "${PING_COUNT}" -W "${PING_TIMEOUT}" \
     "${TUNNEL_SERVER_IP}" > "${LOG_DIR}/ping.log" 2>&1; then
     echo "      Ping successful (${PING_COUNT}/${PING_COUNT})"
 else
-    # Check partial success
     received=$(grep -oP '\d+(?= received)' "${LOG_DIR}/ping.log" || echo "0")
     if (( received > 0 )); then
         echo "      Partial ping success (${received}/${PING_COUNT})"
@@ -173,24 +185,20 @@ echo ""
 echo "--- Ping Results ---"
 cat "${LOG_DIR}/ping.log"
 
-# ── Negative validation: tunnel requires VPN ─────────────────────────
+# ── Negative validation ─────────────────────────────────────────────
 
 echo ""
 echo "[6/6] Negative validation — stopping VPN, confirming tunnel dies..."
 
-# Kill VPN processes
 kill -TERM "${CLIENT_PID}" 2>/dev/null || true
 kill -TERM "${SERVER_PID}" 2>/dev/null || true
 sleep 2
 kill -9 "${CLIENT_PID}" 2>/dev/null || true
 kill -9 "${SERVER_PID}" 2>/dev/null || true
 wait 2>/dev/null || true
-# Clear PIDs so cleanup trap doesn't re-kill
 CLIENT_PID=""
 SERVER_PID=""
 
-# Remove TUN devices — persistent TUNs survive process death, so
-# explicitly delete them to prove the tunnel was the only route.
 for ns in "${NS_SERVER}" "${NS_CLIENT}"; do
     for dev in $(ns_exec "$ns" ip -o link show type tun 2>/dev/null | awk -F: '{print $2}' | tr -d ' '); do
         ns_exec "$ns" ip link del "$dev" 2>/dev/null || true
@@ -203,15 +211,11 @@ else
     echo "      Tunnel ping correctly failed after VPN stopped"
 fi
 
-# ── Psid cookie path assertions (default-on for UDP tls-crypt) ───────
-if ! grep -q "psid cookie challenge sent" "${SERVER_LOG}" 2>/dev/null; then
-    fail "Server log missing 'psid cookie challenge sent'"
+if ! grep -q "Sent P_CONTROL_WKC_V1" "${CLIENT_LOG}" 2>/dev/null; then
+    fail "Client log missing 'Sent P_CONTROL_WKC_V1' (force-cookie WKc resend)"
 fi
-if ! grep -q "psid cookie accepted, creating session" "${SERVER_LOG}" 2>/dev/null; then
-    fail "Server log missing 'psid cookie accepted, creating session'"
-fi
-echo "      Psid cookie challenge + accept confirmed in server log"
+echo "      Client WKc resend confirmed"
 
 echo ""
-echo "=== IT1 PASSED ==="
+echo "=== IT18b PASSED ==="
 echo "    Logs: ${LOG_DIR}/"

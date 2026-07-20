@@ -184,6 +184,15 @@ class ControlChannel
     bool HandleHardReset(const OpenVpnPacket &packet);
 
     /**
+     * @brief Complete the server-side handshake after a validated psid cookie.
+     *
+     * Used when the HARD_RESET response was sent as a stateless cookie challenge
+     * (control packet_id 0) before this ControlChannel existed. Advances the
+     * outbound packet_id past 0 and enters TlsHandshake.
+     */
+    bool CompleteCookieHandshake(SessionId peer_session_id, std::uint8_t key_id);
+
+    /**
      * @brief Handle incoming soft reset (renegotiation) from peer
      * @param packet Parsed OpenVpnPacket containing soft reset
      * @param cert_config TLS certificate configuration for new handshake
@@ -212,6 +221,14 @@ class ControlChannel
      * @return Serialized P_ACK_V1 packet, or empty if no pending ACKs
      */
     std::vector<std::uint8_t> GenerateExplicitAck();
+
+    /**
+     * @brief Build a P_CONTROL_WKC_V1 (empty payload) with piggybacked ACKs.
+     *
+     * Used by tls-crypt-v2 clients completing a psid-cookie handshake. Caller
+     * wraps with tls-crypt and appends the WKc blob.
+     */
+    std::vector<std::uint8_t> GenerateWkcResendPacket();
 
     /**
      * @brief Initiate TLS handshake (server sends ServerHello)

@@ -222,6 +222,12 @@ else
     echo "      Tunnel ping correctly failed after VPN stopped"
 fi
 
+# Client advertises early-neg; OpenVPN 2.6+ cookie path should trigger WKc resend.
+if ! grep -q "Sent P_CONTROL_WKC_V1" "${CLIENT_LOG}" 2>/dev/null; then
+    fail "Client log missing 'Sent P_CONTROL_WKC_V1' (cookie WKc resend)"
+fi
+echo "      Client WKc resend confirmed"
+
 echo ""
 echo "=== IT18 PASSED ==="
 echo "    Logs: ${LOG_DIR}/"

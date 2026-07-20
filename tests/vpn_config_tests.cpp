@@ -677,6 +677,41 @@ TEST_F(VpnConfigTest, ParseTlsCryptV2ServerKey)
     EXPECT_TRUE(config.server->tls_crypt_key.empty());
 }
 
+TEST_F(VpnConfigTest, PsidCookieDefaultsAndParse)
+{
+    {
+        OpenVpnConfig config = OpenVpnConfigParser::ParseString(R"({"server":{"port":1194}})");
+        ASSERT_TRUE(config.server.has_value());
+        EXPECT_TRUE(config.server->psid_cookie);
+        EXPECT_EQ(config.server->handshake_window, 60);
+        EXPECT_EQ(config.server->tls_crypt_v2_cookie_mode, "allow-noncookie");
+    }
+    {
+        OpenVpnConfig config = OpenVpnConfigParser::ParseString(R"(
+        {
+            "server": {
+                "port": 1194,
+                "psid_cookie": false,
+                "handshake_window": 120,
+                "tls_crypt_v2_cookie_mode": "force-cookie"
+            }
+        })");
+        ASSERT_TRUE(config.server.has_value());
+        EXPECT_FALSE(config.server->psid_cookie);
+        EXPECT_EQ(config.server->handshake_window, 120);
+        EXPECT_EQ(config.server->tls_crypt_v2_cookie_mode, "force-cookie");
+    }
+}
+
+TEST_F(VpnConfigTest, RejectInvalidTlsCryptV2CookieMode)
+{
+    EXPECT_THROW(
+        OpenVpnConfigParser::ParseString(R"(
+        {"server":{"port":1194,"tls_crypt_v2_cookie_mode":"bogus"}}
+        )"),
+        std::runtime_error);
+}
+
 TEST_F(VpnConfigTest, ParseTlsCryptV2ClientKey)
 {
     std::string json_str = R"(

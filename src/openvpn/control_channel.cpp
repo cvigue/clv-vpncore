@@ -131,6 +131,27 @@ bool ControlChannel::HandleHardReset(const OpenVpnPacket &packet)
     return false;
 }
 
+bool ControlChannel::CompleteCookieHandshake(SessionId peer_session_id, std::uint8_t key_id)
+{
+    if (!tls_context_)
+        return false;
+    if (state_ != State::Disconnected && state_ != State::HardResetPending)
+    {
+        logger_->warn("CompleteCookieHandshake: rejected - wrong state {}", static_cast<int>(state_));
+        return false;
+    }
+
+    peer_session_id_ = peer_session_id;
+    key_id_ = key_id & KEY_ID_MASK;
+    // Stateless cookie challenge already used control packet_id 0 outbound.
+    outbound_packet_id_ = 1;
+    // Client HARD_RESET was packet_id 0; treat it as already received so the
+    // next CONTROL (ClientHello, typically id 1) passes ValidatePacketId.
+    last_received_packet_id_ = 0;
+    state_ = State::TlsHandshake;
+    return true;
+}
+
 std::vector<std::uint8_t> ControlChannel::HandleSoftReset(const OpenVpnPacket &packet, const TlsCertConfig &cert_config)
 {
     if (!packet.IsSoftReset())
@@ -272,6 +293,32 @@ std::vector<std::uint8_t> ControlChannel::GenerateExplicitAck()
                                          std::move(acks_to_send));
 
     return ack_packet.Serialize();
+}
+
+std::vector<std::uint8_t> ControlChannel::GenerateWkcResendPacket()
+{
+    if (!peer_session_id_)
+    {
+        logger_->error("GenerateWkcResendPacket: no peer_session_id");
+        return {};
+    }
+
+    // Do not TrackOutboundPacket: the caller appends WKc after tls-crypt wrap,
+    // so a reliability retransmit of the plaintext would omit WKc. If the WKC
+    // is lost, the client's HARD_RESET retransmit restarts the cookie exchange.
+    const std::uint32_t packet_id = GetNextPacketId();
+    auto acks_to_send = CollectAcksForPiggyback();
+
+    OpenVpnPacket pkt;
+    pkt.opcode_ = Opcode::P_CONTROL_WKC_V1;
+    pkt.key_id_ = key_id_ & KEY_ID_MASK;
+    pkt.session_id_ = session_id_.value;
+    pkt.packet_id_ = packet_id;
+    pkt.payload_ = {};
+    if (!acks_to_send.empty())
+        pkt.withAcks(acks_to_send, peer_session_id_->value);
+
+    return pkt.Serialize();
 }
 
 bool ControlChannel::PromoteToKeyMaterialReady()

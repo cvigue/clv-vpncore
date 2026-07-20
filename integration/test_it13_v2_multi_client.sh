@@ -222,6 +222,13 @@ else
     echo "      Warning: Could not determine client tunnel IPs for C2C test"
 fi
 
+challenge_count=$(grep -c "psid cookie challenge sent" "${SERVER_LOG}" 2>/dev/null || echo 0)
+accept_count=$(grep -c "psid cookie accepted, creating session" "${SERVER_LOG}" 2>/dev/null || echo 0)
+if (( challenge_count < NUM_CLIENTS || accept_count < NUM_CLIENTS )); then
+    fail "Expected >=${NUM_CLIENTS} cookie challenge/accept events (got challenge=${challenge_count} accept=${accept_count})"
+fi
+echo "      Psid cookie: ${challenge_count} challenges, ${accept_count} accepts"
+
 echo ""
 echo "=== IT13 PASSED ==="
 echo "    Mode: tls-crypt-v2 (3 distinct per-client keys)"
