@@ -461,6 +461,11 @@ class TcpDataChannel
         }
     }
 
+    // REVIEW: TCP is the remaining outlier vs UDP/DCO demux. UdpCore posts only
+    // control (data opcodes decrypt + write TUN on the RX thread); DCO leaves
+    // data in-kernel. Target: peek opcode here — data + installed session crypto
+    // → decrypt/TUN on internal_ctx_; control (or pre-key data) → OnControlPacket
+    // only. Then ProcessNetworkPacket can treat data as unexpected (DCO-style).
     asio::awaitable<void> ClientReceiveLoop(transport::TcpTransport tcpTransport)
     {
         auto peer = tcpTransport.GetPeer();
@@ -486,6 +491,7 @@ class TcpDataChannel
                                peer.addr.to_string(),
                                peer.port);
 
+                // Today every frame is marshaled to the control plane (see REVIEW above).
                 adapter_->OnControlPacket(std::move(data),
                                           peer,
                                           transport::TransportHandle(tcpTransport));
