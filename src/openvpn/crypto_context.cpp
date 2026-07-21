@@ -30,6 +30,7 @@
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -43,24 +44,40 @@ static std::vector<std::uint8_t> EncryptAeadDispatch(CipherAlgorithm algo,
                                                      std::span<const std::uint8_t> key,
                                                      std::span<const std::uint8_t> nonce,
                                                      std::span<const std::uint8_t> plaintext,
-                                                     std::span<const std::uint8_t> aad)
+                                                     std::span<const std::uint8_t> aad,
+                                                     std::string *fail_msg = nullptr)
 {
     const auto *traits = GetAeadTraits(algo);
     if (!traits)
         return {};
-    return OpenSSL::EncryptAead(*traits, key, nonce, plaintext, aad);
+    auto r = OpenSSL::TryEncryptAead(*traits, key, nonce, plaintext, aad);
+    if (!r)
+    {
+        if (fail_msg)
+            *fail_msg = r.error().message();
+        return {};
+    }
+    return *std::move(r);
 }
 
 static std::vector<std::uint8_t> DecryptAeadDispatch(CipherAlgorithm algo,
                                                      std::span<const std::uint8_t> key,
                                                      std::span<const std::uint8_t> nonce,
                                                      std::span<const std::uint8_t> ciphertext_with_tag,
-                                                     std::span<const std::uint8_t> aad)
+                                                     std::span<const std::uint8_t> aad,
+                                                     std::string *fail_msg = nullptr)
 {
     const auto *traits = GetAeadTraits(algo);
     if (!traits)
         return {};
-    return OpenSSL::DecryptAead(*traits, key, nonce, ciphertext_with_tag, aad);
+    auto r = OpenSSL::TryDecryptAead(*traits, key, nonce, ciphertext_with_tag, aad);
+    if (!r)
+    {
+        if (fail_msg)
+            *fail_msg = r.error().message();
+        return {};
+    }
+    return *std::move(r);
 }
 
 // ============================================================================
@@ -77,7 +94,10 @@ EncryptAeadInPlaceDispatch(CipherAlgorithm algo,
     const auto *traits = GetAeadTraits(algo);
     if (!traits)
         return {};
-    return OpenSSL::EncryptAeadInPlace(*traits, key, nonce, data, aad);
+    auto r = OpenSSL::TryEncryptAeadInPlace(*traits, key, nonce, data, aad);
+    if (!r)
+        return {};
+    return *std::move(r);
 }
 
 static bool DecryptAeadInPlaceDispatch(CipherAlgorithm algo,
@@ -223,41 +243,40 @@ std::vector<std::uint8_t> CryptoContext::EncryptPacketWithId(std::span<const std
 
     auto nonce = GenerateNonce(packet_id, key);
 
-    try
+    if (encrypt_ctx_)
     {
-        if (encrypt_ctx_)
+        std::vector<std::uint8_t> ct(plaintext.begin(), plaintext.end());
+        auto tag = encrypt_ctx_->TryEncryptInPlace(nonce, std::span<std::uint8_t>(ct), encrypted_packet.aad_);
+        if (!tag)
         {
-            std::vector<std::uint8_t> ct(plaintext.begin(), plaintext.end());
-            encrypt_ctx_->SetEncryptNonce(nonce);
-            encrypt_ctx_->UpdateEncryptAad(encrypted_packet.aad_);
-            encrypt_ctx_->UpdateEncryptInPlace(std::span<std::uint8_t>(ct));
-            auto tag = encrypt_ctx_->FinalizeEncryptTag();
-            std::vector<std::uint8_t> payload;
-            payload.reserve(tag.size() + ct.size());
-            payload.insert(payload.end(), tag.begin(), tag.end());
-            payload.insert(payload.end(), ct.begin(), ct.end());
-            encrypted_packet.payload_ = std::move(payload);
+            spdlog::error("EncryptPacketWithId: AEAD encryption failed: {}", tag.error().message());
+            return {};
         }
-        else
-        {
-            auto encrypted = EncryptAeadDispatch(
-                key.cipher_algorithm,
-                std::span<const std::uint8_t>(key.cipher_key.data(), key.cipher_key.size()),
-                nonce,
-                plaintext,
-                encrypted_packet.aad_);
-            if (encrypted.empty())
-            {
-                spdlog::error("EncryptPacketWithId: encryption returned empty result");
-                return {};
-            }
-            encrypted_packet.payload_ = ReorderTagToFront(encrypted);
-        }
+        std::vector<std::uint8_t> payload;
+        payload.reserve(tag->size() + ct.size());
+        payload.insert(payload.end(), tag->begin(), tag->end());
+        payload.insert(payload.end(), ct.begin(), ct.end());
+        encrypted_packet.payload_ = std::move(payload);
     }
-    catch (const OpenSSL::SslException &e)
+    else
     {
-        spdlog::error("EncryptPacketWithId: AEAD encryption failed: {}", e.what());
-        return {};
+        std::string fail_msg;
+        auto encrypted = EncryptAeadDispatch(
+            key.cipher_algorithm,
+            std::span<const std::uint8_t>(key.cipher_key.data(), key.cipher_key.size()),
+            nonce,
+            plaintext,
+            encrypted_packet.aad_,
+            &fail_msg);
+        if (encrypted.empty())
+        {
+            if (!fail_msg.empty())
+                spdlog::error("EncryptPacketWithId: AEAD encryption failed: {}", fail_msg);
+            else
+                spdlog::error("EncryptPacketWithId: encryption returned empty result");
+            return {};
+        }
+        encrypted_packet.payload_ = ReorderTagToFront(encrypted);
     }
 
     RecordOutboundEncrypt(plaintext.size(), primary_encrypt_.cipher_algorithm);
@@ -444,37 +463,32 @@ std::vector<std::uint8_t> CryptoContext::DecryptPacket(const OpenVpnPacket &pack
                    HexDump(nonce, 0, ""),
                    HexDump(packet.aad_, 16, ""));
 
-    try
-    {
-        // Dispatch to correct AEAD cipher based on key's algorithm
-        auto plaintext = DecryptAeadDispatch(
-            key.cipher_algorithm,
-            key.cipher_key,
-            nonce,
-            reordered_payload,
-            packet.aad_);
+    std::string fail_msg;
+    auto plaintext = DecryptAeadDispatch(
+        key.cipher_algorithm,
+        key.cipher_key,
+        nonce,
+        reordered_payload,
+        packet.aad_,
+        &fail_msg);
 
-        if (plaintext.empty() && !reordered_payload.empty())
-        {
-            // Empty result with non-empty input means unsupported cipher
+    if (plaintext.empty())
+    {
+        if (!fail_msg.empty())
+            logger_->error("DecryptPacket: AEAD decryption failed: {}", fail_msg);
+        else if (!reordered_payload.empty())
             logger_->error("DecryptPacket: decryption returned empty result");
-            return {};
-        }
-
-        spdlog::debug("DecryptPacket: successfully decrypted {} bytes with cipher {}",
-                      plaintext.size(),
-                      static_cast<int>(key.cipher_algorithm));
-
-        // Update anti-replay window after successful decryption
-        slot->replay.Accept(pkt_id);
-
-        return plaintext;
-    }
-    catch (const OpenSSL::SslException &e)
-    {
-        logger_->error("DecryptPacket: AEAD decryption failed: {}", e.what());
         return {};
     }
+
+    spdlog::debug("DecryptPacket: successfully decrypted {} bytes with cipher {}",
+                  plaintext.size(),
+                  static_cast<int>(key.cipher_algorithm));
+
+    // Update anti-replay window after successful decryption
+    slot->replay.Accept(pkt_id);
+
+    return plaintext;
 }
 
 std::array<std::uint8_t, 12> CryptoContext::GenerateNonce(std::uint32_t packet_id,

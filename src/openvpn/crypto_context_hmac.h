@@ -14,7 +14,6 @@
 #include "openvpn/crypto_algorithms.h"
 #include "openvpn/crypto_context.h"
 
-#include <HelpSslException.h>
 #include <HelpSslHmac.h>
 
 #include <cstdint>
@@ -36,26 +35,23 @@ inline std::vector<std::uint8_t> ComputeHmac(const EncryptionKey &key,
     if (key.hmac_algorithm == HmacAlgorithm::NONE)
         return {};
 
-    try
+    switch (key.hmac_algorithm)
     {
-        switch (key.hmac_algorithm)
+    case HmacAlgorithm::SHA256:
         {
-        case HmacAlgorithm::SHA256:
-            {
-                auto tag = clv::OpenSSL::HmacSha256(key.hmac_key, data);
-                return std::vector<std::uint8_t>(tag.begin(), tag.end());
-            }
-        case HmacAlgorithm::SHA512:
-            {
-                auto tag = clv::OpenSSL::HmacSha512(key.hmac_key, data);
-                return std::vector<std::uint8_t>(tag.begin(), tag.end());
-            }
-        case HmacAlgorithm::NONE:
-            return {};
+            auto tag = clv::OpenSSL::TryHmacSha256(key.hmac_key, data);
+            if (!tag)
+                return {};
+            return std::vector<std::uint8_t>(tag->begin(), tag->end());
         }
-    }
-    catch (const clv::OpenSSL::SslException &)
-    {
+    case HmacAlgorithm::SHA512:
+        {
+            auto tag = clv::OpenSSL::TryHmacSha512(key.hmac_key, data);
+            if (!tag)
+                return {};
+            return std::vector<std::uint8_t>(tag->begin(), tag->end());
+        }
+    case HmacAlgorithm::NONE:
         return {};
     }
 

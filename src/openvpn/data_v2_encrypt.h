@@ -11,9 +11,9 @@
 #include "openvpn/data_v2_wire.h"
 #include "openvpn/packet.h"
 #include "openvpn/protocol_constants.h"
+#include "util/byte_packer.h"
 
 #include <HelpSslCipher.h>
-#include <HelpSslException.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -54,21 +54,14 @@ namespace clv::vpn::openvpn {
     auto nonce = GenerateLegacyDataV2Nonce(packet_id, cipher_iv);
     auto aad = buf.subspan(0, kDataV2HeaderLen + kDataV2PacketIdLen);
 
-    try
-    {
-        auto plaintext_span = buf.subspan(kDataV2Overhead, payload_len);
-        encrypt_ctx.SetEncryptNonce(nonce);
-        encrypt_ctx.UpdateEncryptAad(aad);
-        encrypt_ctx.UpdateEncryptInPlace(plaintext_span);
-        auto tag = encrypt_ctx.FinalizeEncryptTag();
-        std::memcpy(buf.data() + kDataV2HeaderLen + kDataV2PacketIdLen,
-                    tag.data(),
-                    kDataV2TagLen);
-    }
-    catch (const OpenSSL::SslException &)
-    {
+    auto plaintext_span = buf.subspan(kDataV2Overhead, payload_len);
+    auto tag = encrypt_ctx.TryEncryptInPlace(nonce, plaintext_span, aad);
+    if (!tag)
         return 0;
-    }
+
+    std::memcpy(buf.data() + kDataV2HeaderLen + kDataV2PacketIdLen,
+                tag->data(),
+                kDataV2TagLen);
 
     return total_len;
 }

@@ -4,6 +4,7 @@
 #define CLV_VPN_OPENVPN_DATA_V2_DECRYPT_H
 
 #include "HelpSslException.h"
+#include "openvpn/aead_traits.h"
 #include "openvpn/crypto_context.h"
 #include "openvpn/data_v2_wire.h"
 #include "openvpn/packet.h"
@@ -131,39 +132,41 @@ struct DataV2DecryptLog
     const std::size_t ct_len = buf.size() - kDataV2Overhead;
     const auto ct_span = buf.subspan(kDataV2Overhead, ct_len);
 
-    try
+    auto decrypted = slot->decrypt_ctx->TryDecryptInPlace(nonce, ct_span, tag, aad);
+    if (!decrypted)
     {
-        slot->decrypt_ctx->SetDecryptNonce(nonce);
-        slot->decrypt_ctx->UpdateDecryptAad(aad);
-        slot->decrypt_ctx->UpdateDecryptInPlace(ct_span);
-        const bool ok = slot->decrypt_ctx->FinalizeDecryptCheck(tag);
-
-        if (!ok)
+        if (log.logger)
         {
-            if (log.logger)
+            const auto now = std::chrono::steady_clock::now();
+            if (!log.auth_fail_limiter || log.auth_fail_limiter->Due(now))
             {
-                const auto now = std::chrono::steady_clock::now();
-                if (!log.auth_fail_limiter || log.auth_fail_limiter->Due(now))
+                const auto &err = decrypted.error();
+                if (err.kind() == OpenSSL::SslErrorKind::AuthTag)
                 {
-                    log.logger->error("{}: authentication failed (tag mismatch) pkt_key_id={} key_id={} buf_size={}",
+                    log.logger->error(
+                        "{}: authentication failed (tag mismatch) pkt_key_id={} key_id={} buf_size={}: {}",
+                        log.log_prefix,
+                        pkt_key_id,
+                        key.key_id,
+                        buf.size(),
+                        err.message());
+                }
+                else
+                {
+                    log.logger->error("{}: AEAD decryption failed: {} pkt_key_id={} key_id={} buf_size={}",
                                       log.log_prefix,
+                                      err.message(),
                                       pkt_key_id,
                                       key.key_id,
                                       buf.size());
                 }
             }
-            return {};
         }
-
-        slot->replay.Accept(pkt_id);
-        return ct_span;
-    }
-    catch (const OpenSSL::SslException &e)
-    {
-        if (log.logger)
-            log.logger->error("{}: AEAD decryption failed: {}", log.log_prefix, e.what());
         return {};
     }
+
+    slot->replay.Accept(pkt_id);
+    return ct_span;
 }
 
 } // namespace clv::vpn::openvpn
