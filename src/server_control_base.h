@@ -194,6 +194,9 @@ class ServerControlBase
 
     asio::awaitable<void> StatsLoop();
 
+    /** Sleep until earliest control RTO; idle until reliable-notify kick. */
+    asio::awaitable<void> HandshakeRetransmitLoop();
+
     // -- Control-packet dispatch chain ---------------------------------------
 
     asio::awaitable<void> ProcessNetworkPacket(std::vector<std::uint8_t> data,
@@ -253,6 +256,13 @@ class ServerControlBase
 
     void RearmRekeyTimer(openvpn::SessionId sid, std::uint32_t reneg_seconds);
 
+    /**
+     * Wake HandshakeRetransmitLoop so it recomputes the earliest RTO.
+     * Call from server outbound paths after reliable control may have been armed
+     * (same sites as UpdateLastOutbound).
+     */
+    void ArmHandshakeRetransmit();
+
     // -- Per-session rekey timer ------------------------------------------
 
     asio::awaitable<void> RekeyLoop(openvpn::SessionId sid, std::uint32_t reneg_seconds);
@@ -309,9 +319,11 @@ class ServerControlBase
     std::unique_ptr<UdpEngineContext> split_ctx_;
     std::optional<asio::steady_timer> cleanup_timer_;
     std::optional<asio::steady_timer> stats_timer_;
+    std::optional<asio::steady_timer> handshake_timer_;
     std::future<void> cleanup_future_;
     std::future<void> keepalive_future_;
     std::future<void> stats_future_;
+    std::future<void> handshake_future_;
 
     TunnelZone *zone_ = nullptr;
     std::optional<std::string> registered_hub_ifname_;
@@ -430,6 +442,7 @@ void ServerControlBase<Derived>::InitializeBase(ServerControlConfig cfg)
     // Timers
     cleanup_timer_.emplace(*io_context_);
     stats_timer_.emplace(*io_context_);
+    handshake_timer_.emplace(*io_context_);
 }
 
 template <typename Derived>
@@ -437,6 +450,7 @@ void ServerControlBase<Derived>::StartBase()
 {
     cleanup_future_ = asio::co_spawn(*io_context_, SessionCleanupLoop(), asio::use_future);
     keepalive_future_ = asio::co_spawn(*io_context_, KeepAliveLoop(), asio::use_future);
+    handshake_future_ = asio::co_spawn(*io_context_, HandshakeRetransmitLoop(), asio::use_future);
 
     if (config_->performance.stats_interval_seconds > 0)
     {
@@ -466,6 +480,8 @@ void ServerControlBase<Derived>::StopBase()
     session_manager_.CancelAllRekeyTimers();
     cleanup_timer_->cancel();
     stats_timer_->cancel();
+    if (handshake_timer_)
+        handshake_timer_->cancel();
     derived().StopKeepaliveMonitor();
     derived().StopDataPath(); // channel owns teardown, incl. TUN close if applicable
 
@@ -476,6 +492,8 @@ void ServerControlBase<Derived>::StopBase()
         keepalive_future_.get();
     if (stats_future_.valid())
         stats_future_.get();
+    if (handshake_future_.valid())
+        handshake_future_.get();
 
     // Release all IPs
     if (ip_pool_)
@@ -577,6 +595,83 @@ template <typename Derived>
 asio::awaitable<void> ServerControlBase<Derived>::KeepAliveLoop()
 {
     co_await derived().RunKeepaliveMonitor();
+}
+
+template <typename Derived>
+void ServerControlBase<Derived>::ArmHandshakeRetransmit()
+{
+    if (handshake_timer_)
+        handshake_timer_->cancel();
+}
+
+template <typename Derived>
+asio::awaitable<void> ServerControlBase<Derived>::HandshakeRetransmitLoop()
+{
+    // Sleep until the earliest unacked control packet's RTO (OpenVPN folds
+    // reliable_send_timeout into the per-instance select wakeup). When no
+    // session has outstanding control traffic, wait idle until ArmHandshakeRetransmit
+    // from a server outbound path cancels the far-future wait.
+    while (*running_)
+    {
+        std::optional<std::chrono::steady_clock::time_point> earliest;
+        auto session_ids = session_manager_.GetAllSessionIds();
+        for (const auto &sid : session_ids)
+        {
+            Connection *session = session_manager_.FindSession(sid);
+            if (!session || !session->HasTransport())
+                continue;
+            auto deadline = session->GetControlChannel().EarliestRetransmitAt();
+            if (deadline && (!earliest || *deadline < *earliest))
+                earliest = deadline;
+        }
+
+        if (earliest)
+            handshake_timer_->expires_at(*earliest);
+        else
+            // Idle: far-future wait; ArmHandshakeRetransmit cancels this.
+            handshake_timer_->expires_after(std::chrono::hours(24));
+
+        try
+        {
+            co_await handshake_timer_->async_wait(asio::use_awaitable);
+        }
+        catch (const asio::system_error &e)
+        {
+            if (e.code() == asio::error::operation_aborted)
+            {
+                if (!*running_)
+                    break;
+                continue; // kicked or stop: recompute earliest
+            }
+            throw;
+        }
+        if (!*running_)
+            break;
+
+        const auto now = std::chrono::steady_clock::now();
+        session_ids = session_manager_.GetAllSessionIds();
+        for (const auto &sid : session_ids)
+        {
+            Connection *session = session_manager_.FindSession(sid);
+            if (!session || !session->HasTransport())
+                continue;
+
+            auto &cc = session->GetControlChannel();
+            auto deadline = cc.EarliestRetransmitAt();
+            if (!deadline || *deadline > now)
+                continue;
+
+            auto &session_crypt = session->GetSessionTlsCrypt().has_value()
+                                      ? session->GetSessionTlsCrypt()
+                                      : tls_crypt_;
+            auto transport = session->GetTransport();
+            co_await FlushControlQueue(cc,
+                                       session_crypt,
+                                       openvpn::PeerRole::Server,
+                                       transport,
+                                       *logger_);
+        }
+    }
 }
 
 template <typename Derived>
@@ -989,12 +1084,15 @@ asio::awaitable<void> ServerControlBase<Derived>::HandleControlPacket(Connection
                                               dispatch_pkt,
                                               *logger_,
                                               callbacks);
+        // Dispatch may WrapAndSend reliable control (TLS fragments / ACKs) without
+        // going through SendWrappedPacket — arm retransmit like keepalive outbound.
+        ArmHandshakeRetransmit();
 
-        // Activate the new TX key snapshot as soon as the client has ACKed
-        // our KEY_METHOD_2.  Until then, SplitPublishSessions() is withheld so
-        // the server data path does not encrypt with a key_id unknown to the client.
-        // This check fires on the P_ACK_V1 (or any piggybacked ACK in a
-        // P_CONTROL_V1) that drains the last unacknowledged control packet.
+        // Rekey only: activate the new TX snapshot once the client has ACKed
+        // KEY_METHOD_2 (HasPendingOutbound drained). Initial key_id 0 already
+        // published TX in HandleKeyMethod2.
+        // Fires when ApplyAckIds (standalone P_ACK_V1 or piggybacked on P_CONTROL_V1)
+        // drains the last unacknowledged control packet.
         if (session->IsKeysPendingActivation()
             && !session->GetControlChannel().HasPendingOutbound())
         {
@@ -1250,16 +1348,43 @@ asio::awaitable<void> ServerControlBase<Derived>::HandleKeyMethod2(Connection *s
         co_return;
     }
 
-    // Publish new decrypt key to RX immediately: the client may start sending
-    // with the new key_id as soon as it receives KEY_METHOD_2.  RxDecryptState
-    // will move the old primary to lame duck and accept both key_ids.
-    // TX stays on the old key until the client ACKs (keys_pending_activation_).
-    SplitPublishSessionsRx();
-    session->SetKeysPendingActivation(true);
-    logger_->info("Key-method 2 exchange complete, keys derived; RX activated, awaiting ACK for TX");
+    // Publish decrypt keys to RX immediately: the client may start sending with
+    // the new key_id as soon as it receives KEY_METHOD_2.
+    //
+    // Initial handshake (key_id 0): also publish TX now. There is no prior data
+    // key to protect, and withholding TX until control ACKs clear races with
+    // IV_PROTO_REQUEST_PUSH + client traffic under latency (routes/RX live,
+    // EncryptSlot misses the TX snapshot → silent drop). DCO installs both
+    // directions in-kernel at this same point.
+    //
+    // Rekey (key_id != 0): keep TX on the old key until the client ACKs KM2
+    // (keys_pending_activation_), matching OpenVPN's reliable_empty invariant.
+    const std::uint8_t key_id = session->GetControlChannel().GetKeyId();
+    if (key_id == 0)
+    {
+        SplitPublishSessions();
+        session->SetKeysPendingActivation(false);
+        logger_->info("Key-method 2 exchange complete, keys derived; RX+TX activated (initial)");
+    }
+    else
+    {
+        SplitPublishSessionsRx();
+        session->SetKeysPendingActivation(true);
+        logger_->info("Key-method 2 exchange complete, keys derived; RX activated, awaiting ACK for TX (rekey)");
+    }
 
     if (co_await SendTlsControlData(session, key_method_msg, "server key-method 2"))
+    {
         session->SetSentKeyMethod2(true);
+        // Match OpenVPN multi_client_connect_post: clients advertising
+        // IV_PROTO_REQUEST_PUSH expect an immediate PUSH_REPLY. Without it they
+        // sit on wait_for_connect (~1s) before sending PUSH_REQUEST.
+        if (session->GetClientIvProto() & openvpn::IV_PROTO_REQUEST_PUSH)
+        {
+            logger_->info("IV_PROTO_REQUEST_PUSH set — sending PUSH_REPLY immediately");
+            co_await HandlePushRequest(session);
+        }
+    }
 }
 
 template <typename Derived>
@@ -1279,6 +1404,8 @@ asio::awaitable<void> ServerControlBase<Derived>::HandlePushRequest(Connection *
     };
     Actions actions{*this};
     co_await HandleServerPushRequest(session, *config_->server, tls_crypt_, *logger_, actions);
+    // Free SendTlsControlData path (not ServerControlBase::SendTlsControlData).
+    ArmHandshakeRetransmit();
 }
 
 template <typename Derived>
@@ -1504,6 +1631,7 @@ asio::awaitable<void> ServerControlBase<Derived>::SendWrappedPacket(std::vector<
     auto transport = session->GetTransport();
     co_await WrapAndSend(crypt, std::move(data), openvpn::PeerRole::Server, transport, *logger_);
     session->UpdateLastOutbound();
+    ArmHandshakeRetransmit();
 }
 
 template <typename Derived>
@@ -1529,7 +1657,10 @@ asio::awaitable<bool> ServerControlBase<Derived>::SendTlsControlData(Connection 
                                                     *logger_,
                                                     description);
     if (ok)
+    {
         session->UpdateLastOutbound();
+        ArmHandshakeRetransmit();
+    }
     co_return ok;
 }
 

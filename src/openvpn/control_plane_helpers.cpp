@@ -106,6 +106,11 @@ asio::awaitable<void> ProcessTlsDataAndRespond(openvpn::ControlChannel &control_
                                                spdlog::logger &logger,
                                                bool suppress_ack)
 {
+    // Apply piggybacked ACKs before TLS handling so the send window can open
+    // for multi-fragment ServerHello/Certificate flights (OpenVPN 2 clients).
+    if (!packet.packet_id_array_.empty())
+        control_channel.ApplyAckIds(packet.packet_id_array_);
+
     auto responses = control_channel.ProcessTlsData(packet);
 
     if (responses && !responses->empty())
@@ -258,6 +263,9 @@ asio::awaitable<void> DispatchSessionControlPacket(
         break;
 
     case openvpn::Opcode::P_CONTROL_SOFT_RESET_V1:
+        // Soft-reset may carry piggybacked ACKs (same as CONTROL).
+        if (!packet.packet_id_array_.empty())
+            control_channel.ApplyAckIds(packet.packet_id_array_);
         if (callbacks.on_soft_reset)
         {
             co_await callbacks.on_soft_reset(packet);

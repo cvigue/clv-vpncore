@@ -90,7 +90,7 @@ TEST_F(ControlChannelTest, HandleHardResetTransitionsToTlsHandshake)
     SessionId session_id = SessionId::Generate();
     EXPECT_TRUE(channel().Initialize(PeerRole::Server, session_id, std::nullopt));
     OpenVpnPacket reset_packet;
-    reset_packet.opcode_ = Opcode::P_CONTROL_HARD_RESET_SERVER_V3;
+    reset_packet.opcode_ = Opcode::P_CONTROL_HARD_RESET_SERVER_V2;
     reset_packet.key_id_ = 0;
     reset_packet.session_id_ = session_id.value;
     reset_packet.packet_id_ = 1;
@@ -154,47 +154,84 @@ TEST_F(ControlChannelTest, AckedPacketsNotRetransmitted)
     ack_pkt.opcode_ = Opcode::P_ACK_V1;
     ack_pkt.key_id_ = 0;
     ack_pkt.session_id_ = session_id.value;
-    ack_pkt.packet_id_array_ = {1};
+    ack_pkt.packet_id_array_ = {0}; // StartHardReset uses packet_id 0
     ack_pkt.payload_ = {};
     EXPECT_TRUE(channel().HandleAck(ack_pkt));
-    auto future = std::chrono::steady_clock::now() + std::chrono::milliseconds(150);
+    EXPECT_FALSE(channel().HasPendingOutbound());
+    auto future = std::chrono::steady_clock::now() + std::chrono::milliseconds(600);
     auto retransmit_list = channel().ProcessRetransmissions(future);
     EXPECT_TRUE(retransmit_list.empty());
 }
 
+TEST_F(ControlChannelTest, ApplyAckIdsClearsUnackedFromPiggybackedControl)
+{
+    SessionId session_id = SessionId::Generate();
+    EXPECT_TRUE(channel().Initialize(PeerRole::Server, session_id, std::nullopt));
+
+    OpenVpnPacket client_reset;
+    client_reset.opcode_ = Opcode::P_CONTROL_HARD_RESET_CLIENT_V2;
+    client_reset.key_id_ = 0;
+    client_reset.session_id_ = 0xAABBCCDDEEFF0011ULL;
+    client_reset.packet_id_ = 0;
+    ASSERT_TRUE(channel().HandleHardReset(client_reset));
+
+    auto hr_resp = channel().GenerateHardResetResponse(client_reset.opcode_);
+    ASSERT_FALSE(hr_resp.empty());
+    EXPECT_TRUE(channel().HasPendingOutbound());
+
+    // Simulate OpenVPN 2 ClientHello: P_CONTROL_V1 with piggybacked ACK of pid 0
+    // (not a standalone P_ACK_V1 — HandleAck would reject that opcode).
+    channel().ApplyAckIds(std::vector<std::uint32_t>{0});
+    EXPECT_FALSE(channel().HasPendingOutbound());
+}
+
+TEST_F(ControlChannelTest, EarliestRetransmitAtTracksInitialRto)
+{
+    SessionId session_id = SessionId::Generate();
+    EXPECT_TRUE(channel().Initialize(PeerRole::Client, session_id, std::nullopt));
+    EXPECT_FALSE(channel().EarliestRetransmitAt().has_value());
+
+    auto before = std::chrono::steady_clock::now();
+    ASSERT_FALSE(channel().StartHardReset(0).empty());
+    auto after = std::chrono::steady_clock::now();
+
+    auto earliest = channel().EarliestRetransmitAt();
+    ASSERT_TRUE(earliest.has_value());
+    EXPECT_GE(*earliest, before + AckTracker::INITIAL_RTO);
+    EXPECT_LE(*earliest, after + AckTracker::INITIAL_RTO);
+}
+
 TEST_F(ControlChannelTest, AckTrackerBackoffAndCap)
 {
-    AckTracker tracker;
-    tracker.sent_at_ = std::chrono::steady_clock::now();
+    const auto t0 = std::chrono::steady_clock::now();
+    const std::uint8_t payload[] = {0x01};
 
-    EXPECT_EQ(tracker.CurrentRetransmitTimeout(), std::chrono::milliseconds(500));
-
-    tracker.retransmit_count_ = 1;
-    EXPECT_EQ(tracker.CurrentRetransmitTimeout(), std::chrono::milliseconds(1000));
-
-    tracker.retransmit_count_ = 2;
-    EXPECT_EQ(tracker.CurrentRetransmitTimeout(), std::chrono::milliseconds(2000));
-
-    tracker.retransmit_count_ = 6; // would be 32s without cap
-    EXPECT_EQ(tracker.CurrentRetransmitTimeout(), std::chrono::milliseconds(8000));
+    EXPECT_EQ(AckTracker(0, payload, t0).CurrentRetransmitTimeout(), std::chrono::milliseconds(500));
+    EXPECT_EQ(AckTracker(0, payload, t0, 1).CurrentRetransmitTimeout(), std::chrono::milliseconds(1000));
+    EXPECT_EQ(AckTracker(0, payload, t0, 2).CurrentRetransmitTimeout(), std::chrono::milliseconds(2000));
+    // attempt 6 would be 32s without the hard cap
+    EXPECT_EQ(AckTracker(0, payload, t0, 6).CurrentRetransmitTimeout(), std::chrono::milliseconds(8000));
 }
 
 TEST_F(ControlChannelTest, ShouldRetransmitUsesBackoff)
 {
-    AckTracker tracker;
-    tracker.sent_at_ = std::chrono::steady_clock::now();
+    const auto t0 = std::chrono::steady_clock::now();
+    const std::uint8_t payload[] = {0x01};
+    AckTracker tracker(0, payload, t0);
 
-    // At t0 no retransmit
-    EXPECT_FALSE(tracker.ShouldRetransmit(tracker.sent_at_ + std::chrono::milliseconds(400)));
+    EXPECT_FALSE(tracker.ShouldRetransmit(t0 + std::chrono::milliseconds(400)));
+    EXPECT_TRUE(tracker.ShouldRetransmit(t0 + std::chrono::milliseconds(600)));
 
-    // After initial RTO
-    EXPECT_TRUE(tracker.ShouldRetransmit(tracker.sent_at_ + std::chrono::milliseconds(600)));
+    // First retransmit → RTO doubles to 1000ms from the new sent_at
+    tracker.NoteRetransmission(t0 + std::chrono::milliseconds(600));
+    EXPECT_EQ(tracker.RetransmitCount(), 1);
+    EXPECT_FALSE(tracker.ShouldRetransmit(t0 + std::chrono::milliseconds(1500)));
+    EXPECT_TRUE(tracker.ShouldRetransmit(t0 + std::chrono::milliseconds(1600)));
 
-    // Increment count and verify larger delay
-    tracker.retransmit_count_ = 3; // effective timeout 4000ms
-    tracker.sent_at_ = std::chrono::steady_clock::now();
-    EXPECT_FALSE(tracker.ShouldRetransmit(tracker.sent_at_ + std::chrono::milliseconds(3000)));
-    EXPECT_TRUE(tracker.ShouldRetransmit(tracker.sent_at_ + std::chrono::milliseconds(4100)));
+    // Jump to attempt 3 (RTO 4000ms) via the full constructor
+    AckTracker at3(0, payload, t0, 3);
+    EXPECT_FALSE(at3.ShouldRetransmit(t0 + std::chrono::milliseconds(3000)));
+    EXPECT_TRUE(at3.ShouldRetransmit(t0 + std::chrono::milliseconds(4100)));
 }
 
 // Integration tests

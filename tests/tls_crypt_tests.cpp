@@ -227,7 +227,7 @@ TEST_F(TlsCryptTest, WrapUnwrapRoundTripServerToClient)
 
     const std::uint64_t session_id = 0xABCDABCDABCDABCDULL;
     std::vector<std::uint8_t> payload = {0x01, 0x02, 0x03};
-    auto plaintext = MakePlaintext(Opcode::P_CONTROL_HARD_RESET_SERVER_V3, 0, session_id, payload);
+    auto plaintext = MakePlaintext(Opcode::P_CONTROL_HARD_RESET_SERVER_V2, 0, session_id, payload);
 
     // Server wraps (server_mode=true), client unwraps (server_mode=false)
     auto wrapped = tc_server->Wrap(plaintext, true);
@@ -299,7 +299,7 @@ TEST_F(TlsCryptTest, UnwrapServerWrappedAsServerFails)
     auto tc2 = TlsCrypt::FromKeyString(kTestKeyString, *logger_);
     ASSERT_TRUE(tc1 && tc2);
 
-    auto plaintext = MakePlaintext(Opcode::P_CONTROL_HARD_RESET_SERVER_V3, 0, 0x4444444444444444ULL);
+    auto plaintext = MakePlaintext(Opcode::P_CONTROL_HARD_RESET_SERVER_V2, 0, 0x4444444444444444ULL);
 
     auto wrapped = tc1->Wrap(plaintext, true);
     ASSERT_TRUE(wrapped.has_value());

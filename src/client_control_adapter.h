@@ -657,7 +657,7 @@ asio::awaitable<void> ClientControlAdapter<Derived>::HandleControlPacket(const o
     logger_->debug("Control packet: opcode={}", static_cast<int>(packet.opcode_));
 
     if (packet.opcode_ == openvpn::Opcode::P_CONTROL_HARD_RESET_SERVER_V2
-        || packet.opcode_ == openvpn::Opcode::P_CONTROL_HARD_RESET_SERVER_V3)
+        || packet.opcode_ == openvpn::Opcode::P_CONTROL_HARD_RESET_SERVER_V1)
     {
         remote_session_id_ = packet.session_id_.value_or(0);
         control_channel_->HandleHardReset(packet);

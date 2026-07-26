@@ -38,11 +38,11 @@ enum class Opcode : std::uint8_t
 
     // Modern control opcodes (OpenVPN 2.4+)
     P_CONTROL_HARD_RESET_CLIENT_V2 = 0x07, ///< Client handshake with tls-auth
-    P_CONTROL_HARD_RESET_SERVER_V2 = 0x08, ///< Server response with tls-auth
+    P_CONTROL_HARD_RESET_SERVER_V2 = 0x08, ///< Server hard-reset response (also used for tls-crypt CLIENT_V3)
     P_DATA_V2 = 0x09,                      ///< Data channel with peer-id (modern)
-    P_CONTROL_HARD_RESET_CLIENT_V3 = 0x0A, ///< Client handshake with tls-crypt (preferred)
-    P_CONTROL_HARD_RESET_SERVER_V3 = 0x0C, ///< Server response with tls-crypt (preferred)
+    P_CONTROL_HARD_RESET_CLIENT_V3 = 0x0A, ///< Client handshake with tls-crypt
     P_CONTROL_WKC_V1 = 0x0B,               ///< Wrapped client key (tls-crypt-v2)
+    // No HARD_RESET_SERVER_V3: OpenVPN P_LAST_OPCODE is 11; CLIENT_V3 → SERVER_V2.
 };
 
 /**
@@ -91,7 +91,6 @@ constexpr bool IsControlPacket(Opcode opcode)
     case Opcode::P_CONTROL_HARD_RESET_CLIENT_V2:
     case Opcode::P_CONTROL_HARD_RESET_SERVER_V2:
     case Opcode::P_CONTROL_HARD_RESET_CLIENT_V3:
-    case Opcode::P_CONTROL_HARD_RESET_SERVER_V3:
     case Opcode::P_CONTROL_WKC_V1:
         return true;
     default:
@@ -119,7 +118,6 @@ constexpr bool IsHardReset(Opcode opcode)
     case Opcode::P_CONTROL_HARD_RESET_CLIENT_V2:
     case Opcode::P_CONTROL_HARD_RESET_SERVER_V2:
     case Opcode::P_CONTROL_HARD_RESET_CLIENT_V3:
-    case Opcode::P_CONTROL_HARD_RESET_SERVER_V3:
         return true;
     default:
         return false;
@@ -137,13 +135,12 @@ constexpr bool IsHardResetClient(Opcode opcode)
 }
 
 /**
- * @brief Check if opcode is a server hard reset (V1, V2, or V3)
+ * @brief Check if opcode is a server hard reset (V1 or V2)
  */
 constexpr bool IsHardResetServer(Opcode opcode)
 {
     return opcode == Opcode::P_CONTROL_HARD_RESET_SERVER_V1
-           || opcode == Opcode::P_CONTROL_HARD_RESET_SERVER_V2
-           || opcode == Opcode::P_CONTROL_HARD_RESET_SERVER_V3;
+           || opcode == Opcode::P_CONTROL_HARD_RESET_SERVER_V2;
 }
 
 /**

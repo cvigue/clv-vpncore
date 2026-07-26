@@ -20,6 +20,7 @@
 #include <span>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace spdlog {
@@ -37,8 +38,9 @@ namespace clv::vpn::openvpn {
  * - Automatic retransmission on timeout
  * - ACK handling and duplicate detection
  */
-struct AckTracker
+class AckTracker
 {
+  public:
     /** Initial retransmission timeout; backed off exponentially per attempt */
     static constexpr auto INITIAL_RTO = std::chrono::milliseconds(500);
 
@@ -48,29 +50,33 @@ struct AckTracker
     /** Maximum number of retransmission attempts */
     static constexpr int MAX_RETRANSMIT_ATTEMPTS = 64;
 
-    /** Construct a tracker for an outbound packet */
+    /**
+     * @brief Construct a tracker with an explicit send time / attempt count.
+     *
+     * Production uses sent_at = now and retransmit_count = 0; callers that need
+     * deterministic timing (tests, or a future clock-injected path) pass them
+     * explicitly. Time for eligibility checks is always supplied to
+     * ShouldRetransmit / NoteRetransmission — not read from a clock here.
+     */
+    AckTracker(std::uint32_t packet_id,
+               std::span<const std::uint8_t> data,
+               std::chrono::steady_clock::time_point sent_at,
+               int retransmit_count = 0)
+        : packet_id_(packet_id),
+          packet_data_(data.begin(), data.end()),
+          sent_at_(sent_at),
+          retransmit_count_(retransmit_count)
+    {
+    }
+
+    /** Construct a tracker for an outbound packet stamped at now(). */
     AckTracker(std::uint32_t packet_id, std::span<const std::uint8_t> data)
-        : packet_id_(packet_id), packet_data_(data.begin(), data.end()), sent_at_(std::chrono::steady_clock::now())
+        : AckTracker(packet_id, data, std::chrono::steady_clock::now())
     {
     }
 
     /** Default constructor for map operations */
     AckTracker() = default;
-
-    /** Packet sequence ID for retransmission tracking */
-    std::uint32_t packet_id_ = 0;
-
-    /** Serialized packet data to retransmit */
-    std::vector<std::uint8_t> packet_data_;
-
-    /** Time packet was sent (for timeout calculation) */
-    std::chrono::steady_clock::time_point sent_at_{};
-
-    /** Number of retransmission attempts so far */
-    int retransmit_count_ = 0;
-
-    /** Whether this packet has been ACKed */
-    bool acknowledged_ = false;
 
     /**
      * @brief Check if this packet should be retransmitted
@@ -99,6 +105,50 @@ struct AckTracker
             scaled = MAX_RTO;
         return scaled;
     }
+
+    /** Absolute time when ShouldRetransmit first becomes true for this entry. */
+    std::chrono::steady_clock::time_point NextRetransmitAt() const
+    {
+        return sent_at_ + CurrentRetransmitTimeout();
+    }
+
+    bool IsAcknowledged() const noexcept
+    {
+        return acknowledged_;
+    }
+
+    void MarkAcknowledged() noexcept
+    {
+        acknowledged_ = true;
+    }
+
+    int RetransmitCount() const noexcept
+    {
+        return retransmit_count_;
+    }
+
+    bool ExhaustedRetransmits() const noexcept
+    {
+        return retransmit_count_ >= MAX_RETRANSMIT_ATTEMPTS;
+    }
+
+    /**
+     * @brief Record a retransmission: bump attempt count, refresh sent_at.
+     * @return Payload to send again.
+     */
+    const std::vector<std::uint8_t> &NoteRetransmission(std::chrono::steady_clock::time_point now)
+    {
+        ++retransmit_count_;
+        sent_at_ = now;
+        return packet_data_;
+    }
+
+  private:
+    std::uint32_t packet_id_ = 0;
+    std::vector<std::uint8_t> packet_data_;
+    std::chrono::steady_clock::time_point sent_at_{};
+    int retransmit_count_ = 0;
+    bool acknowledged_ = false;
 };
 
 /**
@@ -281,7 +331,15 @@ class ControlChannel
     std::vector<std::vector<std::uint8_t>> PrepareTlsEncryptedData(std::span<const std::uint8_t> plaintext);
 
     /**
-     * @brief Handle ACK packet from peer
+     * @brief Apply ACK ids from any control packet (standalone P_ACK_V1 or piggybacked).
+     *
+     * OpenVPN 2 clients typically piggyback ACKs on P_CONTROL_V1; those must be
+     * applied here so the send window can drain without waiting for a pure ACK.
+     */
+    void ApplyAckIds(std::span<const std::uint32_t> ack_ids);
+
+    /**
+     * @brief Handle standalone P_ACK_V1 packet from peer
      * @param packet Parsed ACK packet
      * @return true if ACK processed successfully
      */
@@ -427,8 +485,22 @@ class ControlChannel
      */
     bool HasPendingOutbound() const
     {
-        return CountUnacknowledgedPackets() > 0;
+        return CountUnacknowledgedPackets() > 0 || !pending_fragments_.empty();
     }
+
+    /**
+     * @brief Earliest absolute time any unacked outbound packet becomes eligible
+     *        for retransmission, or nullopt if the reliable send buffer is empty.
+     */
+    std::optional<std::chrono::steady_clock::time_point> EarliestRetransmitAt() const;
+
+  private:
+    /** Queued outbound control fragment awaiting send-window capacity */
+    struct PendingOutbound
+    {
+        std::uint32_t packet_id = 0;
+        std::vector<std::uint8_t> data;
+    };
 
   private:
     /** Current handshake state */
@@ -477,8 +549,8 @@ class ControlChannel
     /** Whether we initiated the connection (client) vs received it (server) */
     bool is_client_ = false;
 
-    /** Queue of pending fragments to send (for send window control) */
-    std::deque<std::vector<std::uint8_t>> pending_fragments_;
+    /** Queue of pending fragments to send (for send window control). Not tracked until dequeued. */
+    std::deque<PendingOutbound> pending_fragments_;
 
     /** Buffer for received decrypted plaintext (post-handshake app data) */
     std::vector<std::uint8_t> received_plaintext_;
@@ -534,22 +606,21 @@ class ControlChannel
         std::span<const std::uint8_t> payload);
 
     /**
-     * Helper: Fragment TLS response data into MTU-sized control packets
-     * @param tls_data Raw TLS records to fragment
-     * @return Vector of serialized control packets, first one to send immediately,
-     *         rest queued in pending_fragments_
+     * Helper: Fragment TLS response data into MTU-sized control packets.
+     * Fragments are not reliability-tracked until they are selected for send.
      */
-    std::vector<std::vector<std::uint8_t>> FragmentTlsResponse(
-        std::span<const std::uint8_t> tls_data);
+    std::vector<PendingOutbound> FragmentTlsResponse(std::span<const std::uint8_t> tls_data);
 
     /**
      * Helper: Create a control packet with optional ACK piggybacking
      * @param payload TLS data payload
      * @param packet_id Packet sequence ID
+     * @param track If true, register in unacked_packets_ immediately
      * @return Serialized control packet
      */
-    std::vector<std::uint8_t> CreateControlPacketWithAcks(
-        std::vector<std::uint8_t> payload, std::uint32_t packet_id);
+    std::vector<std::uint8_t> CreateControlPacketWithAcks(std::vector<std::uint8_t> payload,
+                                                          std::uint32_t packet_id,
+                                                          bool track = true);
 };
 
 } // namespace clv::vpn::openvpn

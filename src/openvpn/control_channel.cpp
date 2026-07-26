@@ -8,6 +8,7 @@
 #include "openvpn/control_channel.h"
 
 #include "openvpn/control_channel_fragment.h"
+#include "openvpn/key_derivation.h"
 #include "openvpn/packet.h"
 #include "openvpn/protocol_constants.h"
 #include "openvpn/tls_context.h"
@@ -145,9 +146,10 @@ bool ControlChannel::CompleteCookieHandshake(SessionId peer_session_id, std::uin
     key_id_ = key_id & KEY_ID_MASK;
     // Stateless cookie challenge already used control packet_id 0 outbound.
     outbound_packet_id_ = 1;
-    // Client HARD_RESET was packet_id 0; treat it as already received so the
-    // next CONTROL (ClientHello, typically id 1) passes ValidatePacketId.
-    last_received_packet_id_ = 0;
+    // Next CONTROL may be packet_id 0 (cookie-echo ClientHello) or 1 (typical
+    // OpenVPN after HARD_RESET was pid 0). UINT32_MAX + ValidatePacketId
+    // accepts either; first accepted packet advances last_received normally.
+    last_received_packet_id_ = UINT32_MAX;
     state_ = State::TlsHandshake;
     return true;
 }
@@ -594,34 +596,40 @@ bool ControlChannel::HandleAck(const OpenVpnPacket &packet)
     if (!packet.IsAck())
         return false;
 
+    ApplyAckIds(packet.packet_id_array_);
+    return true;
+}
+
+void ControlChannel::ApplyAckIds(std::span<const std::uint32_t> ack_ids)
+{
+    if (ack_ids.empty())
+        return;
+
     if (logger_->should_log(spdlog::level::debug))
     {
         std::string ack_list;
-        for (auto ack_id : packet.packet_id_array_)
+        for (auto ack_id : ack_ids)
             ack_list += std::to_string(ack_id) + " ";
-        logger_->debug("HandleAck: Received ACK for {} packet(s): {}", packet.packet_id_array_.size(), ack_list);
+        logger_->debug("ApplyAckIds: Received ACK for {} packet(s): {}", ack_ids.size(), ack_list);
     }
 
-    // Mark acknowledged packet IDs
-    for (auto ack_id : packet.packet_id_array_)
+    for (auto ack_id : ack_ids)
     {
         auto it = unacked_packets_.find(ack_id);
         if (it != unacked_packets_.end())
         {
             logger_->debug("  Marked packet {} as acknowledged", ack_id);
-            it->second.acknowledged_ = true;
-            // Clear ACKs that were piggybacked on this packet - they were delivered
+            it->second.MarkAcknowledged();
             ClearInFlightAcks(ack_id);
         }
         else if (ack_id >= outbound_packet_id_)
         {
-            // ACK for a packet we haven't sent yet - this is suspicious
             logger_->warn("  WARNING: ACK for unsent packet {} (next_id={})", ack_id, outbound_packet_id_);
         }
-        // else: ACK for already-acknowledged packet - normal due to cumulative ACKs
     }
 
-    return true;
+    // Drop acknowledged entries so CountUnacknowledgedPackets / send window update now
+    std::erase_if(unacked_packets_, [](const auto &entry) { return entry.second.IsAcknowledged(); });
 }
 
 std::vector<std::vector<std::uint8_t>>
@@ -634,24 +642,20 @@ ControlChannel::ProcessRetransmissions(std::chrono::steady_clock::time_point now
         if (tracker.ShouldRetransmit(now))
         {
             // On first retransmit, rescue any piggybacked ACKs for re-acking
-            if (tracker.retransmit_count_ == 0)
-            {
+            if (tracker.RetransmitCount() == 0)
                 RescueInFlightAcks(packet_id);
-            }
-            tracker.retransmit_count_++;
-            tracker.sent_at_ = now;
-            retransmit_list.push_back(tracker.packet_data_);
+            retransmit_list.push_back(tracker.NoteRetransmission(now));
 
             // Log retransmission with escalating severity
-            if (tracker.retransmit_count_ >= 10)
+            if (tracker.RetransmitCount() >= 10)
                 logger_->warn("Retransmitting packet_id={} (attempt {}/{}) - connection may be degraded",
                               packet_id,
-                              tracker.retransmit_count_,
+                              tracker.RetransmitCount(),
                               AckTracker::MAX_RETRANSMIT_ATTEMPTS);
             else
                 logger_->info("Retransmitting packet_id={} (attempt {}, RTO={}ms)",
                               packet_id,
-                              tracker.retransmit_count_,
+                              tracker.RetransmitCount(),
                               tracker.CurrentRetransmitTimeout().count());
         }
     }
@@ -660,15 +664,15 @@ ControlChannel::ProcessRetransmissions(std::chrono::steady_clock::time_point now
     std::vector<std::uint32_t> to_erase;
     for (const auto &[packet_id, tracker] : unacked_packets_)
     {
-        if (tracker.acknowledged_)
+        if (tracker.IsAcknowledged())
         {
             to_erase.push_back(packet_id);
         }
-        else if (tracker.retransmit_count_ >= AckTracker::MAX_RETRANSMIT_ATTEMPTS)
+        else if (tracker.ExhaustedRetransmits())
         {
             logger_->error("Packet {} abandoned after {} retransmit attempts - peer unreachable?",
                            packet_id,
-                           tracker.retransmit_count_);
+                           tracker.RetransmitCount());
             to_erase.push_back(packet_id);
         }
     }
@@ -688,12 +692,11 @@ void ControlChannel::TrackOutboundPacket(std::uint32_t packet_id, std::span<cons
 
 bool ControlChannel::ValidatePacketId(std::uint32_t packet_id)
 {
-    // Accept only packet_ids strictly greater than last received
-    // This ensures each packet is processed exactly once
-    // Retransmissions are handled by the reliability layer (ACKs)
-    // UINT32_MAX means no packets received yet - accept packet 0
+    // UINT32_MAX means no packets received yet. Accept 0 or 1 so cookie-echo
+    // ClientHello (pid 0) and the common post-HARD_RESET ClientHello (pid 1)
+    // both pass. Subsequent packets must be strictly greater than last received.
     if (last_received_packet_id_ == UINT32_MAX)
-        return packet_id == 0; // First packet must be 0
+        return packet_id <= 1;
     return packet_id > last_received_packet_id_;
 }
 
@@ -703,15 +706,29 @@ size_t ControlChannel::CountUnacknowledgedPackets() const
     // in practice and control packets are infrequent.
     return std::ranges::count_if(unacked_packets_, [](const auto &pair)
     {
-        return !pair.second.acknowledged_;
+        return !pair.second.IsAcknowledged();
     });
+}
+
+std::optional<std::chrono::steady_clock::time_point> ControlChannel::EarliestRetransmitAt() const
+{
+    std::optional<std::chrono::steady_clock::time_point> earliest;
+    for (const auto &[packet_id, tracker] : unacked_packets_)
+    {
+        (void)packet_id;
+        if (tracker.IsAcknowledged() || tracker.ExhaustedRetransmits())
+            continue;
+        const auto next = tracker.NextRetransmitAt();
+        if (!earliest || next < *earliest)
+            earliest = next;
+    }
+    return earliest;
 }
 
 std::vector<std::vector<std::uint8_t>> ControlChannel::GetPacketsToSend()
 {
     std::vector<std::vector<std::uint8_t>> packets;
 
-    // Calculate how many packets we can send based on window size
     size_t unacked_count = CountUnacknowledgedPackets();
     size_t available_window = (unacked_count < MAX_SEND_WINDOW) ? (MAX_SEND_WINDOW - unacked_count) : 0;
 
@@ -721,11 +738,12 @@ std::vector<std::vector<std::uint8_t>> ControlChannel::GetPacketsToSend()
                    available_window,
                    pending_fragments_.size());
 
-    // Send up to available_window packets from queue
     while (available_window > 0 && !pending_fragments_.empty())
     {
-        packets.push_back(std::move(pending_fragments_.front()));
+        auto pending = std::move(pending_fragments_.front());
         pending_fragments_.pop_front();
+        TrackOutboundPacket(pending.packet_id, pending.data);
+        packets.push_back(std::move(pending.data));
         --available_window;
     }
 
@@ -815,17 +833,33 @@ std::optional<std::vector<std::vector<std::uint8_t>>> ControlChannel::ProcessTls
     if (fragments.empty())
         return std::vector<std::vector<std::uint8_t>>();
 
-    // Send first fragment immediately, queue the rest
-    std::vector<std::vector<std::uint8_t>> first_packet;
-    first_packet.push_back(std::move(fragments[0]));
+    // Send as many as the reliability window allows; queue the rest untracked
+    // until GetPacketsToSend dequeues them (after peer ACKs free window slots).
+    size_t unacked_count = CountUnacknowledgedPackets();
+    size_t available = (unacked_count < MAX_SEND_WINDOW) ? (MAX_SEND_WINDOW - unacked_count) : 0;
+    if (available == 0)
+        available = 1; // always make progress on a fresh TLS response
 
-    for (size_t i = 1; i < fragments.size(); ++i)
+    std::vector<std::vector<std::uint8_t>> to_send;
+    to_send.reserve(std::min(fragments.size(), available));
+
+    for (size_t i = 0; i < fragments.size(); ++i)
     {
-        pending_fragments_.push_back(std::move(fragments[i]));
+        if (to_send.size() < available)
+        {
+            TrackOutboundPacket(fragments[i].packet_id, fragments[i].data);
+            to_send.push_back(std::move(fragments[i].data));
+        }
+        else
+        {
+            pending_fragments_.push_back(std::move(fragments[i]));
+        }
     }
 
-    logger_->debug("  Sending 1 packet immediately, queued {} for later", pending_fragments_.size());
-    return first_packet;
+    logger_->debug("  Sending {} TLS fragment(s) immediately, queued {}",
+                   to_send.size(),
+                   pending_fragments_.size());
+    return to_send;
 }
 
 std::optional<std::vector<std::vector<std::uint8_t>>>
@@ -857,7 +891,8 @@ ControlChannel::ProcessPostHandshakeAppData(std::span<const std::uint8_t> payloa
 }
 
 std::vector<std::uint8_t> ControlChannel::CreateControlPacketWithAcks(std::vector<std::uint8_t> payload,
-                                                                      std::uint32_t packet_id)
+                                                                      std::uint32_t packet_id,
+                                                                      bool track)
 {
     auto pkt = OpenVpnPacket::Control(key_id_, session_id_.value, packet_id, std::move(payload));
 
@@ -882,14 +917,18 @@ std::vector<std::uint8_t> ControlChannel::CreateControlPacketWithAcks(std::vecto
     auto serialized = pkt.Serialize();
     if (!serialized.empty())
     {
-        TrackOutboundPacket(packet_id, serialized);
-        logger_->debug("  Created packet_id={}: {} bytes payload", packet_id, pkt.payload_.size());
+        if (track)
+            TrackOutboundPacket(packet_id, serialized);
+        logger_->debug("  Created packet_id={}: {} bytes payload (track={})",
+                       packet_id,
+                       pkt.payload_.size(),
+                       track);
     }
 
     return serialized;
 }
 
-std::vector<std::vector<std::uint8_t>>
+std::vector<ControlChannel::PendingOutbound>
 ControlChannel::FragmentTlsResponse(std::span<const std::uint8_t> tls_data)
 {
     constexpr size_t CONTROL_PAYLOAD_MTU = 1250;
@@ -899,17 +938,18 @@ ControlChannel::FragmentTlsResponse(std::span<const std::uint8_t> tls_data)
     if (truncated)
         logger_->error("ERROR: Malformed TLS record encountered during fragmentation");
 
-    std::vector<std::vector<std::uint8_t>> result;
+    std::vector<PendingOutbound> result;
     result.reserve(groups.size());
 
     for (auto &group : groups)
     {
         uint32_t packet_id = GetNextPacketId();
-        auto serialized = CreateControlPacketWithAcks(std::move(group), packet_id);
+        // Do not track yet — caller tracks only fragments that enter the send window.
+        auto serialized = CreateControlPacketWithAcks(std::move(group), packet_id, /*track=*/false);
         if (!serialized.empty())
         {
             logger_->debug("  Fragment {}: packet_id={}", result.size(), packet_id);
-            result.push_back(std::move(serialized));
+            result.push_back(PendingOutbound{packet_id, std::move(serialized)});
         }
     }
 

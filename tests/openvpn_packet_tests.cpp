@@ -68,7 +68,6 @@ TEST(OpenVpnPacket, is_control_packet)
     EXPECT_TRUE(IsControlPacket(Opcode::P_CONTROL_HARD_RESET_CLIENT_V2));
     EXPECT_TRUE(IsControlPacket(Opcode::P_CONTROL_HARD_RESET_SERVER_V2));
     EXPECT_TRUE(IsControlPacket(Opcode::P_CONTROL_HARD_RESET_CLIENT_V3));
-    EXPECT_TRUE(IsControlPacket(Opcode::P_CONTROL_HARD_RESET_SERVER_V3));
     EXPECT_TRUE(IsControlPacket(Opcode::P_CONTROL_WKC_V1));
     // Data opcodes must NOT be classified as control
     EXPECT_FALSE(IsControlPacket(Opcode::P_DATA_V1));
@@ -83,7 +82,7 @@ TEST(OpenVpnPacket, is_data_packet)
     EXPECT_FALSE(IsDataPacket(Opcode::P_CONTROL_V1));
     EXPECT_FALSE(IsDataPacket(Opcode::P_ACK_V1));
     EXPECT_FALSE(IsDataPacket(Opcode::P_CONTROL_HARD_RESET_CLIENT_V3));
-    EXPECT_FALSE(IsDataPacket(Opcode::P_CONTROL_HARD_RESET_SERVER_V3));
+    EXPECT_FALSE(IsDataPacket(Opcode::P_CONTROL_HARD_RESET_SERVER_V2));
     EXPECT_FALSE(IsDataPacket(Opcode::P_CONTROL_WKC_V1));
 }
 
@@ -95,7 +94,6 @@ TEST(OpenVpnPacket, is_hard_reset_classifiers)
     EXPECT_TRUE(IsHardReset(Opcode::P_CONTROL_HARD_RESET_CLIENT_V2));
     EXPECT_TRUE(IsHardReset(Opcode::P_CONTROL_HARD_RESET_SERVER_V2));
     EXPECT_TRUE(IsHardReset(Opcode::P_CONTROL_HARD_RESET_CLIENT_V3));
-    EXPECT_TRUE(IsHardReset(Opcode::P_CONTROL_HARD_RESET_SERVER_V3));
     EXPECT_FALSE(IsHardReset(Opcode::P_CONTROL_V1));
     EXPECT_FALSE(IsHardReset(Opcode::P_CONTROL_SOFT_RESET_V1));
     EXPECT_FALSE(IsHardReset(Opcode::P_DATA_V2));
@@ -106,12 +104,10 @@ TEST(OpenVpnPacket, is_hard_reset_classifiers)
     EXPECT_TRUE(IsHardResetClient(Opcode::P_CONTROL_HARD_RESET_CLIENT_V3));
     EXPECT_FALSE(IsHardResetClient(Opcode::P_CONTROL_HARD_RESET_SERVER_V1));
     EXPECT_FALSE(IsHardResetClient(Opcode::P_CONTROL_HARD_RESET_SERVER_V2));
-    EXPECT_FALSE(IsHardResetClient(Opcode::P_CONTROL_HARD_RESET_SERVER_V3));
 
     // IsHardResetServer — only server opcodes
     EXPECT_TRUE(IsHardResetServer(Opcode::P_CONTROL_HARD_RESET_SERVER_V1));
     EXPECT_TRUE(IsHardResetServer(Opcode::P_CONTROL_HARD_RESET_SERVER_V2));
-    EXPECT_TRUE(IsHardResetServer(Opcode::P_CONTROL_HARD_RESET_SERVER_V3));
     EXPECT_FALSE(IsHardResetServer(Opcode::P_CONTROL_HARD_RESET_CLIENT_V1));
     EXPECT_FALSE(IsHardResetServer(Opcode::P_CONTROL_HARD_RESET_CLIENT_V2));
     EXPECT_FALSE(IsHardResetServer(Opcode::P_CONTROL_HARD_RESET_CLIENT_V3));
@@ -692,18 +688,18 @@ TEST(OpenVpnPacket, hard_reset_v1_server)
     EXPECT_EQ(parsed->opcode_, Opcode::P_CONTROL_HARD_RESET_SERVER_V1);
 }
 
-TEST(OpenVpnPacket, hard_reset_response_v3_default)
+TEST(OpenVpnPacket, hard_reset_response_v3_maps_to_server_v2)
 {
-    // P_CONTROL_HARD_RESET_CLIENT_V3 triggers the default case → SERVER_V3 response.
+    // OpenVPN 2.x has no HARD_RESET_SERVER_V3; CLIENT_V3 → SERVER_V2.
     auto pkt = OpenVpnPacket::HardResetResponse(
         Opcode::P_CONTROL_HARD_RESET_CLIENT_V3, 0, 0xDEADBEEFCAFEBABEULL, 1);
-    EXPECT_EQ(pkt.opcode_, Opcode::P_CONTROL_HARD_RESET_SERVER_V3);
+    EXPECT_EQ(pkt.opcode_, Opcode::P_CONTROL_HARD_RESET_SERVER_V2);
 
     auto serialized = pkt.Serialize();
     ASSERT_FALSE(serialized.empty());
     auto parsed = OpenVpnPacket::Parse(serialized);
     ASSERT_TRUE(parsed.has_value());
-    EXPECT_EQ(parsed->opcode_, Opcode::P_CONTROL_HARD_RESET_SERVER_V3);
+    EXPECT_EQ(parsed->opcode_, Opcode::P_CONTROL_HARD_RESET_SERVER_V2);
 }
 
 TEST(OpenVpnPacket, soft_reset_factory)

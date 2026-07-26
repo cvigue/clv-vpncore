@@ -371,8 +371,9 @@ OpenVpnPacket OpenVpnPacket::HardReset(bool is_client,
         break;
     case 3:
     default:
+        // Client tls-crypt uses CLIENT_V3; there is no server V3 opcode — SERVER_V2.
         opcode = is_client ? Opcode::P_CONTROL_HARD_RESET_CLIENT_V3
-                           : Opcode::P_CONTROL_HARD_RESET_SERVER_V3;
+                           : Opcode::P_CONTROL_HARD_RESET_SERVER_V2;
         break;
     }
 
@@ -401,7 +402,9 @@ OpenVpnPacket OpenVpnPacket::HardResetResponse(Opcode client_opcode,
         break;
     case Opcode::P_CONTROL_HARD_RESET_CLIENT_V3:
     default:
-        response_opcode = Opcode::P_CONTROL_HARD_RESET_SERVER_V3;
+        // OpenVPN 2.x has no HARD_RESET_SERVER_V3 opcode (P_LAST_OPCODE = 11).
+        // Respond with SERVER_V2 for tls-crypt / tls-crypt-v2 clients.
+        response_opcode = Opcode::P_CONTROL_HARD_RESET_SERVER_V2;
         break;
     }
 

@@ -113,7 +113,7 @@ class VpnServerIntegrationTest : public ::testing::Test
     std::vector<std::uint8_t> CreateServerHardReset(SessionId session_id, uint8_t key_id = 0)
     {
         OpenVpnPacket packet;
-        packet.opcode_ = Opcode::P_CONTROL_HARD_RESET_SERVER_V3;
+        packet.opcode_ = Opcode::P_CONTROL_HARD_RESET_SERVER_V2;
         packet.key_id_ = key_id;
         packet.session_id_ = session_id.value;
         packet.packet_id_ = 1; // First response from server

@@ -133,7 +133,7 @@ asio::awaitable<void> HandleServerPushRequest(
     spdlog::logger &logger,
     Actions &actions)
 {
-    logger.info("Client sent PUSH_REQUEST, sending PUSH_REPLY");
+    logger.info("Sending PUSH_REPLY");
 
     if (!session->GetCryptoContext().HasValidKeys())
     {
