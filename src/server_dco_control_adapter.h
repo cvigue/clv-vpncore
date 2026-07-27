@@ -4,21 +4,17 @@
 #define CLV_VPN_SERVER_DCO_CONTROL_ADAPTER_H
 
 /**
- * @file server_udp_control_adapter.h
- * @brief CRTP control-side adapter for server UDP + DCO modes.
- *
- * Inherits ServerControlBase for the shared protocol engine and adds
- * UDP-specific transport wiring: UdpListener, split-datapath context,
- * batch statistics, and the DCO channel-construction path.
- *
- * @tparam Derived  DataTransport<UdpDataChannel|DcoDataChannel, ...>
+ * @file server_dco_control_adapter.h
+ * @brief Server DCO transport — owns channel + data adapter.
  */
 
-#include "log_subsystems.h"
-#include "server_control_base.h"
-
 #include "data_path_stats.h"
-#include "udp_engine_types.h"
+#include "log_subsystems.h"
+#include "openvpn/crypto_algorithms.h"
+#include "openvpn/dco_data_channel.h"
+#include "openvpn/push_exchange_helpers.h"
+#include "server_control_base.h"
+#include "server_data_adapter.h"
 #include "transport/batch_constants.h"
 #include "transport/listener.h"
 #include "transport/transport.h"
@@ -27,106 +23,66 @@
 #include <asio/detached.hpp>
 
 #include <cstddef>
-#include <cstdint>
-#include <functional>
 #include <optional>
-#include <tuple>
 #include <utility>
 #include <vector>
 
 namespace clv::vpn {
 
-/**
- * @brief Server control adapter for UDP transport (both UDP-userspace and DCO).
- *
- * Owns: UdpListener, batch counters/windows, and the split-datapath setup.
- * Protocol engine (sessions, handshake, routing, etc.) lives in ServerControlBase.
- */
-template <typename Derived>
-class ServerDcoControlAdapter : public ServerControlBase<Derived>
+class ServerDcoTransport : public ServerControlBase<ServerDcoTransport>
 {
-    using DcoControlBase = ServerControlBase<Derived>;
-
   public:
-    explicit ServerDcoControlAdapter(ServerControlConfig cfg)
+    using channel_type = DcoDataChannel<ServerDataAdapter<ServerDcoTransport>>;
+
+    explicit ServerDcoTransport(ServerControlConfig cfg)
+        : ServerControlBase(std::move(cfg))
+        , data_adapter_(*this)
+        , listener_(std::in_place,
+                    *io_context_,
+                    config_->server->host,
+                    config_->server->port)
+        , channel_(*io_context_,
+                   listener_->RawSocket(),
+                   channel_type::NetworkConfig{
+                       .server_network = config_->server->network,
+                       .server_ip = DeriveServerIp(*config_->server),
+                       .server_network_v6 = config_->server->network_v6,
+                       .keepalive_interval =
+                           static_cast<uint32_t>(config_->server->keepalive.first),
+                       .keepalive_timeout =
+                           static_cast<uint32_t>(config_->server->keepalive.second),
+                       .tun_mtu = static_cast<uint16_t>(
+                           config_->server->tun_mtu > 0 ? config_->server->tun_mtu : 0),
+                   },
+                   logger_manager_->GetLogger(logging::Subsystem::dataio),
+                   *running_,
+                   data_adapter_)
     {
-        this->InitializeBase(cfg);
-
-        const auto &server_cfg = *this->config_->server;
-
-        // Create listener
-        listener_.emplace(cfg.io_context, server_cfg.host, server_cfg.port);
-        listener_->ApplySocketBuffers(
-            this->config_->performance.socket_recv_buffer,
-            this->config_->performance.socket_send_buffer,
-            *this->logger_);
-
-        // Batch size
-        currentBatchSize_ = transport::EffectiveBatchSize(this->config_->performance.batch_size);
+        listener_->ApplySocketBuffers(config_->performance.socket_recv_buffer,
+                                      config_->performance.socket_send_buffer,
+                                      *logger_);
+        currentBatchSize_ = transport::EffectiveBatchSize(config_->performance.batch_size);
     }
 
-  protected:
-    auto ChannelArgs()
-    {
-        // net_cfg is a value type whose type is only known when Derived is
-        // complete (method bodies are instantiated lazily — safe here).
-        // Stored by value inside the tuple; refs wrapped with std::ref.
-        // Tuple is consumed immediately in DataTransport ctor; do not store.
-        const auto &srv = *this->config_->server;
-        return std::make_tuple(
-            std::ref(*this->io_context_),
-            std::ref(listener_->RawSocket()),
-            typename Derived::channel_type::NetworkConfig{
-                .server_network = srv.network,
-                .server_ip = DeriveServerIp(srv),
-                .server_network_v6 = srv.network_v6,
-                .keepalive_interval = static_cast<uint32_t>(srv.keepalive.first),
-                .keepalive_timeout = static_cast<uint32_t>(srv.keepalive.second),
-                .tun_mtu = static_cast<uint16_t>(srv.tun_mtu > 0 ? srv.tun_mtu : 0),
-            },
-            std::ref(this->logger_manager_->GetLogger(logging::Subsystem::dataio)),
-            std::ref(*this->running_));
-    }
+    channel_type &channel() noexcept { return channel_; }
+    const channel_type &channel() const noexcept { return channel_; }
 
-  public:
     void Start()
     {
-        this->ConfigureDataPlane();
-        asio::co_spawn(*this->io_context_, this->derived().StartDataPath(), asio::detached);
-        this->logger_->info("DCO mode active — kernel handles data path");
-        this->StartBase();
+        ConfigureDataPlane();
+        asio::co_spawn(*io_context_, channel_.StartDataPath(), asio::detached);
+        logger_->info("DCO mode active — kernel handles data path");
+        StartBase();
     }
 
     void Stop()
     {
-        this->StopBase();
+        StopBase();
         listener_.reset();
     }
 
-    // -- Called from DataAdapter (via asio::post to control thread) -----------
-
-    void OnControlPacketFromDataPath(std::vector<std::uint8_t> data,
-                                     transport::PeerEndpoint sender)
-    {
-        auto transport_handle = transport::TransportHandle(
-            listener_->TransportFor(sender));
-        asio::co_spawn(*this->io_context_,
-                       this->ProcessNetworkPacket(std::move(data), sender, std::move(transport_handle)),
-                       asio::detached);
-    }
-
-    // -- Control adapter methods (control → data) ----------------------------
-
-    void ConfigureSplitContext(UdpEngineContext *ctx)
-    {
-        this->ch().SetSplitContext(ctx);
-    }
-    void ConfigureSocketFd(int fd)
-    {
-        this->ch().SetSocketFd(fd);
-    }
-
-    // -- Stats hook (called by base StatsLoop) -------------------------------
+    using ServerControlBase::OnControlPacketFromDataPath;
+    using ServerControlBase::HandleTcpDisconnect;
 
     void LogStats(const DataPathStats &delta, double elapsedSec)
     {
@@ -136,31 +92,34 @@ class ServerDcoControlAdapter : public ServerControlBase<Derived>
             std::tie(actualRcvBuf, actualSndBuf) = listener_->GetSocketBufferSizes();
 
         auto rates = ComputeStatsRates(delta, elapsedSec, actualRcvBuf, actualSndBuf);
-
-        this->logger_->info("[stats/dco] {:.1f}s: "
-                            "rx={} pkts ({:.1f} Mbps) "
-                            "tx={} pkts ({:.1f} Mbps) "
-                            "buf_rx={}ms buf_tx={}ms "
-                            "peers={}",
-                            elapsedSec,
-                            delta.packetsReceived,
-                            rates.rxMbps,
-                            delta.packetsSent,
-                            rates.txMbps,
-                            FormatBufMs(rates.rxBufMs),
-                            FormatBufMs(rates.txBufMs),
-                            this->session_manager_.GetSessionCount());
+        logger_->info("[stats/dco] {:.1f}s: "
+                      "rx={} pkts ({:.1f} Mbps) "
+                      "tx={} pkts ({:.1f} Mbps) "
+                      "buf_rx={}ms buf_tx={}ms "
+                      "peers={}",
+                      elapsedSec,
+                      delta.packetsReceived,
+                      rates.rxMbps,
+                      delta.packetsSent,
+                      rates.txMbps,
+                      FormatBufMs(rates.rxBufMs),
+                      FormatBufMs(rates.txBufMs),
+                      session_manager_.GetSessionCount());
     }
 
-    // -- Accessors -----------------------------------------------------------
-
-    transport::UdpListener *udp_listener() noexcept
+    void OnControlPacketFromDataPath(std::vector<std::uint8_t> data,
+                                     transport::PeerEndpoint sender)
     {
-        return listener_ ? &*listener_ : nullptr;
+        auto transport_handle = transport::TransportHandle(listener_->TransportFor(sender));
+        asio::co_spawn(*io_context_,
+                       ProcessNetworkPacket(std::move(data), sender, std::move(transport_handle)),
+                       asio::detached);
     }
 
   private:
+    ServerDataAdapter<ServerDcoTransport> data_adapter_;
     std::optional<transport::UdpListener> listener_;
+    channel_type channel_;
     std::size_t currentBatchSize_ = 0;
 };
 

@@ -154,6 +154,49 @@ bool ControlChannel::CompleteCookieHandshake(SessionId peer_session_id, std::uin
     return true;
 }
 
+void ControlChannel::AdvanceRekeyKeyId()
+{
+    // Per OpenVPN protocol: key_id 0 is always the first session. Renegotiations
+    // use key_id 1-7, then wrap back to 1 (not 0). See OpenVPN ssl.c:830-844
+    const std::uint8_t old_key_id = key_id_;
+    std::uint8_t new_key_id = (key_id_ + 1) & 0x07;
+    if (new_key_id == 0)
+        new_key_id = 1;
+    logger_->debug("AdvanceRekeyKeyId: key_id {} -> {}", old_key_id, new_key_id);
+    key_id_ = new_key_id;
+}
+
+void ControlChannel::ResetReliabilityForRekey(bool reset_inbound_to_max)
+{
+    // Session IDs stay the same across soft reset.
+    outbound_packet_id_ = 0;
+    unacked_packets_.clear();
+    // Defense-in-depth: drop already-serialized fragments so they cannot flush
+    // under the new key_id (cve-audit F2 / CVE-2026-40215 hygiene).
+    pending_fragments_.clear();
+    if (reset_inbound_to_max)
+    {
+        // UINT32_MAX sentinel: ValidatePacketId accepts packet_id 0 as first.
+        last_received_packet_id_ = UINT32_MAX;
+    }
+}
+
+void ControlChannel::EmplaceTlsForRekey(PeerRole role, const TlsCertConfig &cert_config)
+{
+    try
+    {
+        tls_context_.emplace(role, cert_config, *logger_);
+    }
+    catch (const std::exception &e)
+    {
+        logger_->error("EmplaceTlsForRekey: failed to reinitialize TLS context: {}", e.what());
+        state_ = State::Error;
+        throw;
+    }
+    received_plaintext_.clear();
+    state_ = State::TlsHandshake;
+}
+
 std::vector<std::uint8_t> ControlChannel::HandleSoftReset(const OpenVpnPacket &packet, const TlsCertConfig &cert_config)
 {
     if (!packet.IsSoftReset())
@@ -198,41 +241,10 @@ std::vector<std::uint8_t> ControlChannel::HandleSoftReset(const OpenVpnPacket &p
         pending_acks_.push_back(packet.packet_id_.value());
     }
 
-    // Per OpenVPN protocol: key_id 0 is always the first session. Renegotiations use key_id 1-7, then
-    // wrap back to 1 (not 0). See OpenVPN ssl.c:830-844
-    std::uint8_t new_key_id = (key_id_ + 1) & 0x07;
-    if (new_key_id == 0)
-        new_key_id = 1; // Skip 0, reserved for first session
-
-    logger_->debug("HandleSoftReset: key_id {} -> {}", key_id_, new_key_id);
-
-    key_id_ = new_key_id;
-
-    // Reset packet sequence counters for the new handshake
-    // Note: Don't reset session IDs - they stay the same for soft reset
-    outbound_packet_id_ = 0;
-
-    // Clear outbound tracking for new handshake
-    unacked_packets_.clear();
-
-    // Reinitialize TLS context for new handshake.
-    // The VPN server is always the TLS server regardless of who initiated the soft reset.
-    try
-    {
-        tls_context_.emplace(PeerRole::Server, cert_config, *logger_);
-    }
-    catch (const std::exception &e)
-    {
-        logger_->error("HandleSoftReset: failed to reinitialize TLS context: {}", e.what());
-        state_ = State::Error;
-        throw;
-    }
-
-    // Clear received plaintext from previous session
-    received_plaintext_.clear();
-
-    // Transition to TLS handshake state for renegotiation
-    state_ = State::TlsHandshake;
+    AdvanceRekeyKeyId();
+    ResetReliabilityForRekey(/*reset_inbound_to_max=*/false);
+    // VPN server is always the TLS server regardless of who initiated soft reset.
+    EmplaceTlsForRekey(PeerRole::Server, cert_config);
 
     // ACK the peer's soft reset.  The VPN server waits for the remote client's
     // ClientHello (which arrives as P_CONTROL_V1 packets).
@@ -376,37 +388,10 @@ std::vector<std::uint8_t> ControlChannel::RequestSoftReset(PeerRole role, const 
     logger_->info("RequestSoftReset: initiating key renegotiation as TLS {}",
                   role == PeerRole::Server ? "server" : "client");
 
-    // Advance key ID — same wrapping rule as HandleSoftReset.
-    std::uint8_t new_key_id = (key_id_ + 1) & 0x07;
-    if (new_key_id == 0)
-        new_key_id = 1;
-
-    logger_->debug("RequestSoftReset: key_id {} -> {}", key_id_, new_key_id);
-    key_id_ = new_key_id;
-
-    // Reset per-handshake sequencing state.
-    outbound_packet_id_ = 0;
-    unacked_packets_.clear();
-    // The client restarts its outbound packet_id from 0 (GetNextPacketId post-increments,
-    // so the first packet has packet_id=0).  UINT32_MAX is the sentinel meaning "never
-    // received anything yet"; ValidatePacketId accepts packet_id=0 when last_received
-    // is UINT32_MAX, exactly as on the initial connection.
-    last_received_packet_id_ = UINT32_MAX;
-
-    // Reinitialise TLS with the specified role for this renegotiation.
-    try
-    {
-        tls_context_.emplace(role, cert_config, *logger_);
-    }
-    catch (const std::exception &e)
-    {
-        logger_->error("RequestSoftReset: failed to reinitialise TLS context: {}", e.what());
-        state_ = State::Error;
-        throw;
-    }
-
-    received_plaintext_.clear();
-    state_ = State::TlsHandshake;
+    AdvanceRekeyKeyId();
+    // Local initiator: peer will restart from packet_id 0.
+    ResetReliabilityForRekey(/*reset_inbound_to_max=*/true);
+    EmplaceTlsForRekey(role, cert_config);
 
     auto packet = OpenVpnPacket::SoftReset(key_id_, session_id_.value, GetNextPacketId());
 
@@ -443,39 +428,16 @@ std::vector<std::uint8_t> ControlChannel::RespondToSoftReset(const OpenVpnPacket
 
     logger_->info("RespondToSoftReset: starting key renegotiation in response to server soft reset");
 
-    // Record incoming packet for ACKing; piggyback on the outgoing soft reset below.
+    // Record incoming packet for ACKing.
     if (packet.packet_id_)
     {
         last_received_packet_id_ = packet.packet_id_.value();
         pending_acks_.push_back(packet.packet_id_.value());
     }
 
-    // Advance key ID — same wrapping rule as HandleSoftReset.
-    std::uint8_t new_key_id = (key_id_ + 1) & 0x07;
-    if (new_key_id == 0)
-        new_key_id = 1;
-
-    logger_->debug("RespondToSoftReset: key_id {} -> {}", key_id_, new_key_id);
-    key_id_ = new_key_id;
-
-    // Reset per-handshake sequencing state.
-    outbound_packet_id_ = 0;
-    unacked_packets_.clear();
-
-    // Reinitialise TLS for the new handshake — client role this time.
-    try
-    {
-        tls_context_.emplace(PeerRole::Client, cert_config, *logger_);
-    }
-    catch (const std::exception &e)
-    {
-        logger_->error("RespondToSoftReset: failed to reinitialise TLS context: {}", e.what());
-        state_ = State::Error;
-        throw;
-    }
-
-    received_plaintext_.clear();
-    state_ = State::TlsHandshake;
+    AdvanceRekeyKeyId();
+    ResetReliabilityForRekey(/*reset_inbound_to_max=*/false);
+    EmplaceTlsForRekey(PeerRole::Client, cert_config);
 
     // ACK the server's soft reset.  The client will follow up with
     // InitiateTlsHandshake() → ClientHello via the normal TLS data path.
@@ -629,7 +591,8 @@ void ControlChannel::ApplyAckIds(std::span<const std::uint32_t> ack_ids)
     }
 
     // Drop acknowledged entries so CountUnacknowledgedPackets / send window update now
-    std::erase_if(unacked_packets_, [](const auto &entry) { return entry.second.IsAcknowledged(); });
+    std::erase_if(unacked_packets_, [](const auto &entry)
+    { return entry.second.IsAcknowledged(); });
 }
 
 std::vector<std::vector<std::uint8_t>>

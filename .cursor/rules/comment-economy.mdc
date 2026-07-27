@@ -1,0 +1,32 @@
+---
+description: Prefer sparse non-doxygen comments; no changelog-in-code
+alwaysApply: true
+---
+
+# Comment economy
+
+Be sparing with non-doxygen comments.
+
+**Keep** when they earn their keep:
+- Non-obvious invariants, ordering constraints, lifetime/footguns
+- Why the naive approach is wrong (brief)
+- Protocol / wire quirks that the code alone does not reveal
+
+**Do not** write:
+- Comments that restate the commit or the refactor ("we changed X to Y", "kept as Z because we retired W")
+- Multi-line explanations of design choices that are already the point of the surrounding change or type name
+- Narration of what the next few lines do
+
+If a public API needs a rationale, prefer a **one-line** `///` note over a paragraph. Prefer deleting the comment when the type/name already says it.
+
+```cpp
+// ❌ BAD — changelog noise
+/**
+ * Kept as std::function because demos/apps are an open set of callables
+ * (unlike closed-set SessionControlActions / LaunchKeepalive).
+ */
+
+// ✅ GOOD — only if a reader would otherwise "fix" it
+/// App-facing; type-erased (open set of callers).
+using StateCallback = std::function<void(VpnClientState, VpnClientState)>;
+```

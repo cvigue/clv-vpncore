@@ -56,8 +56,10 @@ class DcoDataChannel : public DcoServerDataMixin<DcoDataChannel<Adapter>>
                    asio::ip::udp::socket &socket,
                    const NetworkConfig &network_config,
                    spdlog::logger &logger,
-                   const std::atomic<bool> &running_flag)
-        : DcoServerMixinBase(io_context, socket, network_config, logger, running_flag)
+                   const std::atomic<bool> &running_flag,
+                   Adapter &adapter)
+        : DcoServerMixinBase(io_context, socket, network_config, logger, running_flag),
+          adapter_(&adapter)
     {
     }
 
@@ -92,12 +94,6 @@ class DcoDataChannel : public DcoServerDataMixin<DcoDataChannel<Adapter>>
     using DcoServerMixinBase::StopDataPath;
     using DcoServerMixinBase::StopKeepaliveMonitor;
 
-    // -- Static adapter binding (called by DataTransport after construction) --
-
-    void SetAdapter(Adapter &adapter)
-    {
-        adapter_ = &adapter;
-    }
 
   private:
     // -- CRTP targets (called by DcoServerDataMixin) ------------------------
@@ -113,7 +109,7 @@ class DcoDataChannel : public DcoServerDataMixin<DcoDataChannel<Adapter>>
         adapter_->OnPeerDead(sid);
     }
 
-    Adapter *adapter_ = nullptr;
+    Adapter *adapter_;
 };
 
 } // namespace clv::vpn

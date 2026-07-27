@@ -5,29 +5,18 @@
 
 /**
  * @file server_data_adapter.h
- * @brief CRTP data-side adapter for server mode.
+ * @brief Data→control marshal adapter for server channels (template DI).
  *
- * Called from RX/TX hot-path threads when the data channel needs to
- * communicate with the control plane.  Stateless — zero sizeof.
- *
- * OnControlPacket and OnPeerDead marshal to the control-plane io_context
- * via asio::post.  The target methods (ProcessNetworkPacket, HandleDeadPeer)
- * live on the ControlAdapter (reachable through Derived which inherits both).
- *
- * This type is injected into a DataTransport template parameter list to bind
- * the transport to the control-plane logic via CRTP, providing the necessary
- * callback implementations for a server controller. The data channel wrappers
- * all require this interface to be present via a cast ref to 'this' as per
- * typical CRTP, and this provides the necessary glue to marshal calls back
- * to the control plane.
- *
- * @see ServerTcpControlAdapter
- * @see ServerUdpControlAdapter
+ * Holds Control* satisfying ServerControlForAdapter. Channels call these
+ * methods from RX/TX threads; posts hop onto the control io_context.
  */
 
+#include "channel_concept.h"
 #include "openvpn/connection.h"
 #include "openvpn/packet.h"
 #include "transport/transport.h"
+
+#include <not_null.h>
 
 #include <asio/awaitable.hpp>
 #include <asio/io_context.hpp>
@@ -40,50 +29,53 @@
 
 namespace clv::vpn {
 
-template <typename Derived>
+template <typename Control>
 struct ServerDataAdapter
 {
+    explicit ServerDataAdapter(Control &control)
+        : control_(&control)
+    {
+        static_assert(ServerControlForAdapter<Control>,
+                      "Control must satisfy ServerControlForAdapter");
+    }
+
     void OnControlPacket(std::vector<std::uint8_t> data,
                          transport::PeerEndpoint sender)
     {
-        auto &self = static_cast<Derived &>(*this);
-        asio::post(self.io_context(),
-                   [&self, d = std::move(data), s = sender]() mutable
+        asio::post(control_->io_context(),
+                   [c = control_, d = std::move(data), s = sender]() mutable
         {
-            self.OnControlPacketFromDataPath(std::move(d), s);
+            c->OnControlPacketFromDataPath(std::move(d), s);
         });
     }
 
-    // 3-arg overload for TCP (includes transport handle from per-client socket)
     void OnControlPacket(std::vector<std::uint8_t> data,
                          transport::PeerEndpoint sender,
                          transport::TransportHandle transport)
     {
-        auto &self = static_cast<Derived &>(*this);
-        asio::post(self.io_context(),
-                   [&self, d = std::move(data), s = sender, t = std::move(transport)]() mutable
+        asio::post(control_->io_context(),
+                   [c = control_, d = std::move(data), s = sender,
+                    t = std::move(transport)]() mutable
         {
-            self.OnControlPacketFromDataPath(std::move(d), s, std::move(t));
+            c->OnControlPacketFromDataPath(std::move(d), s, std::move(t));
         });
     }
 
     void OnDisconnect(transport::PeerEndpoint sender)
     {
-        auto &self = static_cast<Derived &>(*this);
-        asio::post(self.io_context(),
-                   [&self, s = sender]()
+        asio::post(control_->io_context(),
+                   [c = control_, s = sender]
         {
-            self.HandleTcpDisconnect(s);
+            c->HandleTcpDisconnect(s);
         });
     }
 
     void OnPeerDead(openvpn::SessionId sid)
     {
-        auto &self = static_cast<Derived &>(*this);
-        asio::post(self.io_context(),
-                   [&self, sid]()
+        asio::post(control_->io_context(),
+                   [c = control_, sid]
         {
-            self.HandleDeadPeer(sid);
+            c->HandleDeadPeer(sid);
         });
     }
 
@@ -92,9 +84,6 @@ struct ServerDataAdapter
         // Server tracks per-connection activity inside MultiPeerPolicy — no-op.
     }
 
-    // Encrypt plaintext with the session's data channel and send directly to
-    // the session's transport.  Intended for slow-path server-initiated packets
-    // (keepalive pings, future push-updates) that bypass the TUN hot path.
     asio::awaitable<void> SendEncryptedToSession(Connection *session,
                                                  std::span<const std::uint8_t> plaintext)
     {
@@ -113,6 +102,9 @@ struct ServerDataAdapter
         co_await transport.Send(encrypted);
         session->UpdateLastOutbound();
     }
+
+  private:
+    not_null<Control *> control_;
 };
 
 } // namespace clv::vpn

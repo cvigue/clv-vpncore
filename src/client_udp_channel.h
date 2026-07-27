@@ -26,11 +26,10 @@
 #include "transport/batch_constants.h"
 #include "udp_client_mixin.h"
 
-#include "iface_utils.h"
+#include "client_network_setup.h"
 #include "openvpn/config_exchange.h"
 #include "openvpn/key_derivation.h"
 #include "openvpn/vpn_config.h"
-#include "route_utils.h"
 #include "transport/transport.h"
 #include "udp_core.h"
 #include "udp_engine_types.h"
@@ -40,7 +39,6 @@
 #include <span>
 #include <stdexcept>
 #include <string>
-#include <net/ipv4_utils.h>
 
 #include "platform/linux/tun/tun_device.h"
 
@@ -50,7 +48,7 @@
 
 #include <array>
 #include <atomic>
-#include <functional>
+#include <concepts>
 #include <cstring>
 #include <cstdint>
 #include <memory>
@@ -60,8 +58,6 @@
 #include <vector>
 
 namespace clv::vpn {
-
-namespace ipv4 = clv::net::ipv4;
 
 template <typename Adapter>
 class ClientUdpChannel
@@ -75,7 +71,8 @@ class ClientUdpChannel
     ClientUdpChannel(asio::io_context &io_context,
                      spdlog::logger &logger,
                      const VpnConfig &config,
-                     const std::atomic<bool> &running)
+                     const std::atomic<bool> &running,
+                     Adapter &adapter)
         : UdpClientMixinBase(io_context,
                              logger,
                              typename UdpClientMixinBase::Config{
@@ -87,8 +84,11 @@ class ClientUdpChannel
                                  .tx_small_pkt_flush = config.performance.tx_small_pkt_flush,
                                  .max_recv = static_cast<std::size_t>(config.performance.max_recv),
                                  .rx_process_batch = static_cast<std::size_t>(config.performance.rx_process_batch),
-                             })
+                             }),
+          adapter_(&adapter)
     {
+        // Wire the P2P TX-engine callback so last_tx_ns_ tracks every outbound packet.
+        this->policy().SetTxNsOutput(&last_tx_ns_);
     }
 
     ~ClientUdpChannel()
@@ -121,15 +121,6 @@ class ClientUdpChannel
     {
         UdpClientMixinBase::EngineInstallKeys(encrypt_key, decrypt_key, key_id);
         ping_tx_state_.ApplySnapshot(encrypt_key, key_id);
-    }
-
-    // -- Static adapter binding (called by DataTransport after construction) --
-
-    void SetAdapter(Adapter &adapter)
-    {
-        adapter_ = &adapter;
-        // Wire the P2P TX-engine callback so last_tx_ns_ tracks every outbound packet.
-        this->policy().SetTxNsOutput(&last_tx_ns_);
     }
 
     std::chrono::steady_clock::time_point LastTxTime() const noexcept
@@ -226,112 +217,14 @@ class ClientUdpChannel
                                    asio::io_context &io_ctx)
     {
         this->tun_device_ = std::make_unique<tun::TunDevice>(io_ctx);
-        auto *tun = this->tun_device_.get();
-        std::string name = tun->Create(config.client->dev_name);
-        this->logger().info("Created TUN: {}", name);
-
-        const auto &assigned_ip = negotiated.ifconfig.first;
-        const auto &assigned_netmask = negotiated.ifconfig.second;
-
-        if (negotiated.topology == "subnet" && !assigned_netmask.empty())
-        {
-            auto prefix = ipv4::MaskToPrefix(asio::ip::make_address_v4(assigned_netmask).to_uint());
-            tun->SetAddress(assigned_ip, prefix);
-        }
-        else
-        {
-            std::string remote_ip = assigned_netmask.empty() ? "255.255.255.255" : assigned_netmask;
-            iface::SetPointToPoint(tun->GetName().c_str(), assigned_ip, remote_ip);
-        }
-
-        constexpr std::uint16_t kDefaultTunMtu = 1400;
-        tun->SetMtu(kDefaultTunMtu);
-        tun->BringUp();
-
-        if (!negotiated.ifconfig_ipv6.first.empty())
-        {
-            auto prefix6 = static_cast<std::uint8_t>(negotiated.ifconfig_ipv6.second);
-            tun->AddIpv6Address(negotiated.ifconfig_ipv6.first, prefix6);
-        }
+        ConfigureClientTun(*this->tun_device_, negotiated, config.client->dev_name, this->logger());
     }
 
     void InstallNegotiatedRoutes(const openvpn::NegotiatedConfig &negotiated)
     {
-        auto *tun = this->tun_device_.get();
-        if (!tun)
+        if (!this->tun_device_)
             return;
-
-        std::string dev = tun->GetName();
-        if (dev.empty())
-            return;
-
-        std::string connected_cidr;
-        if (!negotiated.ifconfig.first.empty() && !negotiated.ifconfig.second.empty())
-        {
-            try
-            {
-                auto host = asio::ip::make_address_v4(negotiated.ifconfig.first).to_uint();
-                auto prefix = ipv4::MaskToPrefix(asio::ip::make_address_v4(negotiated.ifconfig.second).to_uint());
-                auto net = host & ipv4::CreateMask(prefix);
-                connected_cidr = ipv4::Ipv4ToString(net) + "/" + std::to_string(prefix);
-            }
-            catch (...)
-            {
-            }
-        }
-
-        for (const auto &[network, gw, metric] : negotiated.routes)
-        {
-            std::string cidr;
-            if (network.find('/') != std::string::npos)
-                cidr = network;
-            else if (!gw.empty())
-            {
-                try
-                {
-                    auto prefix = ipv4::MaskToPrefix(asio::ip::make_address_v4(gw).to_uint());
-                    cidr = network + "/" + std::to_string(prefix);
-                }
-                catch (...)
-                {
-                    cidr = network + "/32";
-                }
-            }
-            else
-                cidr = network + "/32";
-
-            if (!connected_cidr.empty() && cidr == connected_cidr)
-            {
-                this->logger().debug("Route: {} skipped (connected subnet, kernel-managed)", cidr);
-                continue;
-            }
-
-            std::string via;
-            if (!negotiated.route_gateway.empty())
-                via = negotiated.route_gateway;
-            this->logger().info("Route: {} dev {}{}", cidr, dev, via.empty() ? "" : " via " + via);
-            try
-            {
-                route::ReplaceRoute4(dev, cidr, via);
-            }
-            catch (const std::exception &e)
-            {
-                this->logger().error("Route failed: {}", e.what());
-            }
-        }
-
-        for (const auto &[network, gw, metric] : negotiated.routes_ipv6)
-        {
-            this->logger().info("IPv6 route: {} dev {}", network, dev);
-            try
-            {
-                route::ReplaceRoute6(dev, network);
-            }
-            catch (const std::exception &e)
-            {
-                this->logger().error("IPv6 route failed: {}", e.what());
-            }
-        }
+        InstallClientNegotiatedRoutes(*this->tun_device_, negotiated, this->logger());
     }
 
     void OnTeardown()
@@ -340,12 +233,11 @@ class ClientUdpChannel
             this->tun_device_->Close();
     }
 
-    void LaunchKeepalive(asio::io_context &io_ctx,
-                         std::function<asio::awaitable<void>()> fn,
-                         int interval)
+    template <std::invocable Fn>
+    void LaunchKeepalive(asio::io_context &io_ctx, Fn &&fn, int interval)
     {
         if (interval > 0)
-            asio::co_spawn(io_ctx, fn(), asio::detached);
+            asio::co_spawn(io_ctx, std::forward<Fn>(fn)(), asio::detached);
     }
 
   private:
@@ -362,7 +254,7 @@ class ClientUdpChannel
         adapter_->OnRxActivity();
     }
 
-    Adapter *adapter_ = nullptr;
+    Adapter *adapter_;
     std::atomic<std::int64_t> last_tx_ns_{0};
     TxEncryptState ping_tx_state_; ///< Control-thread-only encrypt context for keepalive pings.
 };

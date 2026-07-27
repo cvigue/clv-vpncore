@@ -4,13 +4,10 @@
 #define CLV_VPN_VPN_CLIENT_H
 
 #include "client_control_adapter.h"
-#include "client_data_adapter.h"
-#include "client_dco_channel.h"
-#include "client_tcp_channel.h"
-#include "client_udp_channel.h"
 #include "data_path_stats.h"
+#include "data_plane.h"
 #include "openvpn/vpn_config.h"
-#include "data_transport.h"
+#include "transport_types.h"
 
 #include <nlohmann/json_fwd.hpp>
 
@@ -24,9 +21,6 @@
 #include <functional>
 #include <memory>
 #include <string>
-#include <type_traits>
-#include <utility>
-#include <variant>
 #include <vector>
 
 namespace clv::vpn {
@@ -48,7 +42,7 @@ struct VpnClientConfig
  * @brief OpenVPN client — thin factory shell.
  *
  * Owns the config and running flag; delegates all protocol work to
- * DataTransport instantiated with either UDP or DCO channel.
+ * ClientControlPlane held in @ref data_plane_.
  */
 class VpnClient
 {
@@ -65,7 +59,7 @@ class VpnClient
 
     void SetStateCallback(StateCallback cb)
     {
-        WithDataTransport([&](auto &dp)
+        data_plane_.Visit([&](auto &dp)
         { dp.SetStateCallback(std::move(cb)); });
     }
 
@@ -75,7 +69,7 @@ class VpnClient
     VpnClientState GetState() const
     {
         VpnClientState s = VpnClientState::Disconnected;
-        WithDataTransport([&](auto &dp)
+        data_plane_.Visit([&](auto &dp)
         { s = dp.GetState(); });
         return s;
     }
@@ -83,7 +77,7 @@ class VpnClient
     bool IsConnected() const
     {
         bool c = false;
-        WithDataTransport([&](auto &dp)
+        data_plane_.Visit([&](auto &dp)
         { c = dp.IsConnected(); });
         return c;
     }
@@ -91,7 +85,7 @@ class VpnClient
     std::string GetAssignedIp() const
     {
         std::string ip;
-        WithDataTransport([&](auto &dp)
+        data_plane_.Visit([&](auto &dp)
         { ip = dp.GetAssignedIp(); });
         return ip;
     }
@@ -99,7 +93,7 @@ class VpnClient
     std::vector<std::string> GetRoutes() const
     {
         std::vector<std::string> r;
-        WithDataTransport([&](auto &dp)
+        data_plane_.Visit([&](auto &dp)
         { r = dp.GetRoutes(); });
         return r;
     }
@@ -107,7 +101,7 @@ class VpnClient
     std::vector<std::string> GetDnsServers() const
     {
         std::vector<std::string> d;
-        WithDataTransport([&](auto &dp)
+        data_plane_.Visit([&](auto &dp)
         { d = dp.GetDnsServers(); });
         return d;
     }
@@ -120,7 +114,7 @@ class VpnClient
     std::uint64_t GetBytesSent() const
     {
         std::uint64_t v = 0;
-        WithDataTransport([&](auto &dp)
+        data_plane_.Visit([&](auto &dp)
         { v = dp.GetStats().bytesSent; });
         return v;
     }
@@ -128,7 +122,7 @@ class VpnClient
     std::uint64_t GetBytesReceived() const
     {
         std::uint64_t v = 0;
-        WithDataTransport([&](auto &dp)
+        data_plane_.Visit([&](auto &dp)
         { v = dp.GetStats().bytesReceived; });
         return v;
     }
@@ -136,7 +130,7 @@ class VpnClient
     std::chrono::seconds GetUptime() const
     {
         std::chrono::seconds u(0);
-        WithDataTransport([&](auto &dp)
+        data_plane_.Visit([&](auto &dp)
         { u = dp.GetUptime(); });
         return u;
     }
@@ -144,51 +138,20 @@ class VpnClient
     DataPathStats GetStats() const
     {
         DataPathStats s{};
-        WithDataTransport([&](auto &dp)
+        data_plane_.Visit([&](auto &dp)
         { s = dp.GetStats(); });
         return s;
     }
 
   private:
-    using ClientUdpTransport = DataTransport<ClientUdpChannel,
-                                             ClientDataAdapter,
-                                             ClientControlAdapter>;
-    using ClientDcoTransport = DataTransport<ClientDcoChannel,
-                                             ClientDataAdapter,
-                                             ClientControlAdapter>;
-    using ClientTcpTransport = DataTransport<ClientTcpChannel,
-                                             ClientDataAdapter,
-                                             ClientControlAdapter>;
-    using DataTransportVariant = std::variant<std::monostate, ClientUdpTransport, ClientDcoTransport, ClientTcpTransport>;
-
-    template <typename F>
-    void WithDataTransport(F &&f)
-    {
-        std::visit([&](auto &dp)
-        {
-            if constexpr (!std::is_same_v<std::decay_t<decltype(dp)>, std::monostate>)
-                f(dp);
-        },
-                   data_transport_);
-    }
-
-    template <typename F>
-    void WithDataTransport(F &&f) const
-    {
-        std::visit([&](auto &dp)
-        {
-            if constexpr (!std::is_same_v<std::decay_t<decltype(dp)>, std::monostate>)
-                f(dp);
-        },
-                   data_transport_);
-    }
+    using ClientDataPlane = DataPlane<ClientUdpTransport, ClientDcoTransport, ClientTcpTransport>;
 
     asio::io_context &io_context_;
     VpnConfig config_;
     std::shared_ptr<spdlog::logger> logger_;
     std::atomic<bool> running_{false};
 
-    DataTransportVariant data_transport_;
+    ClientDataPlane data_plane_;
 };
 
 } // namespace clv::vpn

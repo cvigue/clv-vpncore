@@ -7,10 +7,20 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <limits>
 #include <string>
+#include <utility>
+
+#include <asio/awaitable.hpp>
+#include <asio/error.hpp>
+#include <asio/steady_timer.hpp>
+#include <asio/use_awaitable.hpp>
+
+#include <spdlog/spdlog.h>
 
 namespace clv::vpn {
 
@@ -400,6 +410,62 @@ struct TxBurstAvgWindow
         return {t, c};
     }
 };
+
+/**
+ * Periodic stats timer loop shared by client and server (DRY F5).
+ *
+ * @param still_alive  Stop when false (e.g. running_ / Connected).
+ * @param snapshot     Capture current DataPathStats (may throw — skipped).
+ * @param log_delta    Format/log the interval delta.
+ */
+template <typename StillAlive, typename SnapshotFn, typename LogDelta>
+asio::awaitable<void> RunStatsLoop(asio::steady_timer &timer,
+                                   std::chrono::seconds interval,
+                                   spdlog::logger &logger,
+                                   StillAlive still_alive,
+                                   SnapshotFn snapshot,
+                                   LogDelta log_delta)
+{
+    DataPathStats previous = snapshot();
+
+    while (still_alive())
+    {
+        timer.expires_after(interval);
+        try
+        {
+            co_await timer.async_wait(asio::use_awaitable);
+        }
+        catch (const asio::system_error &e)
+        {
+            if (e.code() == asio::error::operation_aborted)
+                break;
+            throw;
+        }
+
+        if (!still_alive())
+            break;
+
+        DataPathStats current;
+        try
+        {
+            current = snapshot();
+        }
+        catch (const std::exception &e)
+        {
+            logger.warn("StatsLoop: SnapshotStats threw ({}); skipping interval", e.what());
+            continue;
+        }
+        catch (...)
+        {
+            logger.warn("StatsLoop: SnapshotStats threw unknown exception; skipping interval");
+            continue;
+        }
+
+        auto delta = DataPathStats::Delta(current, previous);
+        previous = current;
+        log_delta(delta, static_cast<double>(interval.count()));
+    }
+}
 
 } // namespace clv::vpn
 

@@ -20,6 +20,10 @@
 
 #include "multi_peer_policy.h"
 #include "keepalive_loop.h"
+#include "server_keepalive.h"
+#include "traffic_policy.h"
+#include "tunnel_zone.h"
+#include "tunnel_zone_attachment_guard.h"
 #include "udp_core.h"
 
 #include "data_path_stats.h"
@@ -36,7 +40,6 @@
 #include "transport/batch_constants.h"
 
 
-#include <stdexcept>
 #include <string>
 #include "platform/linux/tun/tun_device.h"
 #include "platform/linux/tun/tun_setup.h"
@@ -64,9 +67,6 @@
 
 namespace clv::vpn {
 
-namespace ipv4 = clv::net::ipv4;
-namespace ipv6 = clv::net::ipv6;
-
 template <typename Derived>
 class UdpServerMixin : public UdpCore<Derived, MultiPeerPolicy>
 {
@@ -76,10 +76,14 @@ class UdpServerMixin : public UdpCore<Derived, MultiPeerPolicy>
     // -- Data plane setup (called from ServerControlBase::ConfigureDataPlane) ---
 
     std::string ConfigureDataPlane(const VpnConfig::ServerConfig &srv,
-                                   asio::io_context &io_ctx)
+                                   asio::io_context &io_ctx,
+                                   TunnelZone *zone)
     {
         tun_device_ = std::make_unique<tun::TunDevice>(io_ctx);
-        return tun::SetupServerTun(*tun_device_, srv, Core::logger());
+        std::string dev = tun::SetupServerTun(*tun_device_, srv, Core::logger());
+        if (zone && !dev.empty())
+            hub_attachment_.Reset(zone, BuildHubAttachmentSpec(srv, dev));
+        return dev;
     }
 
     // -- Pre-start configuration ---------------------------------------------
@@ -121,6 +125,7 @@ class UdpServerMixin : public UdpCore<Derived, MultiPeerPolicy>
 
     void StopDataPath()
     {
+        hub_attachment_.Release();
         Core::CoreStop();
         if (tun_device_)
             tun_device_->Close();
@@ -135,46 +140,34 @@ class UdpServerMixin : public UdpCore<Derived, MultiPeerPolicy>
 
         Core::logger().debug("DecryptPacket returned {} bytes", plaintext.size());
 
-        if (!plaintext.empty())
+        switch (openvpn::ClassifyDecryptedPayload(plaintext))
         {
-            if (openvpn::IsKeepalivePing(plaintext))
-            {
-                Core::logger().debug("Received OpenVPN keepalive ping from client");
-                co_return;
-            }
-
-            if (plaintext.size() >= openvpn::IPV4_MIN_HEADER_SIZE)
-            {
-                tun::IpPacket ip_packet;
-                ip_packet.data = std::move(plaintext);
-                co_await SendToTun(ip_packet);
-            }
-        }
-        else
+        case openvpn::DecryptedPayloadDisposition::Drop:
+            if (plaintext.empty())
+                Core::logger().warn("DecryptPacket returned empty (decryption failed)");
+            co_return;
+        case openvpn::DecryptedPayloadDisposition::Keepalive:
+            Core::logger().debug("Received OpenVPN keepalive ping from client");
+            co_return;
+        case openvpn::DecryptedPayloadDisposition::Forward:
         {
-            Core::logger().warn("DecryptPacket returned empty (decryption failed)");
+            tun::IpPacket ip_packet;
+            ip_packet.data = std::move(plaintext);
+            co_await SendToTun(ip_packet);
+            co_return;
         }
-
-        co_return;
+        }
     }
 
     std::span<std::uint8_t> DecryptAndStripInPlace(Connection *session,
                                                    std::span<std::uint8_t> datagram)
     {
         auto plaintext = session->GetCryptoContext().DecryptPacketInPlace(datagram);
-
-        if (plaintext.empty())
-            return {};
-
-        if (openvpn::IsKeepalivePing(plaintext))
-        {
+        const auto disposition = openvpn::ClassifyDecryptedPayload(plaintext);
+        if (disposition == openvpn::DecryptedPayloadDisposition::Keepalive)
             Core::logger().debug("Received OpenVPN keepalive ping from peer");
+        if (disposition != openvpn::DecryptedPayloadDisposition::Forward)
             return {};
-        }
-
-        if (plaintext.size() < openvpn::IPV4_MIN_HEADER_SIZE)
-            return {};
-
         return plaintext;
     }
 
@@ -216,28 +209,6 @@ class UdpServerMixin : public UdpCore<Derived, MultiPeerPolicy>
 
     asio::awaitable<void> RunKeepaliveMonitor()
     {
-        using tp = std::chrono::steady_clock::time_point;
-        struct SessionView
-        {
-            Connection *conn;
-            bool HasValidKeys() const
-            {
-                return conn->GetCryptoContext().HasValidKeys();
-            }
-            tp GetLastActivity() const
-            {
-                return conn->GetLastActivity();
-            }
-            tp GetLastOutbound() const
-            {
-                return conn->GetLastOutbound();
-            }
-            void UpdateLastOutbound()
-            {
-                conn->UpdateLastOutbound();
-            }
-        };
-
         return KeepaliveLoop(
             "UDP",
             running_,
@@ -246,16 +217,10 @@ class UdpServerMixin : public UdpCore<Derived, MultiPeerPolicy>
             keepalive_timeout_,
             Core::logger(),
             [this]()
-        {
-            std::vector<SessionView> result;
-            for (auto id : session_manager_.GetAllSessionIds())
-                if (auto *s = session_manager_.FindSession(id))
-                    result.push_back(SessionView{s});
-            return result;
-        },
-            [this](SessionView &sv)
+        { return CollectKeepaliveSessions(session_manager_); },
+            [this](ConnectionKeepaliveView &sv)
         { return SendKeepAlivePing(sv.conn); },
-            [this](SessionView &sv)
+            [this](ConnectionKeepaliveView &sv)
         { this->derived().OnPeerDead(sv.conn->GetSessionId()); });
     }
 
@@ -348,6 +313,7 @@ class UdpServerMixin : public UdpCore<Derived, MultiPeerPolicy>
     }
 
     std::unique_ptr<tun::TunDevice> tun_device_;
+    TunnelZoneAttachmentGuard hub_attachment_;
     RoutingTableIpv4 &routing_table_;
     RoutingTableIpv6 &routing_table_v6_;
     SessionManager &session_manager_;

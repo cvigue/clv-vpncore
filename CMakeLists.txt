@@ -51,6 +51,10 @@ add_library(clv_vpncore STATIC
     src/transport/listener.cpp
     src/transport/connector.cpp
     src/transport/udp_batch.cpp
+    src/client_network_setup.cpp
+    src/channel_concept_checks.cpp
+    src/client_control_adapter.cpp
+    src/server_control_base.cpp
     src/cpu_affinity.cpp
     src/dco_core.cpp
     src/udp_worker_thread.cpp

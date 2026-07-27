@@ -29,15 +29,18 @@
 #include "openvpn/session_manager.h"
 #include "openvpn/vpn_config.h"
 #include "routing_table.h"
+#include "server_keepalive.h"
+#include "traffic_policy.h"
 #include "transport/listener.h"
 #include "transport/transport.h"
+#include "tunnel_zone.h"
+#include "tunnel_zone_attachment_guard.h"
 
 #include <not_null.h>
 #include <optional>
 #include <string>
 #include "platform/linux/tun/tun_device.h"
 #include "platform/linux/tun/tun_setup.h"
-#include <net/ipv4_utils.h>
 #include <net/ipv6_utils.h>
 #include <util/byte_packer.h>
 
@@ -64,7 +67,6 @@
 
 namespace clv::vpn {
 
-namespace ipv4 = clv::net::ipv4;
 namespace ipv6 = clv::net::ipv6;
 
 namespace openvpn {
@@ -91,7 +93,8 @@ class TcpDataChannel
                    DataPathStats::TxCounters &tx_counters,
                    int keepalive_interval,
                    int keepalive_timeout,
-                   const std::atomic<bool> &running_flag)
+                   const std::atomic<bool> &running_flag,
+                   Adapter &adapter)
         : internal_ctx_{},
           tcp_listener_(internal_ctx_, host, port),
           routing_table_(routing_table),
@@ -103,7 +106,8 @@ class TcpDataChannel
           keepalive_interval_(keepalive_interval > 0 ? keepalive_interval : 10),
           keepalive_timeout_(keepalive_timeout > 0 ? keepalive_timeout : 120),
           running_(running_flag),
-          keepalive_timer_(internal_ctx_)
+          keepalive_timer_(internal_ctx_),
+          adapter_(&adapter)
     {
     }
 
@@ -114,12 +118,6 @@ class TcpDataChannel
     TcpDataChannel(TcpDataChannel &&) = delete;
     TcpDataChannel &operator=(TcpDataChannel &&) = delete;
 
-    // -- Static adapter binding (called by DataTransport after construction) --
-
-    void SetAdapter(Adapter &adapter)
-    {
-        adapter_ = &adapter;
-    }
 
     asio::io_context &InternalContext()
     {
@@ -129,11 +127,15 @@ class TcpDataChannel
     // -- Data plane setup (called from ServerControlBase::ConfigureDataPlane) ---
 
     std::string ConfigureDataPlane(const VpnConfig::ServerConfig &srv,
-                                   asio::io_context & /*io_ctx*/)
+                                   asio::io_context & /*io_ctx*/,
+                                   TunnelZone *zone)
     {
         // TCP channel runs TUN I/O on its own internal io_context.
         tun_device_ = std::make_unique<tun::TunDevice>(internal_ctx_);
-        return tun::SetupServerTun(*tun_device_, srv, *logger_);
+        std::string dev = tun::SetupServerTun(*tun_device_, srv, *logger_);
+        if (zone && !dev.empty())
+            hub_attachment_.Reset(zone, BuildHubAttachmentSpec(srv, dev));
+        return dev;
     }
 
     // ---- Data-plane interface ----
@@ -145,47 +147,51 @@ class TcpDataChannel
 
         logger_->debug("DecryptPacket returned {} bytes", plaintext.size());
 
-        if (!plaintext.empty())
+        switch (openvpn::ClassifyDecryptedPayload(plaintext))
         {
-            rx_counters_.packetsDecrypted++;
-
-            if (openvpn::IsKeepalivePing(plaintext))
+        case openvpn::DecryptedPayloadDisposition::Drop:
+            if (plaintext.empty())
             {
-                logger_->debug("Received OpenVPN keepalive ping from client");
-                co_return;
-            }
-
-            if (plaintext.size() < openvpn::IPV4_MIN_HEADER_SIZE)
-            {
-                logger_->debug("Ignoring packet too small to be valid IP (size={})", plaintext.size());
+                rx_counters_.decryptFailures++;
+                logger_->warn("DecryptPacket returned empty (decryption failed)");
             }
             else
             {
-                logger_->debug("Forwarding {} decrypted bytes to TUN device", plaintext.size());
-                rx_counters_.tunWrites++;
+                logger_->debug("Ignoring packet too small to be valid IP (size={})", plaintext.size());
+            }
+            co_return;
+        case openvpn::DecryptedPayloadDisposition::Keepalive:
+            rx_counters_.packetsDecrypted++;
+            logger_->debug("Received OpenVPN keepalive ping from client");
+            co_return;
+        case openvpn::DecryptedPayloadDisposition::Forward:
+            rx_counters_.packetsDecrypted++;
+            logger_->debug("Forwarding {} decrypted bytes to TUN device", plaintext.size());
+            rx_counters_.tunWrites++;
+            {
                 tun::IpPacket ip_packet;
                 ip_packet.data = std::move(plaintext);
                 co_await SendToTun(ip_packet);
             }
-        }
-        else
-        {
-            rx_counters_.decryptFailures++;
-            logger_->warn("DecryptPacket returned empty (decryption failed)");
+            co_return;
         }
     }
 
-    std::span<std::uint8_t> DecryptAndStripInPlace(Connection * /*session*/,
-                                                   std::span<std::uint8_t> /*datagram*/)
+    std::span<std::uint8_t> DecryptAndStripInPlace(Connection *session,
+                                                   std::span<std::uint8_t> datagram)
     {
-        return {};
+        auto plaintext = session->GetCryptoContext().DecryptPacketInPlace(datagram);
+        if (openvpn::ClassifyDecryptedPayload(plaintext)
+            != openvpn::DecryptedPayloadDisposition::Forward)
+            return {};
+        return plaintext;
     }
 
     asio::awaitable<void> StartDataPath()
     {
         if (!adapter_)
         {
-            logger_->error("StartDataPath: SetAdapter not called");
+            logger_->error("StartDataPath: adapter not bound");
             co_return;
         }
 
@@ -204,6 +210,7 @@ class TcpDataChannel
 
     void StopDataPath()
     {
+        hub_attachment_.Release();
         tun_running_ = false;
         tcp_listener_.Close();
         if (tun_device_)
@@ -273,28 +280,6 @@ class TcpDataChannel
 
     asio::awaitable<void> RunKeepaliveMonitor()
     {
-        using tp = std::chrono::steady_clock::time_point;
-        struct SessionView
-        {
-            Connection *conn;
-            bool HasValidKeys() const
-            {
-                return conn->GetCryptoContext().HasValidKeys();
-            }
-            tp GetLastActivity() const
-            {
-                return conn->GetLastActivity();
-            }
-            tp GetLastOutbound() const
-            {
-                return conn->GetLastOutbound();
-            }
-            void UpdateLastOutbound()
-            {
-                conn->UpdateLastOutbound();
-            }
-        };
-
         return KeepaliveLoop(
             "TCP",
             running_,
@@ -303,16 +288,10 @@ class TcpDataChannel
             keepalive_timeout_,
             *logger_,
             [this]()
-        {
-            std::vector<SessionView> result;
-            for (auto id : session_manager_.GetAllSessionIds())
-                if (auto *s = session_manager_.FindSession(id))
-                    result.push_back(SessionView{s});
-            return result;
-        },
-            [this](SessionView &sv)
+        { return CollectKeepaliveSessions(session_manager_); },
+            [this](ConnectionKeepaliveView &sv)
         { return SendKeepAlivePing(sv.conn); },
-            [this](SessionView &sv)
+            [this](ConnectionKeepaliveView &sv)
         { adapter_->OnPeerDead(sv.conn->GetSessionId()); });
     }
 
@@ -461,17 +440,16 @@ class TcpDataChannel
         }
     }
 
-    // REVIEW: TCP is the remaining outlier vs UDP/DCO demux. UdpCore posts only
-    // control (data opcodes decrypt + write TUN on the RX thread); DCO leaves
-    // data in-kernel. Target: peek opcode here — data + installed session crypto
-    // → decrypt/TUN on internal_ctx_; control (or pre-key data) → OnControlPacket
-    // only. Then ProcessNetworkPacket can treat data as unexpected (DCO-style).
+    // Demux like UDP/DCO: data opcodes with installed session crypto decrypt +
+    // TUN on internal_ctx_; control (or pre-key data) → OnControlPacket only.
     asio::awaitable<void> ClientReceiveLoop(transport::TcpTransport tcpTransport)
     {
         auto peer = tcpTransport.GetPeer();
         logger_->debug("TCP client receive loop started for {}:{}",
                        peer.addr.to_string(),
                        peer.port);
+
+        const Connection::Endpoint endpoint{.addr = peer.addr, .port = peer.port};
 
         while (running_ && tun_running_)
         {
@@ -491,7 +469,41 @@ class TcpDataChannel
                                peer.addr.to_string(),
                                peer.port);
 
-                // Today every frame is marshaled to the control plane (see REVIEW above).
+                const auto opcode = openvpn::GetOpcode(data[0]);
+                if (openvpn::IsDataPacket(opcode))
+                {
+                    Connection *session = session_manager_.FindSessionByEndpoint(endpoint);
+                    if (session && session->GetCryptoContext().HasValidKeys())
+                    {
+                        session->UpdateLastActivity();
+                        auto plaintext =
+                            session->GetCryptoContext().DecryptPacketInPlace(data);
+                        if (plaintext.empty())
+                        {
+                            rx_counters_.decryptFailures++;
+                            continue;
+                        }
+
+                        rx_counters_.packetsDecrypted++;
+                        switch (openvpn::ClassifyDecryptedPayload(plaintext))
+                        {
+                        case openvpn::DecryptedPayloadDisposition::Keepalive:
+                            logger_->debug("Received OpenVPN keepalive ping from client");
+                            continue;
+                        case openvpn::DecryptedPayloadDisposition::Drop:
+                            continue;
+                        case openvpn::DecryptedPayloadDisposition::Forward:
+                        {
+                            tun::IpPacket ip_packet;
+                            ip_packet.data.assign(plaintext.begin(), plaintext.end());
+                            rx_counters_.tunWrites++;
+                            co_await SendToTun(ip_packet);
+                            continue;
+                        }
+                        }
+                    }
+                }
+
                 adapter_->OnControlPacket(std::move(data),
                                           peer,
                                           transport::TransportHandle(tcpTransport));
@@ -547,6 +559,7 @@ class TcpDataChannel
     std::jthread internal_thread_;
 
     std::unique_ptr<tun::TunDevice> tun_device_;
+    TunnelZoneAttachmentGuard hub_attachment_;
     RoutingTableIpv4 &routing_table_;
     RoutingTableIpv6 &routing_table_v6_;
     SessionManager &session_manager_;
@@ -559,7 +572,7 @@ class TcpDataChannel
     bool tun_running_ = true;
     asio::steady_timer keepalive_timer_;
 
-    Adapter *adapter_ = nullptr;
+    Adapter *adapter_;
 };
 
 } // namespace clv::vpn

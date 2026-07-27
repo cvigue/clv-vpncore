@@ -5,19 +5,14 @@
 
 /**
  * @file client_data_adapter.h
- * @brief CRTP data-side adapter for the VPN client.
- *
- * Called from the RX/TX hot-path threads when the data channel needs to
- * communicate with the control plane.  Stateless — zero sizeof (EBO).
- *
- * OnControlPacket marshals control packets to the control-plane io_context.
- * OnRxActivity records the last-receive timestamp for keepalive timeout.
- *
- * @tparam Derived  DataTransport<ClientUdpChannel, ClientDataAdapter, ClientControlAdapter>
+ * @brief Data→control marshal adapter for client channels (template DI).
  */
 
+#include "channel_concept.h"
 #include "openvpn/packet.h"
 #include "transport/transport.h"
+
+#include <not_null.h>
 
 #include <asio/io_context.hpp>
 #include <asio/post.hpp>
@@ -28,33 +23,37 @@
 
 namespace clv::vpn {
 
-template <typename Derived>
+template <typename Control>
 struct ClientDataAdapter
 {
-    /// Control packet received on RX thread — marshal to control io_context.
+    explicit ClientDataAdapter(Control &control)
+        : control_(&control)
+    {
+        static_assert(ClientControlForAdapter<Control>,
+                      "Control must satisfy ClientControlForAdapter");
+    }
+
     void OnControlPacket(std::vector<std::uint8_t> data,
                          transport::PeerEndpoint /*sender*/)
     {
-        auto &self = static_cast<Derived &>(*this);
-        asio::post(self.io_context(),
-                   [&self, d = std::move(data)]() mutable
+        asio::post(control_->io_context(),
+                   [c = control_, d = std::move(data)]() mutable
         {
-            self.OnControlPacketFromDataPath(std::move(d));
+            c->OnControlPacketFromDataPath(std::move(d));
         });
     }
 
-    /// RX activity — update last-receive timestamp for keepalive timeout.
-    /// Called from the RX thread; TouchLastRx() uses atomics (thread-safe).
     void OnRxActivity()
     {
-        auto &self = static_cast<Derived &>(*this);
-        self.TouchLastRx();
+        control_->TouchLastRx();
     }
 
-    /// Dead peer notification — unused for P2P client.
     void OnPeerDead(openvpn::SessionId /*sid*/)
     {
     }
+
+  private:
+    not_null<Control *> control_;
 };
 
 } // namespace clv::vpn

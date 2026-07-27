@@ -136,8 +136,7 @@ struct ClientConnector : std::variant<UdpConnector, TcpConnector>
                 return TransportHandle(connector.Connect(host, port, dco_mode, ipv6_only));
             else
                 return TransportHandle(connector.Connect(host, port));
-        },
-                          static_cast<std::variant<UdpConnector, TcpConnector> &>(*this));
+        }, static_cast<std::variant<UdpConnector, TcpConnector> &>(*this));
     }
 };
 

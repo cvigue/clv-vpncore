@@ -11,7 +11,7 @@
  * No batching, no raw FD, no extra threads — just TCP recv → decrypt →
  * TUN write and TUN read → encrypt → TCP send.
  *
- * Lifecycle: construct → SetAdapter → SetTransport (provides TcpTransport*)
+ * Lifecycle: construct → SetTransport (provides TcpTransport*)
  * → EngineInstallKeys → StartTunReceiver (launches coroutine loops)
  * → StopTunReceiver.
  *
@@ -21,8 +21,8 @@
  * @see ClientDcoChannel for the kernel-offload equivalent.
  */
 
+#include "client_network_setup.h"
 #include "data_path_stats.h"
-#include "iface_utils.h"
 #include "openvpn/config_exchange.h"
 #include "openvpn/crypto_algorithms.h"
 #include "openvpn/crypto_context.h"
@@ -30,15 +30,13 @@
 #include "openvpn/packet.h"
 #include "openvpn/protocol_constants.h"
 #include "openvpn/vpn_config.h"
-#include "route_utils.h"
+#include "platform/linux/tun/tun_device.h"
 #include "transport/transport.h"
 
 #include <chrono>
 #include <not_null.h>
 #include <stdexcept>
 #include <string>
-#include "platform/linux/tun/tun_device.h"
-#include <net/ipv4_utils.h>
 
 #include <asio/awaitable.hpp>
 #include <asio/co_spawn.hpp>
@@ -49,10 +47,10 @@
 #include <spdlog/logger.h>
 
 #include <atomic>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
-#include <functional>
 #include <memory>
 #include <span>
 #include <utility>
@@ -60,8 +58,6 @@
 #include <vector>
 
 namespace clv::vpn {
-
-namespace ipv4 = clv::net::ipv4;
 
 /**
  * @brief Client P2P TCP data channel — coroutine single-packet path.
@@ -79,11 +75,13 @@ class ClientTcpChannel
     ClientTcpChannel(asio::io_context &io_context,
                      spdlog::logger &logger,
                      const VpnConfig & /*config*/,
-                     const std::atomic<bool> &running)
+                     const std::atomic<bool> &running,
+                     Adapter &adapter)
         : io_context_(io_context),
           logger_(&logger),
           running_(running),
-          crypto_context_(logger)
+          crypto_context_(logger),
+          adapter_(&adapter)
     {
         logger_->info("Client TCP channel initialized");
     }
@@ -98,12 +96,6 @@ class ClientTcpChannel
     ClientTcpChannel(ClientTcpChannel &&) = delete;
     ClientTcpChannel &operator=(ClientTcpChannel &&) = delete;
 
-    // -- Static adapter binding (called by DataTransport after construction) --
-
-    void SetAdapter(Adapter &adapter)
-    {
-        adapter_ = &adapter;
-    }
 
     asio::awaitable<void> SendKeepalivePing()
     {
@@ -218,112 +210,14 @@ class ClientTcpChannel
                                    asio::io_context &io_ctx)
     {
         tun_device_ = std::make_unique<tun::TunDevice>(io_ctx);
-        auto *tun = tun_device_.get();
-        std::string name = tun->Create(config.client->dev_name);
-        logger_->info("Created TUN: {}", name);
-
-        const auto &assigned_ip = negotiated.ifconfig.first;
-        const auto &assigned_netmask = negotiated.ifconfig.second;
-
-        if (negotiated.topology == "subnet" && !assigned_netmask.empty())
-        {
-            auto prefix = ipv4::MaskToPrefix(asio::ip::make_address_v4(assigned_netmask).to_uint());
-            tun->SetAddress(assigned_ip, prefix);
-        }
-        else
-        {
-            std::string remote_ip = assigned_netmask.empty() ? "255.255.255.255" : assigned_netmask;
-            iface::SetPointToPoint(tun->GetName().c_str(), assigned_ip, remote_ip);
-        }
-
-        constexpr std::uint16_t kDefaultTunMtu = 1400;
-        tun->SetMtu(kDefaultTunMtu);
-        tun->BringUp();
-
-        if (!negotiated.ifconfig_ipv6.first.empty())
-        {
-            auto prefix6 = static_cast<std::uint8_t>(negotiated.ifconfig_ipv6.second);
-            tun->AddIpv6Address(negotiated.ifconfig_ipv6.first, prefix6);
-        }
+        ConfigureClientTun(*tun_device_, negotiated, config.client->dev_name, *logger_);
     }
 
     void InstallNegotiatedRoutes(const openvpn::NegotiatedConfig &negotiated)
     {
-        auto *tun = tun_device_.get();
-        if (!tun)
+        if (!tun_device_)
             return;
-
-        std::string dev = tun->GetName();
-        if (dev.empty())
-            return;
-
-        std::string connected_cidr;
-        if (!negotiated.ifconfig.first.empty() && !negotiated.ifconfig.second.empty())
-        {
-            try
-            {
-                auto host = asio::ip::make_address_v4(negotiated.ifconfig.first).to_uint();
-                auto prefix = ipv4::MaskToPrefix(asio::ip::make_address_v4(negotiated.ifconfig.second).to_uint());
-                auto net = host & ipv4::CreateMask(prefix);
-                connected_cidr = ipv4::Ipv4ToString(net) + "/" + std::to_string(prefix);
-            }
-            catch (...)
-            {
-            }
-        }
-
-        for (const auto &[network, gw, metric] : negotiated.routes)
-        {
-            std::string cidr;
-            if (network.find('/') != std::string::npos)
-                cidr = network;
-            else if (!gw.empty())
-            {
-                try
-                {
-                    auto prefix = ipv4::MaskToPrefix(asio::ip::make_address_v4(gw).to_uint());
-                    cidr = network + "/" + std::to_string(prefix);
-                }
-                catch (...)
-                {
-                    cidr = network + "/32";
-                }
-            }
-            else
-                cidr = network + "/32";
-
-            if (!connected_cidr.empty() && cidr == connected_cidr)
-            {
-                logger_->debug("Route: {} skipped (connected subnet, kernel-managed)", cidr);
-                continue;
-            }
-
-            std::string via;
-            if (!negotiated.route_gateway.empty())
-                via = negotiated.route_gateway;
-            logger_->info("Route: {} dev {}{}", cidr, dev, via.empty() ? "" : " via " + via);
-            try
-            {
-                route::ReplaceRoute4(dev, cidr, via);
-            }
-            catch (const std::exception &e)
-            {
-                logger_->error("Route failed: {}", e.what());
-            }
-        }
-
-        for (const auto &[network, gw, metric] : negotiated.routes_ipv6)
-        {
-            logger_->info("IPv6 route: {} dev {}", network, dev);
-            try
-            {
-                route::ReplaceRoute6(dev, network);
-            }
-            catch (const std::exception &e)
-            {
-                logger_->error("IPv6 route failed: {}", e.what());
-            }
-        }
+        InstallClientNegotiatedRoutes(*tun_device_, negotiated, *logger_);
     }
 
     void OnTeardown()
@@ -332,12 +226,11 @@ class ClientTcpChannel
             tun_device_->Close();
     }
 
-    void LaunchKeepalive(asio::io_context &io_ctx,
-                         std::function<asio::awaitable<void>()> fn,
-                         int interval)
+    template <std::invocable Fn>
+    void LaunchKeepalive(asio::io_context &io_ctx, Fn &&fn, int interval)
     {
         if (interval > 0)
-            asio::co_spawn(io_ctx, fn(), asio::detached);
+            asio::co_spawn(io_ctx, std::forward<Fn>(fn)(), asio::detached);
     }
 
     // -- Stats ---------------------------------------------------------------
@@ -491,7 +384,7 @@ class ClientTcpChannel
     clv::not_null<spdlog::logger *> logger_;
     const std::atomic<bool> &running_;
 
-    Adapter *adapter_ = nullptr;
+    Adapter *adapter_;
 
     transport::TcpTransport *tcp_ = nullptr;
     openvpn::CryptoContext crypto_context_;

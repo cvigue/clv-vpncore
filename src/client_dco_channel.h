@@ -11,7 +11,7 @@
  * lifecycle, recv loop with CRTP callbacks).  The kernel handles all data-plane
  * encrypt/decrypt; userspace only processes the control channel.
  *
- * Lifecycle: construct → SetAdapter → BindSocket → SetPeer →
+ * Lifecycle: construct → BindSocket → SetPeer →
  * EngineInstallKeys → StartTunReceiver → StopTunReceiver.
  *
  * CRTP dispatch: the mixin's recv loop calls OnControlPacket / OnRxActivity
@@ -23,6 +23,7 @@
 
 #include "dco_client_data_mixin.h"
 
+#include "client_network_setup.h"
 #include "dco_core.h"
 #include "openvpn/config_exchange.h"
 #include "openvpn/crypto_algorithms.h"
@@ -39,8 +40,8 @@
 #include <spdlog/logger.h>
 
 #include <atomic>
+#include <concepts>
 #include <cstdint>
-#include <functional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -66,12 +67,14 @@ class ClientDcoChannel : public DcoClientDataMixin<ClientDcoChannel<Adapter>>
     ClientDcoChannel(asio::io_context &io_context,
                      spdlog::logger &logger,
                      const VpnConfig &config,
-                     const std::atomic<bool> &running)
+                     const std::atomic<bool> &running,
+                     Adapter &adapter)
         : DataMixinBase(io_context,
                         logger,
                         static_cast<std::uint32_t>(config.client->keepalive_interval),
                         static_cast<std::uint32_t>(config.client->keepalive_timeout),
-                        running)
+                        running),
+          adapter_(&adapter)
     {
     }
 
@@ -98,12 +101,6 @@ class ClientDcoChannel : public DcoClientDataMixin<ClientDcoChannel<Adapter>>
     using DataMixinBase::StartDataPath;
     using DataMixinBase::StopDataPath;
 
-    // -- Static adapter binding (called by DataTransport after construction) --
-
-    void SetAdapter(Adapter &adapter)
-    {
-        adapter_ = &adapter;
-    }
 
     std::chrono::steady_clock::time_point LastTxTime() const noexcept
     {
@@ -178,23 +175,8 @@ class ClientDcoChannel : public DcoClientDataMixin<ClientDcoChannel<Adapter>>
     {
         for (const auto &[network, gw, metric] : negotiated.routes)
         {
-            std::string cidr;
-            if (network.find('/') != std::string::npos)
-                cidr = network;
-            else if (!gw.empty())
-            {
-                try
-                {
-                    auto prefix = ipv4::MaskToPrefix(asio::ip::make_address_v4(gw).to_uint());
-                    cidr = network + "/" + std::to_string(prefix);
-                }
-                catch (...)
-                {
-                    cidr = network + "/32";
-                }
-            }
-            else
-                cidr = network + "/32";
+            (void)metric;
+            const std::string cidr = NormalizeNegotiatedRoute4(network, gw);
 
             this->logger_->info("Route: {} dev {}", cidr, DataMixinBase::GetIfName());
             try
@@ -209,6 +191,8 @@ class ClientDcoChannel : public DcoClientDataMixin<ClientDcoChannel<Adapter>>
 
         for (const auto &[network, gw, metric] : negotiated.routes_ipv6)
         {
+            (void)gw;
+            (void)metric;
             this->logger_->info("IPv6 route: {} dev {}", network, DataMixinBase::GetIfName());
             try
             {
@@ -225,9 +209,9 @@ class ClientDcoChannel : public DcoClientDataMixin<ClientDcoChannel<Adapter>>
     {
     }
 
-    void LaunchKeepalive(asio::io_context & /*io_ctx*/,
-                         std::function<asio::awaitable<void>()> /*fn*/,
-                         int /*interval*/)
+    // For DCO this is a NoOp, as the kernel handles keepalives autonomously.
+    template <std::invocable Fn>
+    void LaunchKeepalive(asio::io_context & /*io_ctx*/, Fn && /*fn*/, int /*interval*/)
     {
     }
 
@@ -257,7 +241,7 @@ class ClientDcoChannel : public DcoClientDataMixin<ClientDcoChannel<Adapter>>
         adapter_->OnRxActivity();
     }
 
-    Adapter *adapter_ = nullptr;
+    Adapter *adapter_;
     openvpn::CryptoContext *limits_crypto_ = nullptr;
 
     // -- Pending key state (held until AttachTransport establishes peer) -----

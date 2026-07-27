@@ -4,17 +4,13 @@
 #define CLV_VPN_VPN_SERVER_H
 
 #include "cpu_affinity.h"
+#include "data_plane.h"
 #include "log_subsystems.h"
-#include "openvpn/dco_data_channel.h"
-#include "openvpn/tcp_data_channel.h"
-#include "openvpn/udp_data_channel.h"
 #include "openvpn/vpn_config.h"
-#include "server_tcp_control_adapter.h"
-#include "tunnel_zone.h"
-#include "server_udp_control_adapter.h"
 #include "server_dco_control_adapter.h"
-#include "server_data_adapter.h"
-#include "data_transport.h"
+#include "server_tcp_control_adapter.h"
+#include "server_udp_control_adapter.h"
+#include "tunnel_zone.h"
 
 #include <asio/io_context.hpp>
 
@@ -22,19 +18,16 @@
 
 #include <atomic>
 #include <memory>
-#include <optional>
-#include <type_traits>
-#include <variant>
 
 namespace clv::vpn {
 
 /**
- * @brief Thin factory shell around a fully composed DataTransport.
+ * @brief Thin factory shell around a server transport leaf.
  *
  * Owns configuration, loggers, the running flag, and a reference to the process
  * TunnelZone (kernel policy is installed on hub attachment registration).
- * All control-plane intelligence lives in DataTransport ControlAdapterT template
- * argument.
+ * Protocol + channel live in ServerUdp/Dco/TcpTransport. Active engine is held
+ * in @ref data_plane_.
  */
 class VpnServer
 {
@@ -60,39 +53,7 @@ class VpnServer
     }
 
   private:
-    using ServerUdpTransport = DataTransport<UdpDataChannel,
-                                             ServerDataAdapter,
-                                             ServerUdpControlAdapter>;
-    using ServerDcoTransport = DataTransport<DcoDataChannel,
-                                             ServerDataAdapter,
-                                             ServerDcoControlAdapter>;
-    using ServerTcpTransport = DataTransport<TcpDataChannel,
-                                             ServerDataAdapter,
-                                             ServerTcpControlAdapter>;
-    using DataTransportVariant = std::variant<std::monostate, ServerUdpTransport, ServerDcoTransport, ServerTcpTransport>;
-
-    template <typename Self, typename F>
-    static void VisitDataTransport(Self &self, F &&f)
-    {
-        std::visit([&](auto &dp)
-        {
-            if constexpr (!std::is_same_v<std::decay_t<decltype(dp)>, std::monostate>)
-                f(dp);
-        },
-                   self.data_transport_);
-    }
-
-    template <typename F>
-    void WithDataTransport(F &&f)
-    {
-        VisitDataTransport(*this, std::forward<F>(f));
-    }
-
-    template <typename F>
-    void WithDataTransport(F &&f) const
-    {
-        VisitDataTransport(*this, std::forward<F>(f));
-    }
+    using ServerDataPlane = DataPlane<ServerUdpTransport, ServerDcoTransport, ServerTcpTransport>;
 
     asio::io_context &io_context_;
     VpnConfig config_;
@@ -100,7 +61,7 @@ class VpnServer
     std::shared_ptr<spdlog::logger> logger_;
     std::atomic<bool> running_ = false;
 
-    DataTransportVariant data_transport_;
+    ServerDataPlane data_plane_;
 };
 
 } // namespace clv::vpn

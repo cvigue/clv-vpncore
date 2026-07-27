@@ -399,7 +399,8 @@ class UdpCore
                             if (!plaintext.empty())
                             {
                                 rx_counters_.packetsDecrypted++;
-                                if (!openvpn::IsKeepalivePing(plaintext) && plaintext.size() >= openvpn::IPV4_MIN_HEADER_SIZE)
+                                if (openvpn::ClassifyDecryptedPayload(plaintext)
+                                    == openvpn::DecryptedPayloadDisposition::Forward)
                                 {
                                     d.action = RxDesc::Action::WriteTun;
                                     d.data_ptr = plaintext.data();

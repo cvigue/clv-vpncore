@@ -21,15 +21,21 @@
 #include "transport/transport.h"
 
 #include <asio/awaitable.hpp>
+#include <asio/io_context.hpp>
+#include <asio/steady_timer.hpp>
+#include <asio/use_awaitable.hpp>
 
 #include <spdlog/spdlog.h>
 
+#include <chrono>
+#include <concepts>
 #include <cstdint>
-#include <functional>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
+#include <utility>
 #include <vector>
 
 namespace clv::vpn {
@@ -193,36 +199,22 @@ std::optional<openvpn::OpenVpnPacket> UnwrapAndParse(
     openvpn::TlsCryptReplayState &replay);
 
 /**
- * @brief Callbacks for role-specific operations during session control-packet dispatch.
+ * @brief Type contract for role-specific hooks in DispatchSessionControlPacket.
  *
- * The orchestrator (VpnClient or VpnServer) provides these when calling
- * DispatchSessionControlPacket.  Each handles a protocol-asymmetric aspect
- * of the OpenVPN control channel:
+ * Closed set: server and client each pass a local action object (same pattern
+ * as ServerPushActions / ClientPushActions). No std::function.
  *
- * - **on_soft_reset** — key renegotiation (server provides; client may leave null).
- * - **on_plaintext** — TLS produced plaintext (key-method 2, PUSH_REQUEST/REPLY).
- * - **on_handshake_complete** — TLS handshake done, no plaintext yet (client sends
- *   key-method 2; server ensures IP allocated).
+ * - **OnSoftReset** — P_CONTROL_SOFT_RESET_V1 (key renegotiation).
+ * - **OnPlaintext** — TLS produced plaintext (key-method 2, PUSH_REQUEST/REPLY).
+ * - **OnHandshakeComplete** — KeyMaterialReady with no plaintext yet.
  */
-struct SessionControlCallbacks
-{
-    /**
-     * Handle P_CONTROL_SOFT_RESET_V1.
-     * Server provides this for key renegotiation.  Client may set to nullptr.
-     */
-    std::function<asio::awaitable<void>(const openvpn::OpenVpnPacket &)> on_soft_reset;
-
-    /**
-     * TLS engine produced plaintext after handshake completion.
-     * Receives the decrypted application data (key-method 2, PUSH_REQUEST, PUSH_REPLY, etc.).
-     */
-    std::function<asio::awaitable<void>(std::vector<std::uint8_t>)> on_plaintext;
-
-    /**
-     * TLS handshake reached KeyMaterialReady but no plaintext is available yet.
-     * Client: send key-method 2.  Server: ensure IP allocated.  May be nullptr.
-     */
-    std::function<asio::awaitable<void>()> on_handshake_complete;
+template <typename A>
+concept SessionControlActions = requires(A &a,
+                                         const openvpn::OpenVpnPacket &pkt,
+                                         std::vector<std::uint8_t> plain) {
+    { a.OnSoftReset(pkt) } -> std::same_as<asio::awaitable<void>>;
+    { a.OnPlaintext(std::move(plain)) } -> std::same_as<asio::awaitable<void>>;
+    { a.OnHandshakeComplete() } -> std::same_as<asio::awaitable<void>>;
 };
 
 /**
@@ -231,34 +223,73 @@ struct SessionControlCallbacks
  * Handles the common sequence used by both VpnClient and VpnServer *after*
  * hard-reset handling:
  *
- *   1. Classify opcode → delegate to shared helper or role callback
+ *   1. Classify opcode → delegate to shared helper or role action
  *      - P_CONTROL_V1       → ProcessTlsDataAndRespond
  *      - P_ACK_V1           → HandleAckAndDrain
- *      - P_CONTROL_SOFT_RESET_V1 → callbacks.on_soft_reset
+ *      - P_CONTROL_SOFT_RESET_V1 → actions.OnSoftReset
  *   2. FlushControlQueue (retransmissions + queued fragments)
  *   3. Post-TLS check: if KeyMaterialReady
- *      - has plaintext → callbacks.on_plaintext
- *      - no plaintext  → callbacks.on_handshake_complete
+ *      - has plaintext → actions.OnPlaintext
+ *      - no plaintext  → actions.OnHandshakeComplete
  *
  * Hard-reset opcodes (P_CONTROL_HARD_RESET_*) must be handled by the caller
  * before calling this function — they involve session creation/lookup that
  * is orchestrator-specific.
  *
- * @param control_channel  Per-connection control channel.
- * @param tls_crypt        TLS-Crypt instance for wrapping outbound packets.
- * @param role             Caller's peer role (Server or Client).
- * @param transport        Transport handle for sending packets.
- * @param packet           Incoming control packet (NOT a hard reset).
- * @param logger           Logger for diagnostics.
- * @param callbacks        Role-specific hooks for soft reset, plaintext, etc.
+ * @param actions  Role-specific hooks; must satisfy SessionControlActions.
  */
+template <SessionControlActions Actions>
 asio::awaitable<void> DispatchSessionControlPacket(openvpn::ControlChannel &control_channel,
                                                    std::optional<openvpn::TlsCrypt> &tls_crypt,
                                                    openvpn::PeerRole role,
                                                    transport::TransportHandle &transport,
                                                    const openvpn::OpenVpnPacket &packet,
                                                    spdlog::logger &logger,
-                                                   const SessionControlCallbacks &callbacks);
+                                                   Actions &actions)
+{
+    switch (packet.opcode_)
+    {
+    case openvpn::Opcode::P_CONTROL_V1:
+        co_await ProcessTlsDataAndRespond(control_channel,
+                                          tls_crypt,
+                                          role,
+                                          transport,
+                                          packet,
+                                          logger);
+        break;
+
+    case openvpn::Opcode::P_ACK_V1:
+        co_await HandleAckAndDrain(control_channel, tls_crypt, role, transport, packet, logger);
+        break;
+
+    case openvpn::Opcode::P_CONTROL_SOFT_RESET_V1:
+        // Soft-reset may carry piggybacked ACKs (same as CONTROL).
+        if (!packet.packet_id_array_.empty())
+            control_channel.ApplyAckIds(packet.packet_id_array_);
+        co_await actions.OnSoftReset(packet);
+        break;
+
+    default:
+        logger.warn("DispatchSessionControlPacket: unhandled opcode {}",
+                    static_cast<int>(packet.opcode_));
+        break;
+    }
+
+    co_await FlushControlQueue(control_channel, tls_crypt, role, transport, logger);
+
+    if (control_channel.GetState() == openvpn::ControlChannel::State::KeyMaterialReady)
+    {
+        if (control_channel.HasPlaintext())
+        {
+            auto plaintext = control_channel.ReadPlaintext();
+            co_await actions.OnPlaintext(std::move(plaintext));
+        }
+        else
+        {
+            co_await actions.OnHandshakeComplete();
+        }
+    }
+}
 
 inline constexpr int kDefaultTunMtu = 1500;
 
@@ -320,6 +351,58 @@ inline std::string BuildKeyMethod2Options(openvpn::PeerRole role,
     opts += ",key-method 2,tls-";
     opts += tls_role;
     return opts;
+}
+
+/**
+ * Outcome of @ref PollUntilRekey (DRY F3). Callers keep trigger / re-arm policy.
+ */
+enum class RekeyPollResult : std::uint8_t
+{
+    Expired,        ///< Deadline reached without a limit-driven request
+    RekeyRequested, ///< @c TakeRekeyRequest (or equivalent) returned true
+    Cancelled,      ///< Shutdown, session gone, generation mismatch, or timer abort
+};
+
+/**
+ * Poll until @p deadline (≤1 s steps), a rekey request, or cancellation.
+ *
+ * @param still_active         Returns false to cancel (running/session/generation).
+ * @param take_rekey_request   Returns true when a limit-driven rekey should fire now.
+ */
+template <typename StillActive, typename TakeRekeyRequest>
+asio::awaitable<RekeyPollResult> PollUntilRekey(
+    asio::io_context &io_context,
+    std::chrono::steady_clock::time_point deadline,
+    StillActive still_active,
+    TakeRekeyRequest take_rekey_request)
+{
+    asio::steady_timer timer(io_context);
+    try
+    {
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            if (!still_active())
+                co_return RekeyPollResult::Cancelled;
+            if (take_rekey_request())
+                co_return RekeyPollResult::RekeyRequested;
+
+            auto remaining = deadline - std::chrono::steady_clock::now();
+            if (remaining <= std::chrono::seconds(0))
+                break;
+
+            constexpr auto one_second = std::chrono::seconds(1);
+            timer.expires_after(remaining < one_second ? remaining : one_second);
+            co_await timer.async_wait(asio::use_awaitable);
+
+            if (!still_active())
+                co_return RekeyPollResult::Cancelled;
+        }
+    }
+    catch (const asio::system_error &)
+    {
+        co_return RekeyPollResult::Cancelled;
+    }
+    co_return RekeyPollResult::Expired;
 }
 
 } // namespace clv::vpn

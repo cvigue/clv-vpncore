@@ -119,6 +119,29 @@ inline bool IsKeepalivePing(std::span<const std::uint8_t> buf) noexcept
 /** @brief Minimum IPv4 header length in bytes */
 constexpr std::size_t IPV4_MIN_HEADER_SIZE = 20;
 
+/**
+ * Post-decrypt disposition for data-plane plaintext (DRY F4).
+ * Shared by UDP slow/in-place paths and TCP demuxed RX.
+ */
+enum class DecryptedPayloadDisposition : std::uint8_t
+{
+    Drop,      ///< Empty, too small for IP, or otherwise not forwardable
+    Keepalive, ///< OpenVPN keepalive ping magic
+    Forward,   ///< Plausible IP payload for TUN
+};
+
+[[nodiscard]] inline DecryptedPayloadDisposition
+ClassifyDecryptedPayload(std::span<const std::uint8_t> plaintext) noexcept
+{
+    if (plaintext.empty())
+        return DecryptedPayloadDisposition::Drop;
+    if (IsKeepalivePing(plaintext))
+        return DecryptedPayloadDisposition::Keepalive;
+    if (plaintext.size() < IPV4_MIN_HEADER_SIZE)
+        return DecryptedPayloadDisposition::Drop;
+    return DecryptedPayloadDisposition::Forward;
+}
+
 /** @brief IPv4 version nibble value */
 constexpr std::uint8_t IP_VERSION_4 = 4;
 

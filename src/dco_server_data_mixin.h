@@ -31,7 +31,10 @@
 #include "openvpn/protocol_constants.h"
 #include "openvpn/session_manager.h"
 #include "openvpn/vpn_config.h"
+#include "traffic_policy.h"
 #include "transport/transport.h"
+#include "tunnel_zone.h"
+#include "tunnel_zone_attachment_guard.h"
 #include "util/nla_helpers.h"
 
 #include <cerrno>
@@ -140,12 +143,15 @@ class DcoServerDataMixin : public DcoCore<Derived>
     // -- Data plane setup (called from ServerControlBase::ConfigureDataPlane) ---
 
     // DCO device is fully configured during construction (InitializeDco).
-    // Returns the netdev name for logging.
-    std::string ConfigureDataPlane(
-        [[maybe_unused]] const VpnConfig::ServerConfig &srv,
-        [[maybe_unused]] asio::io_context &io_ctx)
+    // Returns the netdev name for logging; attaches hub to zone when present.
+    std::string ConfigureDataPlane(const VpnConfig::ServerConfig &srv,
+                                   [[maybe_unused]] asio::io_context &io_ctx,
+                                   TunnelZone *zone)
     {
-        return std::string{this->dco_ifname_};
+        std::string dev{this->dco_ifname_};
+        if (zone && !dev.empty())
+            hub_attachment_.Reset(zone, BuildHubAttachmentSpec(srv, dev));
+        return dev;
     }
 
     // -- Data-path no-ops (kernel handles everything) -----------------------
@@ -299,7 +305,10 @@ class DcoServerDataMixin : public DcoCore<Derived>
     }
 
     void StopDataPath()
-    { /* no-op — socket is shared, not owned */
+    {
+        // Socket is shared / not owned; still release hub attachment here so
+        // unregister runs before control-plane session teardown completes.
+        hub_attachment_.Release();
     }
 
     // -- Keepalive monitor (CRTP — no std::function) ------------------------
@@ -617,6 +626,7 @@ class DcoServerDataMixin : public DcoCore<Derived>
     // Server-specific state
     asio::ip::udp::socket &socket_;
     NetworkConfig network_config_;
+    TunnelZoneAttachmentGuard hub_attachment_;
     std::unordered_set<uint32_t> created_peers_;
     std::unordered_map<uint32_t, uint8_t> peer_primary_key_;
     std::unordered_map<uint32_t, openvpn::SessionId> peer_to_session_;

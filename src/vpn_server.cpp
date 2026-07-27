@@ -120,13 +120,13 @@ VpnServer::VpnServer(asio::io_context &io_context, const VpnConfig &config, Tunn
     switch (mode)
     {
     case TransportMode::Tcp:
-        data_transport_.emplace<ServerTcpTransport>(std::move(ctrl_cfg));
+        data_plane_.Emplace<ServerTcpTransport>(std::move(ctrl_cfg));
         break;
     case TransportMode::Dco:
-        data_transport_.emplace<ServerDcoTransport>(std::move(ctrl_cfg));
+        data_plane_.Emplace<ServerDcoTransport>(std::move(ctrl_cfg));
         break;
     case TransportMode::Udp:
-        data_transport_.emplace<ServerUdpTransport>(std::move(ctrl_cfg));
+        data_plane_.Emplace<ServerUdpTransport>(std::move(ctrl_cfg));
         break;
     }
 }
@@ -156,7 +156,7 @@ void VpnServer::Start()
 
     running_ = true;
 
-    WithDataTransport([](auto &dp)
+    data_plane_.Visit([](auto &dp)
     { dp.Start(); });
 
     logger_->info("VPN server started successfully");
@@ -171,7 +171,7 @@ void VpnServer::Stop()
     logger_->info("Stopping VPN server...");
     running_ = false;
 
-    WithDataTransport([](auto &dp)
+    data_plane_.Visit([](auto &dp)
     { dp.Stop(); });
 
     logger_->info("VPN server stopped");

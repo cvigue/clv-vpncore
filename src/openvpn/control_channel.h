@@ -20,7 +20,6 @@
 #include <span>
 #include <string>
 #include <unordered_map>
-#include <utility>
 #include <vector>
 
 namespace spdlog {
@@ -560,6 +559,26 @@ class ControlChannel
 
     /** Structured logger (never null) */
     clv::not_null<spdlog::logger *> logger_;
+
+    /**
+     * Soft-reset / rekey shared transition (F11).
+     * Advances key_id with OpenVPN wrap (1-7, skip 0).
+     */
+    void AdvanceRekeyKeyId();
+
+    /**
+     * Reset outbound reliability for a new soft-reset handshake.
+     * Clears unacked + pending_fragments_ (cve-audit F2). When
+     * reset_inbound_to_max is true (local RequestSoftReset), also sets
+     * last_received_packet_id_ to UINT32_MAX so packet_id 0 is accepted.
+     */
+    void ResetReliabilityForRekey(bool reset_inbound_to_max);
+
+    /**
+     * Emplace a fresh TlsContext for renegotiation, clear plaintext, enter
+     * TlsHandshake. On failure sets Error and rethrows.
+     */
+    void EmplaceTlsForRekey(PeerRole role, const TlsCertConfig &cert_config);
 
     /** Helper: Send a hard reset packet */
     std::vector<std::uint8_t> SendHardReset(std::uint8_t key_id, bool is_client);

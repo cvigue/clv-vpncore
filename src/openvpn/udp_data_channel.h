@@ -63,7 +63,8 @@ class UdpDataChannel
                    const VpnConfig::PerformanceConfig &perf_config,
                    int keepalive_interval,
                    int keepalive_timeout,
-                   const std::atomic<bool> &running_flag)
+                   const std::atomic<bool> &running_flag,
+                   Adapter &adapter)
         : UdpServerMixinBase(io_context,
                              routing_table,
                              routing_table_v6,
@@ -72,7 +73,8 @@ class UdpDataChannel
                              perf_config,
                              keepalive_interval,
                              keepalive_timeout,
-                             running_flag)
+                             running_flag),
+          adapter_(&adapter)
     {
     }
 
@@ -116,12 +118,6 @@ class UdpDataChannel
     using UdpServerMixinBase::StopDataPath;
     using UdpServerMixinBase::StopKeepaliveMonitor;
 
-    // -- Static adapter binding (called by DataTransport after construction) --
-
-    void SetAdapter(Adapter &adapter)
-    {
-        adapter_ = &adapter;
-    }
 
   private:
     // -- CRTP targets (called by UdpCore RxLoop / mixin keepalive) ----------
@@ -149,7 +145,7 @@ class UdpDataChannel
         co_await adapter_->SendEncryptedToSession(session, plaintext);
     }
 
-    Adapter *adapter_ = nullptr;
+    Adapter *adapter_;
 };
 
 } // namespace clv::vpn

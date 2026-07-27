@@ -177,16 +177,16 @@ adapter with `SetAdapter(...)`.
 
 - `VpnClient` owns config, logger, running state, and one selected client transport.
 - `VpnServer` owns config, loggers, running state, masquerade guards, and one selected server transport.
-- `DataTransport` owns the concrete channel object.
+- Each transport leaf owns its channel and data adapter; `DataPlane` selects the leaf via `variant`/`Visit`.
 - The channel owns transport-specific resources. That includes the userspace TUN device for UDP/TCP paths; DCO paths configure kernel-owned interfaces instead.
 
 ### Control Plane
 
-- Client control logic lives in `ClientControlAdapter`.
-- Shared server control logic lives in `ServerControlBase`, with transport-specific wrappers for UDP, DCO, and TCP.
+- Client control logic lives in `ClientControlPlane`.
+- Shared server control logic lives in `ServerControlBase<Leaf>`, with transport-specific leaves for UDP, DCO, and TCP.
 - The control plane stays single-threaded on its `asio::io_context`; data-path callbacks are marshalled back to it via `asio::post` or atomics.
 
-On the client side, the control adapter owns the connection state machine,
+On the client side, the control plane owns the connection state machine,
 control/data channel protocol state, TLS handshake, config exchange, keepalive,
 and reconnect/rekey loops. On the server side, the control layer owns session
 management, routing tables, IP allocation, TLS/TLS-crypt handling, and peer

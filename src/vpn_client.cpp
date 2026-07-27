@@ -188,21 +188,21 @@ VpnClient::VpnClient(asio::io_context &io_context, const VpnConfig &config)
     switch (mode)
     {
     case TransportMode::Tcp:
-        data_transport_.emplace<ClientTcpTransport>(ClientControlConfig{io_context_, config_, *logger_, running_});
+        data_plane_.Emplace<ClientTcpTransport>(ClientControlConfig{io_context_, config_, *logger_, running_});
         break;
     case TransportMode::Dco:
         try
         {
-            data_transport_.emplace<ClientDcoTransport>(ClientControlConfig{io_context_, config_, *logger_, running_});
+            data_plane_.Emplace<ClientDcoTransport>(ClientControlConfig{io_context_, config_, *logger_, running_});
         }
         catch (const std::exception &e)
         {
             logger_->warn("DCO initialization failed ({}), falling back to UDP", e.what());
-            data_transport_.emplace<ClientUdpTransport>(ClientControlConfig{io_context_, config_, *logger_, running_});
+            data_plane_.Emplace<ClientUdpTransport>(ClientControlConfig{io_context_, config_, *logger_, running_});
         }
         break;
     case TransportMode::Udp:
-        data_transport_.emplace<ClientUdpTransport>(ClientControlConfig{io_context_, config_, *logger_, running_});
+        data_plane_.Emplace<ClientUdpTransport>(ClientControlConfig{io_context_, config_, *logger_, running_});
         break;
     }
 
@@ -219,13 +219,13 @@ VpnClient::~VpnClient()
 
 void VpnClient::Connect()
 {
-    WithDataTransport([](auto &dp)
+    data_plane_.Visit([](auto &dp)
     { dp.Connect(); });
 }
 
 void VpnClient::Disconnect()
 {
-    WithDataTransport([](auto &dp)
+    data_plane_.Visit([](auto &dp)
     { dp.Disconnect(); });
 }
 

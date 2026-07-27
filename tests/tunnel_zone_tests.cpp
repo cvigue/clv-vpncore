@@ -1,6 +1,7 @@
 // Copyright (c) 2026- Charlie Vigue. All rights reserved.
 
 #include "tunnel_zone.h"
+#include "tunnel_zone_attachment_guard.h"
 #include "traffic_policy.h"
 #include "test_log_util.h"
 
@@ -73,6 +74,55 @@ TEST(TunnelZoneTest, UnregisterMissingIsNoop)
     TunnelZone zone(ZonePolicy{}, test::NullLogger(), /*install_kernel_policy=*/false);
     EXPECT_NO_THROW(zone.UnregisterHubAttachment("missing"));
     EXPECT_EQ(zone.HubAttachmentCount(), 0u);
+}
+
+TEST(TunnelZoneAttachmentGuardTest, ResetRegistersAndReleaseUnregisters)
+{
+    TunnelZone zone(ZonePolicy{}, test::NullLogger(), /*install_kernel_policy=*/false);
+    TunnelZoneAttachmentGuard guard;
+
+    EXPECT_FALSE(guard.attached());
+    guard.Reset(&zone, MakeHubSpec("tun0"));
+    EXPECT_TRUE(guard.attached());
+    EXPECT_EQ(guard.data_dev(), "tun0");
+    EXPECT_EQ(zone.HubAttachmentCount(), 1u);
+    EXPECT_TRUE(zone.HasHubAttachment("tun0"));
+
+    guard.Release();
+    EXPECT_FALSE(guard.attached());
+    EXPECT_EQ(zone.HubAttachmentCount(), 0u);
+    EXPECT_FALSE(zone.HasHubAttachment("tun0"));
+}
+
+TEST(TunnelZoneAttachmentGuardTest, DestructorReleases)
+{
+    TunnelZone zone(ZonePolicy{}, test::NullLogger(), /*install_kernel_policy=*/false);
+    {
+        TunnelZoneAttachmentGuard guard;
+        guard.Reset(&zone, MakeHubSpec("tun1"));
+        EXPECT_EQ(zone.HubAttachmentCount(), 1u);
+    }
+    EXPECT_EQ(zone.HubAttachmentCount(), 0u);
+}
+
+TEST(TunnelZoneAttachmentGuardTest, NullZoneIsNoop)
+{
+    TunnelZoneAttachmentGuard guard;
+    EXPECT_NO_THROW(guard.Reset(nullptr, MakeHubSpec("tun0")));
+    EXPECT_FALSE(guard.attached());
+}
+
+TEST(TunnelZoneAttachmentGuardTest, ResetReplacesPriorAttachment)
+{
+    TunnelZone zone(ZonePolicy{}, test::NullLogger(), /*install_kernel_policy=*/false);
+    TunnelZoneAttachmentGuard guard;
+    guard.Reset(&zone, MakeHubSpec("tun0"));
+    guard.Reset(&zone, MakeHubSpec("tun1"));
+    EXPECT_TRUE(guard.attached());
+    EXPECT_EQ(guard.data_dev(), "tun1");
+    EXPECT_FALSE(zone.HasHubAttachment("tun0"));
+    EXPECT_TRUE(zone.HasHubAttachment("tun1"));
+    EXPECT_EQ(zone.HubAttachmentCount(), 1u);
 }
 
 TEST(TunnelZoneTest, HubSpecPreservesClientToClientWhenEnabled)

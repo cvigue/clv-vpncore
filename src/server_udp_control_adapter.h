@@ -5,29 +5,25 @@
 
 /**
  * @file server_udp_control_adapter.h
- * @brief CRTP control-side adapter for server UDP + DCO modes.
- *
- * Inherits ServerControlBase for the shared protocol engine and adds
- * UDP-specific transport wiring: UdpListener, split-datapath context,
- * batch statistics, and the DCO channel-construction path.
- *
- * @tparam Derived  DataTransport<UdpDataChannel|DcoDataChannel, ...>
+ * @brief Server UDP userspace transport — owns channel + data adapter.
  */
 
-#include "log_subsystems.h"
-#include "server_control_base.h"
-
 #include "data_path_stats.h"
-#include "udp_engine_types.h"
+#include "log_subsystems.h"
+#include "openvpn/crypto_algorithms.h"
+#include "openvpn/push_exchange_helpers.h"
+#include "openvpn/udp_data_channel.h"
+#include "server_control_base.h"
+#include "server_data_adapter.h"
 #include "transport/batch_constants.h"
 #include "transport/listener.h"
 #include "transport/transport.h"
+#include "udp_engine_types.h"
 
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
 
 #include <cstddef>
-#include <cstdint>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -35,100 +31,57 @@
 
 namespace clv::vpn {
 
-/**
- * @brief Server control adapter for UDP transport (both UDP-userspace and DCO).
- *
- * Owns: UdpListener, batch counters/windows, and the split-datapath setup.
- * Protocol engine (sessions, handshake, routing, etc.) lives in ServerControlBase.
- */
-template <typename Derived>
-class ServerUdpControlAdapter : public ServerControlBase<Derived>
+class ServerUdpTransport : public ServerControlBase<ServerUdpTransport>
 {
-    using UdpControlBase = ServerControlBase<Derived>;
-
   public:
-    explicit ServerUdpControlAdapter(ServerControlConfig cfg)
+    using channel_type = UdpDataChannel<ServerDataAdapter<ServerUdpTransport>>;
+
+    explicit ServerUdpTransport(ServerControlConfig cfg)
+        : ServerControlBase(std::move(cfg))
+        , data_adapter_(*this)
+        , listener_(std::in_place,
+                    *io_context_,
+                    config_->server->host,
+                    config_->server->port)
+        , channel_(*io_context_,
+                   routing_table_,
+                   routing_table_v6_,
+                   session_manager_,
+                   logger_manager_->GetLogger(logging::Subsystem::dataio),
+                   config_->performance,
+                   config_->server->keepalive.first,
+                   config_->server->keepalive.second,
+                   *running_,
+                   data_adapter_)
     {
-        this->InitializeBase(cfg);
-
-        const auto &server_cfg = *this->config_->server;
-
-        // Create UDP listener
-        if (server_cfg.proto != "tcp")
-        {
-            listener_.emplace(cfg.io_context, server_cfg.host, server_cfg.port);
-            listener_->ApplySocketBuffers(
-                this->config_->performance.socket_recv_buffer,
-                this->config_->performance.socket_send_buffer,
-                *this->logger_);
-        }
-
-        // Batch size
-        currentBatchSize_ = transport::EffectiveBatchSize(this->config_->performance.batch_size);
+        listener_->ApplySocketBuffers(config_->performance.socket_recv_buffer,
+                                      config_->performance.socket_send_buffer,
+                                      *logger_);
+        currentBatchSize_ = transport::EffectiveBatchSize(config_->performance.batch_size);
     }
 
-  protected:
-    auto ChannelArgs()
-    {
-        // All refs are stable for object lifetime; consumed immediately in
-        // DataTransport ctor. Do not store the returned tuple.
-        return std::forward_as_tuple(
-            *this->io_context_,
-            this->routing_table_,
-            this->routing_table_v6_,
-            this->session_manager_,
-            this->logger_manager_->GetLogger(logging::Subsystem::dataio),
-            this->config_->performance,
-            this->config_->server->keepalive.first,
-            this->config_->server->keepalive.second,
-            *this->running_);
-    }
+    channel_type &channel() noexcept { return channel_; }
+    const channel_type &channel() const noexcept { return channel_; }
 
-  public:
     void Start()
     {
-        this->ConfigureDataPlane();
-
-        this->split_ctx_ = std::make_unique<UdpEngineContext>();
-        this->derived().ConfigureSplitContext(this->split_ctx_.get());
-        this->derived().ConfigureSocketFd(listener_->RawSocket().native_handle());
-
-        asio::co_spawn(*this->io_context_, this->derived().StartDataPath(), asio::detached);
-        this->logger_->info("Split-datapath enabled: TX + RX on dedicated threads");
-
-        this->StartBase();
+        ConfigureDataPlane();
+        split_ctx_ = std::make_unique<UdpEngineContext>();
+        channel_.SetSplitContext(split_ctx_.get());
+        channel_.SetSocketFd(listener_->RawSocket().native_handle());
+        asio::co_spawn(*io_context_, channel_.StartDataPath(), asio::detached);
+        logger_->info("Split-datapath enabled: TX + RX on dedicated threads");
+        StartBase();
     }
 
     void Stop()
     {
-        this->StopBase();
+        StopBase();
         listener_.reset();
     }
 
-    // -- Called from DataAdapter (via asio::post to control thread) -----------
-
-    void OnControlPacketFromDataPath(std::vector<std::uint8_t> data,
-                                     transport::PeerEndpoint sender)
-    {
-        auto transport_handle = transport::TransportHandle(
-            listener_->TransportFor(sender));
-        asio::co_spawn(*this->io_context_,
-                       this->ProcessNetworkPacket(std::move(data), sender, std::move(transport_handle)),
-                       asio::detached);
-    }
-
-    // -- Control adapter methods (control → data) ----------------------------
-
-    void ConfigureSplitContext(UdpEngineContext *ctx)
-    {
-        this->ch().SetSplitContext(ctx);
-    }
-    void ConfigureSocketFd(int fd)
-    {
-        this->ch().SetSocketFd(fd);
-    }
-
-    // -- Stats hook (called by base StatsLoop) -------------------------------
+    using ServerControlBase::OnControlPacketFromDataPath;
+    using ServerControlBase::HandleTcpDisconnect;
 
     void LogStats(const DataPathStats &delta, double elapsedSec)
     {
@@ -138,42 +91,45 @@ class ServerUdpControlAdapter : public ServerControlBase<Derived>
             std::tie(actualRcvBuf, actualSndBuf) = listener_->GetSocketBufferSizes();
 
         auto rates = ComputeStatsRates(delta, elapsedSec, actualRcvBuf, actualSndBuf);
-
-        auto rxHist = this->ch().GetRxBatchWindow().SnapshotAndReset();
-        auto [burstTotal, burstCount] = this->ch().GetTxBurstAvgWindow().SnapshotAndReset();
+        auto rxHist = channel_.GetRxBatchWindow().SnapshotAndReset();
+        auto [burstTotal, burstCount] = channel_.GetTxBurstAvgWindow().SnapshotAndReset();
         auto rxHistStr = FormatBatchHist(rxHist, delta.batchSaturations);
         auto txBstStr = FormatAvgBurst(burstTotal, burstCount);
 
-        this->logger_->info("[stats] {:.1f}s: "
-                            "rx={} ({:.0f}M) tx={} ({:.0f}M) "
-                            "rx{} bst={} "
-                            "buf={}/{}ms "
-                            "dec={}/{} rmiss={} serr={} spf={}",
-                            elapsedSec,
-                            delta.packetsReceived,
-                            rates.rxMbps,
-                            delta.packetsSent,
-                            rates.txMbps,
-                            rxHistStr,
-                            txBstStr,
-                            FormatBufMs(rates.rxBufMs),
-                            FormatBufMs(rates.txBufMs),
-                            delta.packetsDecrypted,
-                            delta.decryptFailures,
-                            delta.routeLookupMisses,
-                            delta.sendErrors,
-                            delta.txSmallPktFlush);
+        logger_->info("[stats] {:.1f}s: "
+                      "rx={} ({:.0f}M) tx={} ({:.0f}M) "
+                      "rx{} bst={} "
+                      "buf={}/{}ms "
+                      "dec={}/{} rmiss={} serr={} spf={}",
+                      elapsedSec,
+                      delta.packetsReceived,
+                      rates.rxMbps,
+                      delta.packetsSent,
+                      rates.txMbps,
+                      rxHistStr,
+                      txBstStr,
+                      FormatBufMs(rates.rxBufMs),
+                      FormatBufMs(rates.txBufMs),
+                      delta.packetsDecrypted,
+                      delta.decryptFailures,
+                      delta.routeLookupMisses,
+                      delta.sendErrors,
+                      delta.txSmallPktFlush);
     }
 
-    // -- Accessors -----------------------------------------------------------
-
-    transport::UdpListener *udp_listener() noexcept
+    void OnControlPacketFromDataPath(std::vector<std::uint8_t> data,
+                                     transport::PeerEndpoint sender)
     {
-        return listener_ ? &*listener_ : nullptr;
+        auto transport_handle = transport::TransportHandle(listener_->TransportFor(sender));
+        asio::co_spawn(*io_context_,
+                       ProcessNetworkPacket(std::move(data), sender, std::move(transport_handle)),
+                       asio::detached);
     }
 
   private:
+    ServerDataAdapter<ServerUdpTransport> data_adapter_;
     std::optional<transport::UdpListener> listener_;
+    channel_type channel_;
     std::size_t currentBatchSize_ = 0;
 };
 

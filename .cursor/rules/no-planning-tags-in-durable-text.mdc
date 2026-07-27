@@ -1,0 +1,20 @@
+---
+description: Keep planning slice tags out of durable text (commits, code comments)
+alwaysApply: true
+---
+
+# No planning tags in durable text
+
+Planning docs (`_planning/`, design notes, chat) may use short slice/item tags
+such as `S1`, `S2a`, `H3`, `F5`, `M1` when discussing work breakdown.
+
+**Do not** put those tags in places that persist in the product history:
+
+- Git commit messages
+- Code comments and `@file` / `@brief` Doxygen text
+- Public headers, READMEs meant as product docs, or user-facing strings
+
+Prefer plain language instead (e.g. "hub attachment RAII guard", "control owns
+channel", "DataPlane variant handle").
+
+Tags remain fine inside `_planning/` notes and ephemeral chat.
