@@ -119,6 +119,8 @@ void DcoCoreBase::DestroyDcoDevice()
 
 // ---------------------------------------------------------------------------
 // Stats — aggregate per-peer traffic counters from kernel
+//
+//         Does not run on hot threads
 // ---------------------------------------------------------------------------
 
 DataPathStats DcoCoreBase::SnapshotStatsImpl() const
@@ -548,7 +550,7 @@ void DcoCoreBase::RemovePeerImpl(std::uint32_t peer_id)
     del_attr->nla_len = static_cast<decltype(del_attr->nla_len)>(offset - del_start);
     req.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(struct genlmsghdr)) + static_cast<decltype(req.nlh.nlmsg_len)>(offset);
 
-    // Check the result so stale kernel peers are visible (H7). Removal can
+    // Check the result so stale kernel peers are visible. Removal can
     // legitimately race with kernel-side peer expiry, so failures are logged
     // rather than thrown.
     std::vector<std::uint8_t> response;

@@ -7,6 +7,8 @@
 #include "openvpn/session_manager.h"
 #include "openvpn/tls_crypt.h"
 #include "routing_table.h"
+#include "test_log_util.h"
+#include "tls_crypt_test_util.h"
 
 #include <arpa/inet.h>
 #include <chrono>
@@ -17,56 +19,16 @@
 #include <netinet/in.h>
 #include <optional>
 #include <set>
-#include <spdlog/sinks/null_sink.h>
-#include <spdlog/spdlog.h>
+#include <spdlog/logger.h>
 #include <string>
 #include <thread>
 #include <unordered_set>
-#include <util/byte_packer.h>
 #include <vector>
 
 using namespace clv::vpn;
 using namespace clv::vpn::openvpn;
-
-namespace {
-
-// Deterministic tls-crypt static key (256 bytes hex in a PEM envelope). Test-only.
-const std::string kTlsCryptKey = R"(#
-# 2048 bit OpenVPN static key
-#
------BEGIN OpenVPN Static key V1-----
-ae21eb58f6a3b3621d924a795437603d
-69677066303aedd8d822b5281737c3e1
-a9adc19f62fc329c78b05a715b92e6ef
-474e44d870596a071c9c2b7b006f7a50
-12fd11f766f3768aec84b34eca921630
-728537a9e42a76dbbfc6113d81305f6e
-8c9c0253215ec5f1e09bb0c1eba9275f
-80bc6d57a11a899288ca14c0f55e5a28
-d576be4c86d593fbbe9ed2d55346c10c
-59ad6d1479284223561535290e5db9aa
-076e4b085fd73704f426e7e758aa5108
-061407b814ef04e230af53ae67068f8b
-148b3f13af910687d92c37bcce262e74
-90aa3773149dfe6d894b1af094d0a955
-fc20e02843f573014fd381b10db82b67
-3251a2cf4128652dfdb072cd1438b88d
------END OpenVPN Static key V1-----
-)";
-
-/// Build tls-crypt plaintext: [opcode_byte][session_id:8][payload...].
-std::vector<std::uint8_t> MakeTlsCryptPlaintext(Opcode opcode, std::uint64_t session_id,
-                                                std::vector<std::uint8_t> payload = {})
-{
-    std::vector<std::uint8_t> buf;
-    buf.push_back(MakeOpcodeByte(opcode, 0));
-    auto sid_bytes = clv::netcore::uint_to_bytes(session_id);
-    buf.insert(buf.end(), sid_bytes.begin(), sid_bytes.end());
-    buf.insert(buf.end(), payload.begin(), payload.end());
-    return buf;
-}
-
-} // namespace
+using clv::vpn::test::MakeTlsCryptPlaintext;
+using clv::vpn::test::TlsCryptTestKeyPemString;
 
 /**
  * @brief Integration tests for multi-client VPN handshake scenarios
@@ -79,13 +41,12 @@ class VpnServerIntegrationTest : public ::testing::Test
   protected:
     void SetUp() override
     {
-        auto null_sink = std::make_shared<spdlog::sinks::null_sink_mt>();
-        logger_ = std::make_unique<spdlog::logger>("test_integration", null_sink);
+        logger_ = &clv::vpn::test::NullLogger();
     }
 
     SessionManager session_manager_;
     RoutingTableIpv4 routing_table_;
-    std::unique_ptr<spdlog::logger> logger_;
+    spdlog::logger *logger_{nullptr};
 
     Connection::Endpoint CreateEndpoint(uint32_t ip = 0xC0A80001, uint16_t port = 1194)
     {
@@ -570,7 +531,7 @@ TEST_F(VpnServerIntegrationTest, IpAssignmentWithRoutingIntegration)
 }
 
 // ============================================================================
-// tls-crypt replay-state relocation (M3) — server-side wiring
+// tls-crypt replay-state relocation — server-side wiring
 // ============================================================================
 
 // Exercises the real server-side object graph behind the peer-id gate
@@ -581,7 +542,7 @@ TEST_F(VpnServerIntegrationTest, IpAssignmentWithRoutingIntegration)
 // replays the gate decision against the real objects it drives.
 TEST_F(VpnServerIntegrationTest, TlsCryptPeerIdGateAndMoveSeedSameEndpoint)
 {
-    auto tc_server = TlsCrypt::FromKeyString(kTlsCryptKey, *logger_);
+    auto tc_server = TlsCrypt::FromKeyString(TlsCryptTestKeyPemString(), *logger_);
     ASSERT_TRUE(tc_server);
 
     const auto endpoint = CreateEndpoint(0xC0A800A0, 6000);
@@ -597,11 +558,13 @@ TEST_F(VpnServerIntegrationTest, TlsCryptPeerIdGateAndMoveSeedSameEndpoint)
     ASSERT_TRUE(sx.GetControlChannel().GetPeerSessionId().has_value());
     ASSERT_EQ(sx.GetControlChannel().GetPeerSessionId()->value, sid_x.value);
 
-    auto tc_client_x = TlsCrypt::FromKeyString(kTlsCryptKey, *logger_);
+    auto tc_client_x = TlsCrypt::FromKeyString(TlsCryptTestKeyPemString(), *logger_);
     ASSERT_TRUE(tc_client_x);
     for (int i = 0; i < 4; ++i)
     {
-        auto pt = MakeTlsCryptPlaintext(Opcode::P_CONTROL_V1, sid_x.value, {static_cast<std::uint8_t>(i)});
+        auto pt = MakeTlsCryptPlaintext(Opcode::P_CONTROL_V1,
+                                        sid_x.value,
+                                        std::vector<std::uint8_t>{static_cast<std::uint8_t>(i)});
         auto w = tc_client_x->Wrap(pt, false);
         ASSERT_TRUE(w);
         ASSERT_TRUE(tc_server->Unwrap(*w, true, sx.TlsCryptReplay()).has_value());
@@ -609,10 +572,12 @@ TEST_F(VpnServerIntegrationTest, TlsCryptPeerIdGateAndMoveSeedSameEndpoint)
     ASSERT_GT(sx.TlsCryptReplay().highest(), 1u);
 
     // ── New client Y (fresh TlsCrypt → counter restarts at 1), same endpoint. ──
-    auto tc_client_y = TlsCrypt::FromKeyString(kTlsCryptKey, *logger_);
+    auto tc_client_y = TlsCrypt::FromKeyString(TlsCryptTestKeyPemString(), *logger_);
     ASSERT_TRUE(tc_client_y);
     const std::uint64_t sid_y = 0xBBBBBBBBBBBBBBBBULL;
-    auto pt_y = MakeTlsCryptPlaintext(Opcode::P_CONTROL_HARD_RESET_CLIENT_V2, sid_y, {0x01});
+    auto pt_y = MakeTlsCryptPlaintext(Opcode::P_CONTROL_HARD_RESET_CLIENT_V2,
+                                      sid_y,
+                                      std::vector<std::uint8_t>{0x01});
     auto w_y = tc_client_y->Wrap(pt_y, false);
     ASSERT_TRUE(w_y);
 

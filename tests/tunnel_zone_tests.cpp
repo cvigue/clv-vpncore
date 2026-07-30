@@ -4,6 +4,7 @@
 #include "tunnel_zone_attachment_guard.h"
 #include "traffic_policy.h"
 #include "test_log_util.h"
+#include "platform/linux/nftables/nftables_client.h"
 
 #include <gtest/gtest.h>
 
@@ -149,6 +150,43 @@ TEST(TunnelZoneTest, HubSpecPreservesClientToClientWhenDisabled)
     const auto found = zone.FindHubAttachment("tun0");
     ASSERT_TRUE(found.has_value());
     EXPECT_FALSE(found->client_to_client);
+}
+
+TEST(TunnelZoneTest, TwoHubsRegisterIndependently)
+{
+    TunnelZone zone(ZonePolicy{}, test::NullLogger(), /*install_kernel_policy=*/false);
+
+    zone.RegisterHubAttachment(MakeHubSpec("tun0"));
+    zone.RegisterHubAttachment(MakeHubSpec("tun1"));
+
+    EXPECT_EQ(zone.HubAttachmentCount(), 2u);
+    EXPECT_TRUE(zone.HasHubAttachment("tun0"));
+    EXPECT_TRUE(zone.HasHubAttachment("tun1"));
+
+    zone.UnregisterHubAttachment("tun1");
+    EXPECT_EQ(zone.HubAttachmentCount(), 1u);
+    EXPECT_TRUE(zone.HasHubAttachment("tun0"));
+    EXPECT_FALSE(zone.HasHubAttachment("tun1"));
+
+    zone.UnregisterHubAttachment("tun0");
+    EXPECT_EQ(zone.HubAttachmentCount(), 0u);
+}
+
+TEST(NfTablesClientTableNameTest, PerIfnameNatAndFilterNames)
+{
+    EXPECT_EQ(NfTablesClient::TableName(NfTablesClient::kIPv4, false, "tun0"), "clv_vpn_nat_tun0");
+    EXPECT_EQ(NfTablesClient::TableName(NfTablesClient::kIPv4, true, "tun0"), "clv_vpn_filter_tun0");
+    EXPECT_EQ(NfTablesClient::TableName(NfTablesClient::kIPv6, false, "tun0"), "clv_vpn_nat6_tun0");
+    EXPECT_EQ(NfTablesClient::TableName(NfTablesClient::kIPv6, true, "tun1"), "clv_vpn_filter6_tun1");
+}
+
+TEST(NfTablesClientTableNameTest, SanitizesAndIsolatesHubs)
+{
+    EXPECT_EQ(NfTablesClient::TableName(NfTablesClient::kIPv4, true, "ovpn-dco0"),
+              "clv_vpn_filter_ovpn_dco0");
+    EXPECT_NE(NfTablesClient::TableName(NfTablesClient::kIPv4, true, "tun0"),
+              NfTablesClient::TableName(NfTablesClient::kIPv4, true, "tun1"));
+    EXPECT_EQ(NfTablesClient::TableName(NfTablesClient::kIPv4, false, ""), "clv_vpn_nat_dev");
 }
 
 TEST(TunnelZoneTest, EnsureTransitRoutingNoopWithoutKernelPolicy)

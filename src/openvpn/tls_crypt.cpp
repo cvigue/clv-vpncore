@@ -1,15 +1,12 @@
 
 #include "openvpn/tls_crypt.h"
+#include "openvpn/tls_crypt_hmac.h"
 
 #include <HelpSslStreamCipher.h>
 #include <log_utils.h>
-#include <numeric_util.h>
 #include <util/byte_packer.h>
 
 #include <openssl/crypto.h>
-#include <openssl/evp.h>
-#include <openssl/hmac.h>
-#include <openssl/types.h>
 
 #include <spdlog/spdlog.h>
 
@@ -106,33 +103,6 @@ std::optional<std::vector<std::uint8_t>> ParseKeyFile(const std::string &filenam
         return std::nullopt;
     }
     return result;
-}
-
-/**
- * Compute HMAC-SHA256
- */
-std::vector<std::uint8_t> ComputeHmac(std::span<const std::uint8_t> key,
-                                      std::span<const std::uint8_t> data,
-                                      spdlog::logger &logger)
-{
-    std::vector<std::uint8_t> hmac(TLS_CRYPT_TAG_SIZE);
-    unsigned int hmac_len = 0;
-
-    HMAC(EVP_sha256(),
-         key.data(),
-         safe_cast<int>(key.size()),
-         data.data(),
-         data.size(),
-         hmac.data(),
-         &hmac_len);
-
-    if (hmac_len != TLS_CRYPT_TAG_SIZE)
-    {
-        logger.error("HMAC size mismatch: {}", hmac_len);
-        return {};
-    }
-
-    return hmac;
 }
 
 } // anonymous namespace
@@ -272,11 +242,11 @@ std::optional<std::vector<std::uint8_t>> TlsCrypt::Unwrap(std::span<const std::u
     std::vector<std::uint8_t> verify_key(key_material_.begin() + hmac_key_offset,
                                          key_material_.begin() + hmac_key_offset + TLS_CRYPT_KEY_SIZE);
 
-    auto computed_hmac = ComputeHmac(verify_key, hmac_data, *logger_);
+    auto computed_hmac = detail::TlsCryptHmacSha256(verify_key, hmac_data);
 
     // Constant-time comparison to prevent timing side-channels.
     // The length pre-check does not leak: both sides are fixed-size SHA-256
-    // tags (32 bytes) — computed locally and framed by the wire parser (H6).
+    // tags (32 bytes) — computed locally and framed by the wire parser.
     bool hmac_ok = (computed_hmac.size() == hmac_tag.size())
                    && (CRYPTO_memcmp(computed_hmac.data(), hmac_tag.data(), hmac_tag.size()) == 0);
 
@@ -376,7 +346,7 @@ std::optional<std::vector<std::uint8_t>> TlsCrypt::Wrap(std::span<const std::uin
     std::vector<std::uint8_t> sign_key(key_material_.begin() + hmac_key_offset,
                                        key_material_.begin() + hmac_key_offset + TLS_CRYPT_KEY_SIZE);
 
-    auto hmac_tag = ComputeHmac(sign_key, hmac_data, *logger_);
+    auto hmac_tag = detail::TlsCryptHmacSha256(sign_key, hmac_data);
     if (hmac_tag.empty())
         return std::nullopt;
 

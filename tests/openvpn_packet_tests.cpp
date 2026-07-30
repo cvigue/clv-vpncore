@@ -3,6 +3,7 @@
 #include "gtest/gtest.h"
 #include <cstdint>
 #include <openvpn/packet.h>
+#include <openvpn/protocol_constants.h>
 #include <HelpSslHmac.h>
 #include <span>
 #include <string>
@@ -761,4 +762,32 @@ TEST(SessionId, from_bytes_exactly_eight)
     std::vector<std::uint8_t> data = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
     auto sid = SessionId::FromBytes(data);
     EXPECT_NE(sid.value, 0u);
+}
+
+// ============================================================================
+// ClassifyDecryptedPayload (shared UDP/TCP data-plane demux)
+// ============================================================================
+
+TEST(ClassifyDecryptedPayload, EmptyDrops)
+{
+    EXPECT_EQ(ClassifyDecryptedPayload({}), DecryptedPayloadDisposition::Drop);
+}
+
+TEST(ClassifyDecryptedPayload, KeepalivePingNotForwarded)
+{
+    std::vector<std::uint8_t> ping(KEEPALIVE_PING_PAYLOAD,
+                                   KEEPALIVE_PING_PAYLOAD + KEEPALIVE_PING_SIZE);
+    EXPECT_EQ(ClassifyDecryptedPayload(ping), DecryptedPayloadDisposition::Keepalive);
+}
+
+TEST(ClassifyDecryptedPayload, TooShortForIpDrops)
+{
+    std::vector<std::uint8_t> short_payload(19, 0x45);
+    EXPECT_EQ(ClassifyDecryptedPayload(short_payload), DecryptedPayloadDisposition::Drop);
+}
+
+TEST(ClassifyDecryptedPayload, MinIpv4HeaderForwards)
+{
+    std::vector<std::uint8_t> ipv4(IPV4_MIN_HEADER_SIZE, 0x45);
+    EXPECT_EQ(ClassifyDecryptedPayload(ipv4), DecryptedPayloadDisposition::Forward);
 }

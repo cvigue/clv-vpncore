@@ -699,7 +699,7 @@ remote example.com 65536
     EXPECT_THROW(OvpnConfigParser::ParseString(ovpn_content), std::runtime_error);
 }
 
-// H2: numeric directive parsing must throw the parser's own error type
+// numeric directive parsing must throw the parser's own error type
 // (with line context) instead of leaking raw std::invalid_argument /
 // std::out_of_range from std::stoi.
 
@@ -788,7 +788,7 @@ verb banana
     }
 }
 
-// M6: external cert/key file reads are size-capped
+// external cert/key file reads are size-capped
 
 TEST_F(OvpnConfigParserTest, RejectOversizedExternalCaFile)
 {

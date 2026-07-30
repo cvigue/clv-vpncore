@@ -120,7 +120,7 @@ inline bool IsKeepalivePing(std::span<const std::uint8_t> buf) noexcept
 constexpr std::size_t IPV4_MIN_HEADER_SIZE = 20;
 
 /**
- * Post-decrypt disposition for data-plane plaintext (DRY F4).
+ * Post-decrypt disposition for data-plane plaintext.
  * Shared by UDP slow/in-place paths and TCP demuxed RX.
  */
 enum class DecryptedPayloadDisposition : std::uint8_t
@@ -130,6 +130,11 @@ enum class DecryptedPayloadDisposition : std::uint8_t
     Forward,   ///< Plausible IP payload for TUN
 };
 
+/**
+ * @brief Classify decrypted data-channel plaintext for TUN forwarding.
+ * @param plaintext Decrypted payload bytes
+ * @return Drop, Keepalive, or Forward
+ */
 [[nodiscard]] inline DecryptedPayloadDisposition
 ClassifyDecryptedPayload(std::span<const std::uint8_t> plaintext) noexcept
 {

@@ -1,7 +1,8 @@
 // Copyright (c) 2026- Charlie Vigue. All rights reserved.
 
 #include "tunnel_zone.h"
-#include "scoped_nft_rule.h"
+#include "scoped_c2c_isolation.h"
+#include "scoped_masquerade.h"
 #include "traffic_policy.h"
 
 #include <cstddef>
@@ -45,7 +46,7 @@ void TunnelZone::InstallHubKernelPolicy(HubAttachmentState &state)
             spec.pool_v6,
             [&](const TunnelPool &pool)
         {
-            return ScopedMasquerade(pool.cidr, logger_);
+            return ScopedMasquerade(spec.data_dev, pool.cidr, logger_);
         });
     }
 

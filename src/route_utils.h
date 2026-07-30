@@ -13,6 +13,8 @@
  */
 
 #include <numeric_util.h>
+#include <sys/socket.h>
+#include <sys/types.h>
 #include <util/netlink_helper.h>
 
 #include <arpa/inet.h>
@@ -264,7 +266,7 @@ inline std::vector<std::string> QueryRoutes(int family)
         if (nbytes <= 0)
             break;
 
-        // Guard ssize_t → int narrowing for NLMSG_OK arithmetic (H4)
+        // Guard ssize_t → int narrowing for NLMSG_OK arithmetic.
         auto remaining_opt = clv::checked_cast<int>(nbytes);
         if (!remaining_opt)
             break;

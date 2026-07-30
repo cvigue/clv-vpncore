@@ -1207,6 +1207,42 @@ TEST_F(ReplayWindowTest, Reset_ClearsState)
     EXPECT_EQ(window_.Check(50), ReplayWindow::CheckResult::Accept);
 }
 
+// kBits must equal storage (kWords * 64); inclusive edge is fail-closed.
+TEST_F(ReplayWindowTest, Check_DiffEqualKBitsIsTooOld)
+{
+    static_assert(ReplayWindow::kBits == ReplayWindow::kWords * 64);
+    window_.Accept(static_cast<std::uint32_t>(ReplayWindow::kBits));
+    EXPECT_EQ(window_.Check(0), ReplayWindow::CheckResult::TooOld);
+}
+
+TEST_F(ReplayWindowTest, Check_DiffEqualKBitsMinusOneIsInWindow)
+{
+    const auto high = static_cast<std::uint32_t>(ReplayWindow::kBits);
+    window_.Accept(high);
+    // Position kBits-1 is the oldest tracked bit; unseen → Accept, not OOB.
+    EXPECT_EQ(window_.Check(1), ReplayWindow::CheckResult::Accept);
+    window_.Accept(1);
+    EXPECT_EQ(window_.Check(1), ReplayWindow::CheckResult::Duplicate);
+}
+
+TEST_F(ReplayWindowTest, Accept_OldestInWindowBitDoesNotOob)
+{
+    const auto high = static_cast<std::uint32_t>(ReplayWindow::kBits);
+    window_.Accept(high);
+    window_.Accept(1); // diff == kBits - 1 → last valid bit index
+    EXPECT_EQ(window_.highest_id(), high);
+    EXPECT_EQ(window_.Check(1), ReplayWindow::CheckResult::Duplicate);
+}
+
+TEST_F(ReplayWindowTest, Shift_ExactKBitsClearsWindow)
+{
+    window_.Accept(10);
+    window_.Accept(static_cast<std::uint32_t>(10 + ReplayWindow::kBits));
+    EXPECT_EQ(window_.Check(10), ReplayWindow::CheckResult::TooOld);
+    EXPECT_EQ(window_.Check(static_cast<std::uint32_t>(10 + ReplayWindow::kBits)),
+              ReplayWindow::CheckResult::Duplicate);
+}
+
 // ============================================================================
 // CryptoContext accessor tests (previously dead)
 // ============================================================================

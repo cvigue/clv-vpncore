@@ -5,6 +5,7 @@
 #include <util/nla_helpers.h>
 
 #include <arpa/inet.h>
+#include <cctype>
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
@@ -14,6 +15,7 @@
 #include <linux/netlink.h>
 #include <net/if.h>
 #include <netinet/in.h>
+#include <string>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -353,15 +355,40 @@ class NftBatchBuilder
 
 NfTablesClient::~NfTablesClient() = default;
 
+std::string NfTablesClient::TableName(std::uint8_t family, bool filter, const char *ifname)
+{
+    std::string suffix;
+    if (ifname)
+    {
+        for (const unsigned char *p = reinterpret_cast<const unsigned char *>(ifname); *p; ++p)
+        {
+            if (std::isalnum(*p) || *p == '_')
+                suffix.push_back(static_cast<char>(*p));
+            else
+                suffix.push_back('_');
+        }
+    }
+    if (suffix.empty())
+        suffix = "dev";
+    constexpr std::size_t kMaxSuffix = 32;
+    if (suffix.size() > kMaxSuffix)
+        suffix.resize(kMaxSuffix);
+
+    const bool ipv6 = family == NFPROTO_IPV6;
+    if (filter)
+        return std::string(ipv6 ? "clv_vpn_filter6_" : "clv_vpn_filter_") + suffix;
+    return std::string(ipv6 ? "clv_vpn_nat6_" : "clv_vpn_nat_") + suffix;
+}
+
 NfTablesClient::NftTableDescriptor
-NfTablesClient::Descriptor(std::uint8_t family, NftTableRole role)
+NfTablesClient::Descriptor(std::uint8_t family, NftTableRole role, const char *ifname)
 {
     const bool ipv6 = family == NFPROTO_IPV6;
-    if (role == NftTableRole::Nat)
-    {
-        return {ipv6 ? "clv_vpn_nat6" : "clv_vpn_nat", ipv6 ? 16u : 4u, ipv6 ? 8u : 12u, ipv6 ? 24u : 16u};
-    }
-    return {ipv6 ? "clv_vpn_filter6" : "clv_vpn_filter", ipv6 ? 16u : 4u, ipv6 ? 8u : 12u, ipv6 ? 24u : 16u};
+    const bool filter = role == NftTableRole::Filter;
+    return {TableName(family, filter, ifname),
+            ipv6 ? 16u : 4u,
+            ipv6 ? 8u : 12u,
+            ipv6 ? 24u : 16u};
 }
 
 void NfTablesClient::Open()
@@ -422,21 +449,25 @@ bool NfTablesClient::SendBatch(const std::vector<std::uint8_t> &batch)
 }
 
 bool NfTablesClient::EnsureMasquerade(std::uint8_t family,
+                                      const char *ifname,
                                       const std::uint8_t *source_network,
                                       std::uint8_t prefix_len)
 {
-    const auto info = Descriptor(family, NftTableRole::Nat);
+    if (!ifname || !ifname[0] || !source_network)
+        return false;
 
-    // First remove any existing table to make this idempotent
-    if (TableExists(family, NftTableRole::Nat))
-        DeleteTable(family, NftTableRole::Nat);
+    const auto info = Descriptor(family, NftTableRole::Nat, ifname);
+
+    // Idempotent recreate of this hub's table only.
+    if (TableExists(family, NftTableRole::Nat, ifname))
+        DeleteTable(family, NftTableRole::Nat, ifname);
 
     NftBatchBuilder batch;
     batch.Begin();
-    batch.AddTable(family, info.table_name);
-    batch.AddChain(family, info.table_name, CHAIN_NAME, "nat", NF_INET_POST_ROUTING, 100);
+    batch.AddTable(family, info.table_name.c_str());
+    batch.AddChain(family, info.table_name.c_str(), CHAIN_NAME, "nat", NF_INET_POST_ROUTING, 100);
 
-    batch.BeginRule(family, info.table_name, CHAIN_NAME);
+    batch.BeginRule(family, info.table_name.c_str(), CHAIN_NAME);
     {
         std::uint8_t mask[16];
         PrefixToNetmask(prefix_len, mask, info.addr_size);
@@ -460,24 +491,30 @@ bool NfTablesClient::EnsureMasquerade(std::uint8_t family,
     return SendBatch(batch.buffer());
 }
 
-bool NfTablesClient::RemoveMasquerade(std::uint8_t family)
+bool NfTablesClient::RemoveMasquerade(std::uint8_t family, const char *ifname)
 {
-    return DeleteTable(family, NftTableRole::Nat);
+    if (!ifname || !ifname[0])
+        return false;
+    return DeleteTable(family, NftTableRole::Nat, ifname);
 }
 
-bool NfTablesClient::TableExists(std::uint8_t family)
+bool NfTablesClient::TableExists(std::uint8_t family, const char *ifname)
 {
-    return TableExists(family, NftTableRole::Nat);
+    if (!ifname || !ifname[0])
+        return false;
+    return TableExists(family, NftTableRole::Nat, ifname);
 }
 
-bool NfTablesClient::FilterTableExists(std::uint8_t family)
+bool NfTablesClient::FilterTableExists(std::uint8_t family, const char *ifname)
 {
-    return TableExists(family, NftTableRole::Filter);
+    if (!ifname || !ifname[0])
+        return false;
+    return TableExists(family, NftTableRole::Filter, ifname);
 }
 
-bool NfTablesClient::TableExists(std::uint8_t family, NftTableRole role)
+bool NfTablesClient::TableExists(std::uint8_t family, NftTableRole role, const char *ifname)
 {
-    const auto info = Descriptor(family, role);
+    const auto info = Descriptor(family, role, ifname);
 
     int fd = nlh_.RawFd();
     if (fd < 0)
@@ -494,7 +531,7 @@ bool NfTablesClient::TableExists(std::uint8_t family, NftTableRole role)
     Append(buf, &nlh, sizeof(nlh));
 
     AppendNfGenMsg(buf, family, 0);
-    AppendAttrStr(buf, NFTA_TABLE_NAME, info.table_name);
+    AppendAttrStr(buf, NFTA_TABLE_NAME, info.table_name.c_str());
 
     auto *hdr = reinterpret_cast<struct nlmsghdr *>(buf.data());
     hdr->nlmsg_len = static_cast<std::uint32_t>(buf.size());
@@ -527,9 +564,9 @@ bool NfTablesClient::TableExists(std::uint8_t family, NftTableRole role)
     return true;
 }
 
-bool NfTablesClient::DeleteTable(std::uint8_t family, NftTableRole role)
+bool NfTablesClient::DeleteTable(std::uint8_t family, NftTableRole role, const char *ifname)
 {
-    const auto info = Descriptor(family, role);
+    const auto info = Descriptor(family, role, ifname);
 
     std::vector<std::uint8_t> buf;
     buf.reserve(512);
@@ -544,7 +581,7 @@ bool NfTablesClient::DeleteTable(std::uint8_t family, NftTableRole role)
     {
         auto pos = BeginNlMsg(buf, NftMsgType(NFT_MSG_DELTABLE), NLM_F_REQUEST, seq++);
         AppendNfGenMsg(buf, family, 0);
-        AppendAttrStr(buf, NFTA_TABLE_NAME, info.table_name);
+        AppendAttrStr(buf, NFTA_TABLE_NAME, info.table_name.c_str());
         EndNlMsg(buf, pos);
     }
 
@@ -565,10 +602,10 @@ bool NfTablesClient::EnsureIntraPoolDrop(std::uint8_t family, const char *ifname
     if (!ifname || !ifname[0] || !pool_network || !bridge_ip)
         return false;
 
-    const auto info = Descriptor(family, NftTableRole::Filter);
+    const auto info = Descriptor(family, NftTableRole::Filter, ifname);
 
-    if (TableExists(family, NftTableRole::Filter))
-        DeleteTable(family, NftTableRole::Filter);
+    if (TableExists(family, NftTableRole::Filter, ifname))
+        DeleteTable(family, NftTableRole::Filter, ifname);
 
     std::uint8_t mask[16];
     PrefixToNetmask(prefix_len, mask, info.addr_size);
@@ -582,10 +619,10 @@ bool NfTablesClient::EnsureIntraPoolDrop(std::uint8_t family, const char *ifname
 
     NftBatchBuilder batch(4096);
     batch.Begin();
-    batch.AddTable(family, info.table_name);
-    batch.AddChain(family, info.table_name, FILTER_CHAIN_NAME, "filter", NF_INET_FORWARD, 0);
+    batch.AddTable(family, info.table_name.c_str());
+    batch.AddChain(family, info.table_name.c_str(), FILTER_CHAIN_NAME, "filter", NF_INET_FORWARD, 0);
 
-    batch.BeginRule(family, info.table_name, FILTER_CHAIN_NAME);
+    batch.BeginRule(family, info.table_name.c_str(), FILTER_CHAIN_NAME);
     {
         auto &buf = batch.buffer_mut();
         AppendExprMetaIifname(buf, NFT_REG_1);
@@ -608,9 +645,11 @@ bool NfTablesClient::EnsureIntraPoolDrop(std::uint8_t family, const char *ifname
     return SendBatch(batch.buffer());
 }
 
-bool NfTablesClient::RemoveIntraPoolDrop(std::uint8_t family)
+bool NfTablesClient::RemoveIntraPoolDrop(std::uint8_t family, const char *ifname)
 {
-    return DeleteTable(family, NftTableRole::Filter);
+    if (!ifname || !ifname[0])
+        return false;
+    return DeleteTable(family, NftTableRole::Filter, ifname);
 }
 
 } // namespace clv::vpn

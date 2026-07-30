@@ -20,6 +20,7 @@
 
 #include "openvpn/crypto_algorithms.h"
 #include "openvpn/crypto_context.h"
+#include "openvpn/data_v2_wire.h"
 #include "openvpn/packet.h"
 #include "openvpn/protocol_constants.h"
 #include "p2p_policy.h"
@@ -28,17 +29,15 @@
 
 #include "client_network_setup.h"
 #include "openvpn/config_exchange.h"
-#include "openvpn/key_derivation.h"
+#include "openvpn/session_key_install.h"
 #include "openvpn/vpn_config.h"
 #include "transport/transport.h"
 #include "udp_core.h"
 #include "udp_engine_types.h"
 
 #include <chrono>
-#include <exception>
 #include <span>
 #include <stdexcept>
-#include <string>
 
 #include "platform/linux/tun/tun_device.h"
 
@@ -68,6 +67,14 @@ class ClientUdpChannel
     friend UdpCore<ClientUdpChannel<Adapter>, P2PPolicy>;
 
   public:
+    /**
+     * @brief Construct the client UDP data channel.
+     * @param io_context ASIO context for coroutines
+     * @param logger Logger for data-path events
+     * @param config Client configuration
+     * @param running Shared stop flag
+     * @param adapter Data→control adapter
+     */
     ClientUdpChannel(asio::io_context &io_context,
                      spdlog::logger &logger,
                      const VpnConfig &config,
@@ -91,6 +98,7 @@ class ClientUdpChannel
         this->policy().SetTxNsOutput(&last_tx_ns_);
     }
 
+    /** @brief Stop the data path and release resources. */
     ~ClientUdpChannel()
     {
         this->StopDataPath();
@@ -114,7 +122,12 @@ class ClientUdpChannel
     using UdpClientMixinBase::StartDataPath;
     using UdpClientMixinBase::StopDataPath;
 
-    /// Override to also initialise the control-thread ping encrypt context.
+    /**
+     * @brief Install keys on the P2P engine and keepalive ping context.
+     * @param encrypt_key Outbound encryption key
+     * @param decrypt_key Inbound decryption key
+     * @param key_id OpenVPN key slot identifier
+     */
     void EngineInstallKeys(const openvpn::EncryptionKey &encrypt_key,
                            const openvpn::EncryptionKey &decrypt_key,
                            std::uint8_t key_id)
@@ -123,6 +136,7 @@ class ClientUdpChannel
         ping_tx_state_.ApplySnapshot(encrypt_key, key_id);
     }
 
+    /** @brief Timestamp of the last outbound data-channel transmission. */
     std::chrono::steady_clock::time_point LastTxTime() const noexcept
     {
         return std::chrono::steady_clock::time_point(
@@ -130,6 +144,7 @@ class ClientUdpChannel
                 last_tx_ns_.load(std::memory_order_relaxed)));
     }
 
+    /** @brief Send a userspace keepalive ping on the raw UDP socket. */
     asio::awaitable<void> SendKeepalivePing()
     {
         const auto &snap = this->policy().tx_snapshot;
@@ -152,6 +167,10 @@ class ClientUdpChannel
         if (!pkt_id)
             co_return;
 
+        if (!limits_crypto->TryReserveOutboundEncrypt(openvpn::KEEPALIVE_PING_SIZE,
+                                                      ping_tx_state_.cipher_algorithm))
+            co_return;
+
         const auto wire_len = ping_tx_state_.EncryptInPlace(
             std::span<std::uint8_t>(buf.data(), kBufSize),
             openvpn::KEEPALIVE_PING_SIZE,
@@ -160,8 +179,6 @@ class ClientUdpChannel
 
         if (wire_len == 0)
             co_return;
-
-        limits_crypto->RecordOutboundEncrypt(openvpn::KEEPALIVE_PING_SIZE, ping_tx_state_.cipher_algorithm);
 
         // Send directly on the raw socket (v4-mapped IPv6 for IPv4 peers).
         struct sockaddr_in6 sa6{};
@@ -181,6 +198,12 @@ class ClientUdpChannel
 
     // -- Control adapter hooks (called by ClientControlAdapter) ---------------
 
+    /**
+     * @brief Bind transport socket and peer after handshake.
+     * @param handle UDP transport handle
+     * @param peer Remote endpoint
+     * @param peer_id Assigned peer identifier
+     */
     void AttachTransport(transport::TransportHandle &handle,
                          transport::PeerEndpoint peer,
                          std::uint32_t peer_id)
@@ -190,20 +213,33 @@ class ClientUdpChannel
         UdpClientMixinBase::SetPeer(peer, openvpn::SessionId{static_cast<std::uint64_t>(peer_id)});
     }
 
+    /**
+     * @brief Derive and install data-path keys on the P2P engine.
+     * @param key_material Raw key material from control plane
+     * @param cipher_algo Negotiated cipher
+     * @param hmac_algo Negotiated HMAC (unused on AEAD)
+     * @param key_id OpenVPN key slot identifier
+     * @param crypto_context Control-plane crypto context for limits
+     */
     void InstallDataPathKeys(const std::vector<std::uint8_t> &key_material,
                              openvpn::CipherAlgorithm cipher_algo,
                              openvpn::HmacAlgorithm hmac_algo,
                              std::uint8_t key_id,
                              openvpn::CryptoContext &crypto_context)
     {
-        if (!openvpn::KeyDerivation::InstallKeys(crypto_context, key_material, cipher_algo, hmac_algo, key_id, openvpn::PeerRole::Client))
-            throw std::runtime_error("UDP: KeyDerivation::InstallKeys failed");
+        openvpn::InstallClientCryptoKeysOrThrow(crypto_context,
+                                                key_material,
+                                                cipher_algo,
+                                                hmac_algo,
+                                                key_id,
+                                                "UDP");
         this->policy().SetOutboundLimitsCryptoContext(&crypto_context);
         EngineInstallKeys(crypto_context.GetPrimaryEncryptKey(),
                           crypto_context.GetPrimaryDecryptKey(),
                           key_id);
     }
 
+    /** @brief CryptoContext used for outbound packet-id limits. */
     openvpn::CryptoContext &GetLimitsCryptoContext()
     {
         auto *crypto = this->policy().OutboundLimitsCryptoContext();
@@ -212,6 +248,12 @@ class ClientUdpChannel
         return *crypto;
     }
 
+    /**
+     * @brief Create the client TUN device from negotiated config.
+     * @param negotiated PUSH reply network settings
+     * @param config Client configuration
+     * @param io_ctx ASIO context for the TUN device
+     */
     void ConfigureNetworkInterface(const openvpn::NegotiatedConfig &negotiated,
                                    const VpnConfig &config,
                                    asio::io_context &io_ctx)
@@ -220,6 +262,7 @@ class ClientUdpChannel
         ConfigureClientTun(*this->tun_device_, negotiated, config.client->dev_name, this->logger());
     }
 
+    /** @brief Install routes pushed by the server onto the TUN device. */
     void InstallNegotiatedRoutes(const openvpn::NegotiatedConfig &negotiated)
     {
         if (!this->tun_device_)
@@ -227,12 +270,20 @@ class ClientUdpChannel
         InstallClientNegotiatedRoutes(*this->tun_device_, negotiated, this->logger());
     }
 
+    /** @brief Close the TUN device on session teardown. */
     void OnTeardown()
     {
         if (this->tun_device_)
             this->tun_device_->Close();
     }
 
+    /**
+     * @brief Spawn the keepalive coroutine when interval > 0.
+     * @tparam Fn Awaitable factory (no arguments)
+     * @param io_ctx ASIO context for co_spawn
+     * @param fn Coroutine to run
+     * @param interval Keepalive interval in seconds (0 disables)
+     */
     template <std::invocable Fn>
     void LaunchKeepalive(asio::io_context &io_ctx, Fn &&fn, int interval)
     {

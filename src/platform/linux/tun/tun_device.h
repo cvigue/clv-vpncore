@@ -98,7 +98,9 @@ class TunDevice
     TunDevice &operator=(const TunDevice &) = delete;
 
     // Movable
+    /** @brief Move-construct a TunDevice (transfers FD ownership). */
     TunDevice(TunDevice &&) noexcept;
+    /** @brief Move-assign a TunDevice (transfers FD ownership). */
     TunDevice &operator=(TunDevice &&) noexcept;
 
     /**
@@ -228,18 +230,7 @@ class TunDevice
     asio::awaitable<std::vector<IpPacket>> ReadBatch(std::size_t max_batch);
 
     /**
-     * @brief Read a batch of packets directly into caller-provided buffers (zero-copy)
-     *
-     * Each element in @p slots points to a writable buffer of at least
-     * @p max_payload bytes. The first read uses async_read_some (ASIO/epoll
-     * integration), remaining reads are non-blocking drain.
-     *
-     * @param slots      Array of {pointer, capacity} pairs — one per potential packet
-     * @param max_batch  Maximum packets to read (must be <= slots size)
-     * @return Number of packets read. For each i in [0..N), slots[i].len is set.
-     * @throws asio::system_error on I/O error
-     * @note Intended for zero-copy arena paths — TUN data lands directly in
-     *       the caller's memory with no intermediate copy.
+     * @brief Caller-provided buffer slot for zero-copy TUN reads.
      */
     struct SlotBuffer
     {
@@ -248,6 +239,16 @@ class TunDevice
         std::size_t len = 0;  ///< Output: bytes actually read
     };
 
+    /**
+     * @brief Read a batch of packets directly into caller-provided buffers (zero-copy).
+     *
+     * Each element in @p slots points to a writable buffer. The first read uses
+     * async_read_some (ASIO/epoll integration); remaining reads are non-blocking drain.
+     *
+     * @param slots Array of SlotBuffer — one per potential packet
+     * @return Number of packets read; for each i in [0, N), slots[i].len is set
+     * @throws asio::system_error on I/O error
+     */
     asio::awaitable<std::size_t> ReadBatchInto(std::span<SlotBuffer> slots);
 
     /**

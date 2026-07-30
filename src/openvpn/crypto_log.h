@@ -26,6 +26,12 @@ namespace clv::vpn::openvpn {
     std::span<const std::uint8_t> material,
     std::size_t digest_prefix_bytes = 4);
 
+/**
+ * @brief Fingerprint overload for vector key material.
+ * @param material Key bytes
+ * @param digest_prefix_bytes Hex prefix length of the digest to return
+ * @return Short hex fingerprint (does not reveal key bytes)
+ */
 [[nodiscard]] inline std::string KeyMaterialFingerprint(
     const std::vector<std::uint8_t> &material,
     std::size_t digest_prefix_bytes = 4)

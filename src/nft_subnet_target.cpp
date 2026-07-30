@@ -1,7 +1,10 @@
 // Copyright (c) 2026- Charlie Vigue. All rights reserved.
 
 #include "nft_subnet_target.h"
+#include "platform/linux/nftables/nftables_client.h"
 
+#include <array>
+#include <cstdint>
 #include <net/ipv4_utils.h>
 #include <net/ipv6_utils.h>
 
@@ -9,6 +12,8 @@
 #include <netinet/in.h>
 
 #include <cstring>
+#include <optional>
+#include <string>
 
 namespace clv::vpn {
 

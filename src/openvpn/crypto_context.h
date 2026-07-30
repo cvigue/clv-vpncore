@@ -4,7 +4,6 @@
 #define CLV_VPN_OPENVPN_CRYPTO_CONTEXT_H
 
 #include "openvpn/crypto_algorithms.h"
-#include "openvpn/data_v2_wire.h"
 #include "openvpn/packet.h"
 #include "openvpn/protocol_constants.h"
 
@@ -79,17 +78,16 @@ struct EncryptionKey
 };
 
 /**
- * @brief 2048-bit sliding window for anti-replay protection
+ * @brief Sliding-window anti-replay bitmap (kWords * 64 bits).
  *
  * Tracks which packet IDs have been seen within a window of the highest
- * received ID.  At multi-Gbps rates, the 2048-bit window handles reordering
- * spans of up to 2048 packets across parallel TCP streams through the tunnel.
+ * received ID. Valid bit indices are `[0, kBits)`; `diff >= kBits` is TooOld.
  */
 class ReplayWindow
 {
   public:
-    static constexpr std::size_t kWords = 64;
-    static constexpr std::size_t kBits = (kWords * 64) + 1;
+    static constexpr std::size_t kWords = 64;         ///< Bitmap word count
+    static constexpr std::size_t kBits = kWords * 64; ///< Total window size in bits
 
     /** Result of checking a packet ID against the window. */
     enum class CheckResult
@@ -133,6 +131,7 @@ class ReplayWindow
         bits_.fill(0);
     }
 
+    /** @brief Highest accepted packet ID in the window. */
     [[nodiscard]] std::uint32_t highest_id() const noexcept
     {
         return highest_id_;
@@ -217,6 +216,7 @@ class CryptoContext
     {
     }
 
+    /** @brief Destroy the crypto context and release OpenSSL state. */
     ~CryptoContext() = default;
 
     // Non-copyable, movable
@@ -265,13 +265,14 @@ class CryptoContext
     [[nodiscard]] std::optional<std::uint32_t> AllocateOutboundPacketId() noexcept;
 
     /**
-     * @brief Record AES-GCM usage after a successful outbound encrypt.
+     * @brief Atomically reserve AES-GCM usage before an outbound encrypt.
      *
-     * @p cipher must be the algorithm used for the encrypt (snapshot/slot cipher on
-     * split datapath threads; @c primary_encrypt_.cipher_algorithm on same-thread
-     * paths).  No-op for ChaCha20-Poly1305.  May set rekey-request or block.
+     * @return false if the hard budget would be exceeded (fail closed — do not
+     *         encrypt). Soft reneg threshold may set the rekey-request flag on
+     *         success. No-op success for ChaCha20-Poly1305.
      */
-    void RecordOutboundEncrypt(std::size_t plaintext_len, CipherAlgorithm cipher) noexcept;
+    [[nodiscard]] bool TryReserveOutboundEncrypt(std::size_t plaintext_len,
+                                                 CipherAlgorithm cipher) noexcept;
 
     /** @brief Consume a pending limit-driven rekey request (returns true once). */
     [[nodiscard]] bool TakeRekeyRequest() noexcept;
@@ -320,8 +321,8 @@ class CryptoContext
      * @brief Encrypt in-place using a pre-allocated packet ID.
      *
      * Same wire layout as EncryptPacketInPlace() but does not claim a packet
-     * ID or record AEAD usage — callers must use AllocateOutboundPacketId()
-     * and RecordOutboundEncrypt(len, cipher) when appropriate.
+     * ID — callers must use AllocateOutboundPacketId() first. AEAD usage is
+     * reserved inside this call (fail closed before encrypt).
      */
     [[nodiscard]] std::size_t EncryptPacketInPlaceWithId(std::span<std::uint8_t> buf,
                                                          std::size_t payload_len,

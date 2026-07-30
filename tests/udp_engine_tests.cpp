@@ -1186,7 +1186,7 @@ TEST(RxDecryptState, DecryptPacketInPlace_AuthFailureReturnsEmpty)
 
 TEST(RxDecryptState, DecryptPacketInPlace_TooOldPacketIdReturnsEmpty)
 {
-    // kBits = 32*64 = 2048. Advance highest to 2049, then pkt_id=1 → diff=2048 → TooOld
+    // Advance past the replay window so pkt_id=1 is TooOld (diff >= kBits).
     RxDecryptState rx;
     rx.ApplySnapshot(MakeRxSnapshot(1));
 
@@ -1194,6 +1194,7 @@ TEST(RxDecryptState, DecryptPacketInPlace_TooOldPacketIdReturnsEmpty)
     tx.ApplySnapshot(MakeTestKey(), 1);
     SessionId session{0x1};
     constexpr std::size_t pt_len = 16;
+    const std::uint32_t high = static_cast<std::uint32_t>(1 + openvpn::ReplayWindow::kBits);
 
     auto tryDecrypt = [&](uint32_t pkt_id) -> bool
     {
@@ -1205,9 +1206,9 @@ TEST(RxDecryptState, DecryptPacketInPlace_TooOldPacketIdReturnsEmpty)
     };
 
     ASSERT_TRUE(tryDecrypt(1));    // accepted → highest=1
-    ASSERT_TRUE(tryDecrypt(2049)); // accepted → highest=2049
+    ASSERT_TRUE(tryDecrypt(high)); // accepted → highest = 1 + kBits
 
-    // pkt_id=1: diff = 2049-1 = 2048 ≥ kBits(2048) → TooOld
+    // pkt_id=1: diff == kBits → TooOld
     EXPECT_FALSE(tryDecrypt(1));
 }
 

@@ -128,6 +128,7 @@ class TlsCryptV2
      */
     static std::optional<TlsCryptV2> FromKeyData(std::span<const std::uint8_t> key_data, spdlog::logger &logger);
 
+    /** @brief Destroy the tls-crypt-v2 context. */
     ~TlsCryptV2();
 
     // Non-copyable
@@ -135,7 +136,9 @@ class TlsCryptV2
     TlsCryptV2 &operator=(const TlsCryptV2 &) = delete;
 
     // Movable
+    /** @brief Move-construct a tls-crypt-v2 context. */
     TlsCryptV2(TlsCryptV2 &&) noexcept;
+    /** @brief Move-assign a tls-crypt-v2 context. */
     TlsCryptV2 &operator=(TlsCryptV2 &&) noexcept;
 
     // ── WKc Operations ──────────────────────────────────────────────────

@@ -505,13 +505,52 @@ TEST_F(ControlChannelTest, HandleSoftReset_DuplicateDuringTlsHandshakeReturnsAck
     // A soft reset arriving while already renegotiating must be treated as a
     // retransmit: channel returns an explicit ACK without changing state.
     TlsCertConfig empty_cfg;
-    auto ack = channel().HandleSoftReset(MakeSoftResetPacket(2), empty_cfg);
+    auto ack = channel().HandleSoftReset(MakeSoftResetPacket(2, hard_reset.session_id_), empty_cfg);
     EXPECT_FALSE(ack.empty());                                            // Should produce an ACK
     EXPECT_EQ(channel().GetState(), ControlChannel::State::TlsHandshake); // State unchanged
 }
 
+TEST_F(ControlChannelTest, HandleSoftReset_ForeignPeerSidRejected)
+{
+    SessionId sid = SessionId::Generate();
+    EXPECT_TRUE(channel().Initialize(PeerRole::Server, sid, std::nullopt));
+
+    OpenVpnPacket hard_reset;
+    hard_reset.opcode_ = Opcode::P_CONTROL_HARD_RESET_CLIENT_V3;
+    hard_reset.key_id_ = 0;
+    hard_reset.session_id_ = 0xAAAAAAAAAAAAAAAAULL;
+    hard_reset.packet_id_ = 1;
+    ASSERT_TRUE(channel().HandleHardReset(hard_reset));
+    ASSERT_EQ(channel().GetState(), ControlChannel::State::TlsHandshake);
+
+    TlsCertConfig empty_cfg;
+    auto before_key = channel().GetKeyId();
+    auto result = channel().HandleSoftReset(MakeSoftResetPacket(1, 0xBBBBBBBBBBBBBBBBULL), empty_cfg);
+    EXPECT_TRUE(result.empty());
+    EXPECT_EQ(channel().GetKeyId(), before_key);
+    EXPECT_EQ(channel().GetState(), ControlChannel::State::TlsHandshake);
+}
+
+TEST_F(ControlChannelTest, HandleSoftReset_MissingPeerSidRejectedWhenEstablished)
+{
+    SessionId sid = SessionId::Generate();
+    EXPECT_TRUE(channel().Initialize(PeerRole::Server, sid, std::nullopt));
+
+    OpenVpnPacket hard_reset;
+    hard_reset.opcode_ = Opcode::P_CONTROL_HARD_RESET_CLIENT_V3;
+    hard_reset.key_id_ = 0;
+    hard_reset.session_id_ = 0xCCCCCCCCCCCCCCCCULL;
+    hard_reset.packet_id_ = 1;
+    ASSERT_TRUE(channel().HandleHardReset(hard_reset));
+    ASSERT_EQ(channel().GetState(), ControlChannel::State::TlsHandshake);
+
+    TlsCertConfig empty_cfg;
+    EXPECT_TRUE(channel().HandleSoftReset(MakeSoftResetPacket(1), empty_cfg).empty());
+    EXPECT_EQ(channel().GetState(), ControlChannel::State::TlsHandshake);
+}
+
 // ============================================================================
-// Soft reset success paths via real TLS handshake (plan §4.8 RK2/RK3)
+// Soft reset success paths via real TLS handshake
 //
 // ControlChannel's OpenVPN-framed TLS pump currently truncates large handshake
 // flights (GroupTlsRecords / fragment path) — tracked separately.  EstablishPair
@@ -648,11 +687,27 @@ TEST(ControlChannelHandshakeTest, HandleSoftReset_FromKeyMaterialReady_AdvancesK
     ASSERT_TRUE(EstablishPair(pair));
 
     const auto pkt_id = pair.server->GetLastReceivedPacketId() + 1;
-    auto ack = pair.server->HandleSoftReset(MakeSoftResetPacket(pkt_id), ServerTestCertConfig());
+    auto ack = pair.server->HandleSoftReset(
+        MakeSoftResetPacket(pkt_id, pair.server->GetPeerSessionId()->value), ServerTestCertConfig());
     ASSERT_FALSE(ack.empty());
     EXPECT_EQ(pair.server->GetState(), ControlChannel::State::TlsHandshake);
     EXPECT_EQ(pair.server->GetKeyId(), 1);
     EXPECT_EQ(pair.server->GetLastReceivedPacketId(), pkt_id);
+}
+
+TEST(ControlChannelHandshakeTest, HandleSoftReset_ForeignSidDoesNotEnterRekey)
+{
+    EstablishedPair pair;
+    ASSERT_TRUE(EstablishPair(pair));
+
+    const auto key_before = pair.server->GetKeyId();
+    const auto state_before = pair.server->GetState();
+    const auto pkt_id = pair.server->GetLastReceivedPacketId() + 1;
+    auto ack = pair.server->HandleSoftReset(MakeSoftResetPacket(pkt_id, 0xDEADBEEFDEADBEEFULL),
+                                            ServerTestCertConfig());
+    EXPECT_TRUE(ack.empty());
+    EXPECT_EQ(pair.server->GetKeyId(), key_before);
+    EXPECT_EQ(pair.server->GetState(), state_before);
 }
 
 TEST(ControlChannelHandshakeTest, RequestSoftReset_Client_AdvancesKeyIdAndEntersTlsHandshake)
@@ -682,7 +737,8 @@ TEST(ControlChannelHandshakeTest, CrossedSoftReset_PeerResetWhileTlsHandshake_Ac
     ASSERT_EQ(pair.server->GetKeyId(), 1);
 
     const auto pkt_id = pair.server->GetLastReceivedPacketId() + 1;
-    auto ack = pair.server->HandleSoftReset(MakeSoftResetPacket(pkt_id), ServerTestCertConfig());
+    auto ack = pair.server->HandleSoftReset(
+        MakeSoftResetPacket(pkt_id, pair.server->GetPeerSessionId()->value), ServerTestCertConfig());
     ASSERT_FALSE(ack.empty());
     EXPECT_EQ(pair.server->GetState(), ControlChannel::State::TlsHandshake);
     EXPECT_EQ(pair.server->GetKeyId(), 1);
@@ -698,7 +754,8 @@ TEST(ControlChannelHandshakeTest, CrossedSoftReset_RespondToSoftResetWhileTlsHan
     ASSERT_EQ(pair.client->GetKeyId(), 1);
 
     const auto pkt_id = pair.client->GetLastReceivedPacketId() + 1;
-    auto ack = pair.client->RespondToSoftReset(MakeSoftResetPacket(pkt_id), ClientTestCertConfig());
+    auto ack = pair.client->RespondToSoftReset(
+        MakeSoftResetPacket(pkt_id, pair.client->GetPeerSessionId()->value), ClientTestCertConfig());
     ASSERT_FALSE(ack.empty());
     EXPECT_EQ(pair.client->GetState(), ControlChannel::State::TlsHandshake);
     EXPECT_EQ(pair.client->GetKeyId(), 1);

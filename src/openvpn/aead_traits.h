@@ -25,6 +25,11 @@ namespace clv::vpn::openvpn {
     }
 }
 
+/**
+ * @brief Whether @p algo is a supported data-channel AEAD cipher.
+ * @param algo Cipher algorithm to test
+ * @return true when GetAeadTraits returns non-null
+ */
 [[nodiscard]] inline bool IsSupportedAead(CipherAlgorithm algo) noexcept
 {
     return GetAeadTraits(algo) != nullptr;

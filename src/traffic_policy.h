@@ -11,12 +11,14 @@
 
 namespace clv::vpn {
 
+/** @brief IPv4 or IPv6 tunnel address pool for hub policy. */
 struct TunnelPool
 {
-    std::string cidr;
-    std::string bridge_ip;
+    std::string cidr;      ///< Pool CIDR (e.g. "10.8.0.0/24")
+    std::string bridge_ip; ///< Server/gateway address within the pool
 };
 
+/** @brief Specification for registering a hub TUN attachment with TunnelZone. */
 struct HubAttachmentSpec
 {
     std::string data_dev;
@@ -26,11 +28,17 @@ struct HubAttachmentSpec
     bool masquerade = false;
 };
 
+/** @brief Process-wide traffic policy applied by TunnelZone. */
 struct ZonePolicy
 {
-    bool ip_forward = false;
+    bool ip_forward = false; ///< Enable IPv4/IPv6 forwarding when true
 };
 
+/**
+ * @brief Build zone policy from VpnConfig process settings.
+ * @param config Full VPN configuration
+ * @return ZonePolicy with ip_forward from explicit setting or server default
+ */
 inline ZonePolicy BuildZonePolicy(const VpnConfig &config)
 {
     ZonePolicy policy;
@@ -41,6 +49,12 @@ inline ZonePolicy BuildZonePolicy(const VpnConfig &config)
     return policy;
 }
 
+/**
+ * @brief Build a hub attachment spec from server config and netdev name.
+ * @param srv Server configuration (network pools, C2C, masquerade)
+ * @param data_dev Hub TUN or DCO device name
+ * @return HubAttachmentSpec ready for TunnelZone::RegisterHubAttachment
+ */
 inline HubAttachmentSpec BuildHubAttachmentSpec(const VpnConfig::ServerConfig &srv,
                                                 std::string data_dev)
 {

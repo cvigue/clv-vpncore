@@ -12,6 +12,8 @@
  * trivially inlineable.
  */
 
+#include "openvpn/crypto_context.h"
+#include "openvpn/packet.h"
 #include "udp_engine_types.h"
 #include "transport/transport.h"
 #include "transport/udp_batch.h"
@@ -32,8 +34,17 @@ class logger;
 
 namespace clv::vpn {
 
+/**
+ * @brief Single-peer dispatch policy for client UdpCore.
+ *
+ * Owns per-peer RX/TX crypto state; see method docs for hot-path hooks.
+ */
 struct P2PPolicy
 {
+    /**
+     * @brief Construct a single-peer dispatch policy.
+     * @param log Logger for decrypt error reporting
+     */
     explicit P2PPolicy(spdlog::logger &log) noexcept
         : rx_decrypt(log),
           logger_(&log)
@@ -80,6 +91,11 @@ struct P2PPolicy
   public:
     // ---- RX hooks ----
 
+    /**
+     * @brief Decrypt an inbound datagram in place.
+     * @param slot Received buffer and length
+     * @return Decrypted payload span, or empty on failure
+     */
     std::span<std::uint8_t> DecryptInPlace(transport::IncomingSlot &slot)
     {
         // Acquire-load pairs with the release-store in ApplyDecryptSnapshot.
@@ -94,22 +110,39 @@ struct P2PPolicy
             std::span<std::uint8_t>(slot.buf, slot.len));
     }
 
+    /** @brief Post-RX-batch hook (no-op for single-peer client). */
     void OnPostRecvBatch(std::size_t /*count*/)
     {
     }
 
     // ---- TX hooks ----
 
+    /**
+     * @brief Whether the TX loop has a valid peer and socket.
+     * @return true when tx_snapshot is ready
+     */
     bool TxReady() const noexcept
     {
         return tx_snapshot.valid && tx_snapshot.socket_fd >= 0;
     }
 
+    /**
+     * @brief Socket file descriptor for outbound datagrams.
+     * @return FD from SetPeer, or -1 if unset
+     */
     int TxSocketFd() const noexcept
     {
         return tx_snapshot.socket_fd;
     }
 
+    /**
+     * @brief Encrypt a TUN payload for transmission to the peer.
+     * @param slot_span Writable buffer containing plaintext at the data offset
+     * @param payload_len Plaintext length
+     * @param out Filled send entry (data span and destination)
+     * @param out_conn Always set to nullptr (single-peer mode)
+     * @return Wire length on success, 0 on failure
+     */
     std::size_t EncryptSlot(std::span<std::uint8_t> slot_span,
                             std::size_t payload_len,
                             transport::SendEntry &out,
@@ -130,13 +163,13 @@ struct P2PPolicy
         if (!packet_id)
             return 0;
 
+        if (!outbound_limits_crypto_->TryReserveOutboundEncrypt(payload_len, slot.key.cipher_algorithm))
+            return 0;
+
         auto wire_len = tx_encrypt.EncryptInPlace(
             slot_span, payload_len, tx_snapshot.session_id, *packet_id);
         if (wire_len == 0)
             return 0;
-
-        if (outbound_limits_crypto_)
-            outbound_limits_crypto_->RecordOutboundEncrypt(payload_len, slot.key.cipher_algorithm);
 
         out.data = slot_span.first(wire_len);
         out.dest = tx_snapshot.peer;
@@ -144,6 +177,10 @@ struct P2PPolicy
         return wire_len;
     }
 
+    /**
+     * @brief Record outbound activity for keepalive idle detection.
+     * @param sent Number of datagrams sent in the batch
+     */
     void OnBatchSent(std::size_t sent) noexcept
     {
         if (sent > 0 && tx_ns_out_)
@@ -152,16 +189,25 @@ struct P2PPolicy
                 std::memory_order_relaxed);
     }
 
+    /**
+     * @brief Register the atomic timestamp updated on each TX batch.
+     * @param p Steady-clock nanoseconds since epoch, or nullptr to disable
+     */
     void SetTxNsOutput(std::atomic<std::int64_t> *p) noexcept
     {
         tx_ns_out_ = p;
     }
 
+    /**
+     * @brief Bind outbound packet-id allocation and encrypt limits.
+     * @param crypto Control-plane CryptoContext, or nullptr to disable TX
+     */
     void SetOutboundLimitsCryptoContext(openvpn::CryptoContext *crypto) noexcept
     {
         outbound_limits_crypto_ = crypto;
     }
 
+    /** @brief CryptoContext used for outbound limits, if set. */
     [[nodiscard]] openvpn::CryptoContext *OutboundLimitsCryptoContext() const noexcept
     {
         return outbound_limits_crypto_;
@@ -169,6 +215,10 @@ struct P2PPolicy
 
     // ---- Key / peer management (called from control plane) ----
 
+    /**
+     * @brief Install a new RX decrypt key via double-buffered handoff.
+     * @param snap Decrypt key snapshot from the control plane
+     */
     void ApplyDecryptSnapshot(const RxDecryptSnapshot &snap)
     {
         // Write to the *inactive* slot, then atomically flip the active index.
@@ -179,6 +229,11 @@ struct P2PPolicy
         active_rx_slot_.store(inactive, std::memory_order_release);
     }
 
+    /**
+     * @brief Install a new TX encrypt key via double-buffered handoff.
+     * @param key Encryption key material
+     * @param key_id OpenVPN key slot identifier
+     */
     void ApplyEncryptKey(const openvpn::EncryptionKey &key, std::uint8_t key_id)
     {
         // Write to the *inactive* slot, then atomically flip the active index.
@@ -193,6 +248,12 @@ struct P2PPolicy
         tx_snapshot.valid = tx_snapshot.socket_fd >= 0;
     }
 
+    /**
+     * @brief Configure the single peer endpoint and session for TX.
+     * @param peer Remote UDP endpoint
+     * @param session_id Local session identifier
+     * @param socket_fd Outbound socket file descriptor
+     */
     void SetPeer(transport::PeerEndpoint peer,
                  openvpn::SessionId session_id,
                  int socket_fd)
@@ -203,19 +264,24 @@ struct P2PPolicy
         tx_snapshot.valid = socket_fd >= 0;
     }
 
+    /** @brief TX thread startup hook (no-op). */
     void OnTxStart()
     {
     }
+    /** @brief TX thread shutdown hook (no-op). */
     void OnTxStop()
     {
     }
+    /** @brief RX thread startup hook (no-op). */
     void OnRxStart()
     {
     }
+    /** @brief RX thread shutdown hook (no-op). */
     void OnRxStop()
     {
     }
 
+    /** @brief Reset all crypto state and peer snapshot. */
     void Reset()
     {
         rx_decrypt = RxDecryptState{*logger_};

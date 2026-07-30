@@ -359,8 +359,20 @@ struct SessionId
 {
     std::uint64_t value;
 
+    /** @brief Generate a cryptographically random session identifier. */
     static SessionId Generate();
+
+    /**
+     * @brief Decode a session ID from wire bytes (big-endian).
+     * @param data At least 8 bytes of network-order data
+     * @return Decoded session ID
+     */
     static SessionId FromBytes(std::span<const std::uint8_t> data);
+
+    /**
+     * @brief Encode the session ID to wire bytes (big-endian).
+     * @return 8-byte network-order representation
+     */
     std::vector<std::uint8_t> ToBytes() const;
 };
 
@@ -368,15 +380,18 @@ struct SessionId
 
 // Add formatter for SessionId to spdlog
 namespace fmt {
+/** @brief fmt formatter for OpenVPN SessionId (prints as hex). */
 template <>
 struct formatter<clv::vpn::openvpn::SessionId>
 {
+    /** @brief Parse format spec (no options). */
     template <typename ParseContext>
     constexpr auto parse(ParseContext &ctx)
     {
         return ctx.begin();
     }
 
+    /** @brief Format the session ID as a hex string. */
     template <typename FormatContext>
     auto format(const clv::vpn::openvpn::SessionId &id, FormatContext &ctx) const
     {

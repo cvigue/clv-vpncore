@@ -3,6 +3,15 @@
 #ifndef CLV_VPN_OPENVPN_DATA_V2_DECRYPT_H
 #define CLV_VPN_OPENVPN_DATA_V2_DECRYPT_H
 
+/**
+ * @file data_v2_decrypt.h
+ * @brief Shared in-place P_DATA_V2 AEAD decrypt helper.
+ *
+ * Selects primary/lame-duck decrypt slots by key_id, runs anti-replay, and
+ * authenticates the legacy §7.4 header as AAD. Used by CryptoContext and
+ * hot-path decrypt state.
+ */
+
 #include "HelpSslException.h"
 #include "openvpn/aead_traits.h"
 #include "openvpn/crypto_context.h"
@@ -22,12 +31,18 @@
 
 namespace clv::vpn::openvpn {
 
+/**
+ * @brief Primary and lame-duck decrypt key slots for key_id lookup.
+ */
 struct DataV2DecryptSlots
 {
-    DecryptKeySlot *primary = nullptr;
-    DecryptKeySlot *lame_duck = nullptr;
+    DecryptKeySlot *primary = nullptr;   ///< Active decrypt key
+    DecryptKeySlot *lame_duck = nullptr; ///< Previous key during rekey window
 };
 
+/**
+ * @brief Optional logging / rate-limit hooks for DecryptDataV2InPlace.
+ */
 struct DataV2DecryptLog
 {
     spdlog::logger *logger = nullptr;
@@ -42,6 +57,12 @@ struct DataV2DecryptLog
     bool log_unsupported_cipher = true;
 };
 
+/**
+ * @brief Find the decrypt slot matching @p key_id.
+ * @param slots Primary and lame-duck slots
+ * @param key_id Key identifier from the packet header
+ * @return Matching slot, or nullptr if none
+ */
 [[nodiscard]] inline DecryptKeySlot *FindDecryptSlotByKeyId(DataV2DecryptSlots slots, std::uint8_t key_id) noexcept
 {
     if (slots.primary && slots.primary->key.is_valid && slots.primary->key.key_id == key_id)
@@ -51,6 +72,17 @@ struct DataV2DecryptLog
     return nullptr;
 }
 
+/**
+ * @brief Decrypt a P_DATA_V2 AEAD frame in place.
+ *
+ * Validates opcode, selects the key slot, checks anti-replay, authenticates
+ * the header as AAD, and writes plaintext over the ciphertext region.
+ *
+ * @param slots Primary / lame-duck decrypt slots
+ * @param buf Mutable wire buffer (header + ciphertext + tag)
+ * @param log Optional logging / counter hooks
+ * @return Plaintext span within @p buf, or empty on failure
+ */
 [[nodiscard]] inline std::span<std::uint8_t> DecryptDataV2InPlace(DataV2DecryptSlots slots,
                                                                   std::span<std::uint8_t> buf,
                                                                   DataV2DecryptLog log)

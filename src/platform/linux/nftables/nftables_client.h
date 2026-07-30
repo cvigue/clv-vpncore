@@ -6,36 +6,24 @@
 #include <util/netlink_helper.h>
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace clv::vpn {
 
 /**
- * @brief Netlink-based nftables client for adding/removing NAT rules.
+ * @brief Netlink-based nftables client for adding/removing NAT / filter rules.
  *
  * Communicates directly with the kernel's nf_tables subsystem via
  * @c NETLINK_NETFILTER — no shelling out to @c iptables / @c nft.
  *
- * Typical usage (MASQUERADE for a VPN subnet):
- * @code
- *   NfTablesClient nft;
- *   nft.Open();
- *   nft.EnsureMasquerade(NfTablesClient::kIPv4, addr, 24); // creates table + chain + rule
- *   // ... later ...
- *   nft.RemoveMasquerade(NfTablesClient::kIPv4);           // deletes the whole table
- * @endcode
- *
- * The client manages a dedicated nftables table (@c clv_vpn_nat) so it
- * never collides with user-managed rulesets.
+ * Tables are keyed by hub @p ifname so multiple TunnelZone hub attachments
+ * do not clobber each other (e.g. @c clv_vpn_nat_tun0, @c clv_vpn_filter_tun1).
  *
  * @note Requires @c CAP_NET_ADMIN.
  *
  * @par Threading
  * Not thread-safe. Intended for single-threaded VPN lifecycle use.
- *
- * @par Testing
- * Requires root and a kernel with nf_tables support. Exercised through
- * integration tests that run the full VPN server lifecycle.
  */
 class NfTablesClient
 {
@@ -44,14 +32,26 @@ class NfTablesClient
     static constexpr std::uint8_t kIPv4 = 2;  // NFPROTO_IPV4
     static constexpr std::uint8_t kIPv6 = 10; // NFPROTO_IPV6
 
+    /** @brief Default-construct an unopened nftables client. */
     NfTablesClient() = default;
+    /** @brief Close the netlink socket if open. */
     ~NfTablesClient();
 
-    // Non-copyable, movable
     NfTablesClient(const NfTablesClient &) = delete;
     NfTablesClient &operator=(const NfTablesClient &) = delete;
+    /** @brief Move-construct an nftables client. */
     NfTablesClient(NfTablesClient &&) noexcept = default;
+    /** @brief Move-assign an nftables client. */
     NfTablesClient &operator=(NfTablesClient &&) noexcept = default;
+
+    /**
+     * @brief Build the nft table name for a hub attachment.
+     *
+     * Sanitizes @p ifname to `[A-Za-z0-9_]`; used by unit tests and Ensure*.
+     */
+    [[nodiscard]] static std::string TableName(std::uint8_t family,
+                                               bool filter,
+                                               const char *ifname);
 
     /**
      * @brief Open the netlink socket.
@@ -60,59 +60,39 @@ class NfTablesClient
     void Open();
 
     /**
-     * @brief Ensure a MASQUERADE rule exists for the given source subnet.
+     * @brief Ensure a MASQUERADE rule for @p ifname's dedicated NAT table.
      *
-     * Creates (or re-creates) a dedicated nftables table containing a
-     * @c postrouting chain with a rule that masquerades traffic from
-     * @p source_network / @p prefix_len whose destination is NOT the
-     * same subnet.
-     *
-     * @param family         kIPv4 or kIPv6
-     * @param source_network Network address in network byte order
-     *                       (4 bytes for IPv4, 16 bytes for IPv6)
-     * @param prefix_len     CIDR prefix length
-     * @return true if the batch transaction succeeded
+     * Creates (or re-creates) @c clv_vpn_nat[_6]_<ifname> with a postrouting
+     * chain that masquerades traffic from @p source_network / @p prefix_len
+     * whose destination is NOT the same subnet.
      */
-    bool EnsureMasquerade(std::uint8_t family, const std::uint8_t *source_network,
+    bool EnsureMasquerade(std::uint8_t family,
+                          const char *ifname,
+                          const std::uint8_t *source_network,
                           std::uint8_t prefix_len);
 
-    /**
-     * @brief Remove the masquerade table (and all its chains/rules) for the given family.
-     * @param family  kIPv4 or kIPv6
-     * @return true if the delete transaction succeeded
-     */
-    bool RemoveMasquerade(std::uint8_t family);
+    /** Remove the masquerade table for @p ifname / @p family. */
+    bool RemoveMasquerade(std::uint8_t family, const char *ifname);
 
-    /**
-     * @brief Check if the masquerade table for the given family exists.
-     * @param family  kIPv4 or kIPv6
-     * @return true if the table exists in the kernel
-     */
-    bool TableExists(std::uint8_t family);
+    /** True if the NAT table for @p ifname / @p family exists. */
+    bool TableExists(std::uint8_t family, const char *ifname);
 
     /**
      * @brief Ensure a forward-hook DROP rule for intra-pool traffic on @p ifname.
      *
-     * Drops packets ingressing @p ifname whose source and destination both lie
-     * in @p pool_network / @p prefix_len, except when either endpoint is
-     * @p bridge_ip.
-     *
-     * @note One table per family; recreates the table if it already exists.
-     *       Sufficient for one hub per process — not multi-attachment safe yet.
+     * Owns @c clv_vpn_filter[_6]_<ifname> only — other hubs' tables are untouched.
      */
-    bool EnsureIntraPoolDrop(std::uint8_t family, const char *ifname,
-                             const std::uint8_t *pool_network, std::uint8_t prefix_len,
+    bool EnsureIntraPoolDrop(std::uint8_t family,
+                             const char *ifname,
+                             const std::uint8_t *pool_network,
+                             std::uint8_t prefix_len,
                              const std::uint8_t *bridge_ip);
 
-    /**
-     * @brief Remove the filter table (and all chains/rules) for the given family.
-     */
-    bool RemoveIntraPoolDrop(std::uint8_t family);
+    /** Remove the filter table for @p ifname / @p family. */
+    bool RemoveIntraPoolDrop(std::uint8_t family, const char *ifname);
 
-    /**
-     * @brief Check if the intra-pool filter table for the given family exists.
-     */
-    bool FilterTableExists(std::uint8_t family);
+    /** True if the filter table for @p ifname / @p family exists. */
+    bool FilterTableExists(std::uint8_t family, const char *ifname);
 
   private:
     enum class NftTableRole
@@ -123,27 +103,24 @@ class NfTablesClient
 
     struct NftTableDescriptor
     {
-        const char *table_name;
+        std::string table_name;
         std::uint32_t addr_size;
         std::uint32_t saddr_offset;
         std::uint32_t daddr_offset;
     };
 
-    static NftTableDescriptor Descriptor(std::uint8_t family, NftTableRole role);
-    bool TableExists(std::uint8_t family, NftTableRole role);
-    bool DeleteTable(std::uint8_t family, NftTableRole role);
+    static NftTableDescriptor Descriptor(std::uint8_t family,
+                                         NftTableRole role,
+                                         const char *ifname);
+    bool TableExists(std::uint8_t family, NftTableRole role, const char *ifname);
+    bool DeleteTable(std::uint8_t family, NftTableRole role, const char *ifname);
 
     static constexpr const char *CHAIN_NAME = "postrouting";
     static constexpr const char *FILTER_CHAIN_NAME = "forward";
 
-    /**
-     * @brief Send an nftables batch message (begin + payload messages + end).
-     * @param batch  Pre-built batch buffer (including BATCH_BEGIN and BATCH_END framing)
-     * @return true if the kernel responded without error
-     */
     bool SendBatch(const std::vector<std::uint8_t> &batch);
 
-    clv::netlink::NetlinkHelper nlh_; ///< Underlying netlink socket
+    clv::netlink::NetlinkHelper nlh_;
 };
 
 } // namespace clv::vpn

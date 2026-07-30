@@ -39,6 +39,11 @@ constexpr std::uint64_t kLegacyAeadUsageLimit = (1ULL << 36);
 /** Peer-review decision: trigger TLS soft reset at 80% of the GCM budget. */
 constexpr std::uint64_t kLegacyAeadUsageRenegThreshold = (kLegacyAeadUsageLimit * 80) / 100;
 
+/**
+ * @brief Whether @p algo is subject to the legacy AES-GCM usage budget.
+ * @param algo Cipher algorithm to test
+ * @return true for AES-128/256-GCM; false for ChaCha20-Poly1305 and others
+ */
 [[nodiscard]] inline constexpr bool IsLegacyAeadUsageLimited(CipherAlgorithm algo) noexcept
 {
     switch (algo)
@@ -65,18 +70,36 @@ constexpr std::uint64_t kLegacyAeadUsageRenegThreshold = (kLegacyAeadUsageLimit 
            + LegacyAeadPlaintextBlocks(kLegacyDataV2TagBytes);
 }
 
+/**
+ * @brief Combined usage metric q + s.
+ * @param invocations AEAD encrypt count (q)
+ * @param blocks Cipher-block count (s)
+ * @return invocations + blocks
+ */
 [[nodiscard]] inline constexpr std::uint64_t LegacyAeadTotalUsage(std::uint64_t invocations,
                                                                   std::uint64_t blocks) noexcept
 {
     return invocations + blocks;
 }
 
+/**
+ * @brief Whether usage has reached the soft-reset renegotiation threshold.
+ * @param invocations AEAD encrypt count (q)
+ * @param blocks Cipher-block count (s)
+ * @return true when q + s >= 80% of 2^36
+ */
 [[nodiscard]] inline constexpr bool LegacyAeadNeedsReneg(std::uint64_t invocations,
                                                          std::uint64_t blocks) noexcept
 {
     return LegacyAeadTotalUsage(invocations, blocks) >= kLegacyAeadUsageRenegThreshold;
 }
 
+/**
+ * @brief Whether usage has reached the hard encrypt block limit.
+ * @param invocations AEAD encrypt count (q)
+ * @param blocks Cipher-block count (s)
+ * @return true when q + s >= 2^36
+ */
 [[nodiscard]] inline constexpr bool LegacyAeadIsBlocked(std::uint64_t invocations,
                                                         std::uint64_t blocks) noexcept
 {
@@ -86,24 +109,28 @@ constexpr std::uint64_t kLegacyAeadUsageRenegThreshold = (kLegacyAeadUsageLimit 
 /** Accumulated q + s counters for one active encrypt key. */
 struct LegacyAeadUsage
 {
-    std::uint64_t invocations = 0;
-    std::uint64_t blocks = 0;
+    std::uint64_t invocations = 0; ///< AEAD encrypt count (q)
+    std::uint64_t blocks = 0;      ///< Cipher-block count (s)
 
+    /** @brief Combined usage q + s. */
     [[nodiscard]] std::uint64_t Total() const noexcept
     {
         return LegacyAeadTotalUsage(invocations, blocks);
     }
 
+    /** @brief Whether soft-reset renegotiation should be triggered. */
     [[nodiscard]] bool NeedsReneg() const noexcept
     {
         return LegacyAeadNeedsReneg(invocations, blocks);
     }
 
+    /** @brief Whether further encrypts must be refused. */
     [[nodiscard]] bool IsBlocked() const noexcept
     {
         return LegacyAeadIsBlocked(invocations, blocks);
     }
 
+    /** @brief Clear counters (e.g. after key install). */
     void Reset() noexcept
     {
         invocations = 0;
@@ -117,12 +144,18 @@ struct LegacyAeadUsageDelta
     std::uint64_t invocations = 0;
     std::uint64_t blocks = 0;
 
+    /** @brief Combined delta q + s. */
     [[nodiscard]] std::uint64_t Total() const noexcept
     {
         return invocations + blocks;
     }
 };
 
+/**
+ * @brief Compute the usage delta charged for one encrypt of @p plaintext_len bytes.
+ * @param plaintext_len Plaintext size in bytes
+ * @return Delta with invocations=1 and matching block count
+ */
 [[nodiscard]] inline constexpr LegacyAeadUsageDelta LegacyAeadUsageForEncrypt(
     std::size_t plaintext_len) noexcept
 {
@@ -144,6 +177,12 @@ struct LegacyAeadLimitFlags
     bool is_blocked = false;
 };
 
+/**
+ * @brief Derive reneg/block flags from absolute usage counters.
+ * @param invocations AEAD encrypt count (q)
+ * @param blocks Cipher-block count (s)
+ * @return Limit flags for the given usage
+ */
 [[nodiscard]] inline constexpr LegacyAeadLimitFlags LegacyAeadLimitFlagsForUsage(
     std::uint64_t invocations,
     std::uint64_t blocks) noexcept
@@ -159,28 +198,36 @@ struct LegacyAeadLimitFlags
  */
 struct LegacyAeadUsageTracker
 {
-    LegacyAeadUsage usage{};
+    LegacyAeadUsage usage{}; ///< Accumulated counters
 
+    /**
+     * @brief Record one encrypt against the tracked usage.
+     * @param plaintext_len Plaintext size in bytes
+     */
     void RecordEncrypt(std::size_t plaintext_len) noexcept
     {
         LegacyAeadApplyEncrypt(usage, plaintext_len);
     }
 
+    /** @brief Combined usage q + s. */
     [[nodiscard]] std::uint64_t TotalUsage() const noexcept
     {
         return usage.Total();
     }
 
+    /** @brief Whether soft-reset renegotiation should be triggered. */
     [[nodiscard]] bool NeedsReneg() const noexcept
     {
         return usage.NeedsReneg();
     }
 
+    /** @brief Whether further encrypts must be refused. */
     [[nodiscard]] bool IsBlocked() const noexcept
     {
         return usage.IsBlocked();
     }
 
+    /** @brief Clear accumulated counters. */
     void Reset() noexcept
     {
         usage.Reset();

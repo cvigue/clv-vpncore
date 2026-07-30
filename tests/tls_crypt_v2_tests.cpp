@@ -2,13 +2,13 @@
 
 #include "openvpn/tls_crypt_v2.h"
 #include "openvpn/tls_crypt.h"
+#include "test_log_util.h"
 
 #include <openssl/pem.h>
 #include <openssl/rand.h>
 
 #include <gtest/gtest.h>
-#include <spdlog/sinks/null_sink.h>
-#include <spdlog/spdlog.h>
+#include <spdlog/logger.h>
 #include <util/byte_packer.h>
 
 #include <algorithm>
@@ -34,8 +34,7 @@ class TlsCryptV2Test : public ::testing::Test
   protected:
     void SetUp() override
     {
-        auto null_sink = std::make_shared<spdlog::sinks::null_sink_mt>();
-        logger_ = std::make_shared<spdlog::logger>("test_tls_crypt_v2", null_sink);
+        logger_ = &clv::vpn::test::NullLogger();
 
         const auto *info = ::testing::UnitTest::GetInstance()->current_test_info();
         temp_dir_ = fs::path(TEST_TMP_DIR) / (std::string("tlscryptv2_") + info->name());
@@ -95,7 +94,7 @@ class TlsCryptV2Test : public ::testing::Test
         return meta;
     }
 
-    std::shared_ptr<spdlog::logger> logger_;
+    spdlog::logger *logger_{nullptr};
     fs::path temp_dir_;
 };
 

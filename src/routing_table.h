@@ -23,32 +23,60 @@ namespace ipv6 = clv::net::ipv6;
 // Address-family traits — provide NormalizeNetwork, Matches, and MaxPrefix
 // ---------------------------------------------------------------------------
 
+/** @brief IPv4 address-family traits for RoutingTable. */
 struct Ipv4RoutingTraits
 {
     using Address = std::uint32_t;
     static constexpr std::uint8_t kMaxPrefix = 32;
 
+    /**
+     * @brief Mask an IPv4 address to its network prefix.
+     * @param addr Host-byte-order IPv4 address
+     * @param prefix Prefix length (0–32)
+     * @return Network address with host bits cleared
+     */
     static Address Normalize(const Address &addr, std::uint8_t prefix)
     {
         return ipv4::NormalizeNetwork(addr, prefix);
     }
 
+    /**
+     * @brief Test whether an address falls within a prefix.
+     * @param addr Host-byte-order destination
+     * @param network Network address (already normalized)
+     * @param prefix Prefix length
+     * @return true if addr matches network/prefix
+     */
     static bool Matches(const Address &addr, const Address &network, std::uint8_t prefix)
     {
         return ipv4::IpMatchesNetwork(addr, network, prefix);
     }
 };
 
+/** @brief IPv6 address-family traits for RoutingTable. */
 struct Ipv6RoutingTraits
 {
     using Address = ipv6::Ipv6Address;
     static constexpr std::uint8_t kMaxPrefix = 128;
 
+    /**
+     * @brief Mask an IPv6 address to its network prefix.
+     * @param addr 128-bit address
+     * @param prefix Prefix length (0–128)
+     * @return Network address with host bits cleared
+     */
     static Address Normalize(const Address &addr, std::uint8_t prefix)
     {
         return ipv6::NormalizeNetwork(addr, prefix);
     }
 
+    /**
+     * @brief Test whether an address falls within a prefix.
+     * @param addr Destination address
+     * @param network Network address (already normalized)
+     * @param prefix Prefix length
+     * @return true if addr matches network/prefix
+     */
     static bool Matches(const Address &addr, const Address &network, std::uint8_t prefix)
     {
         return ipv6::Ipv6MatchesPrefix(addr, network, prefix);
@@ -61,6 +89,11 @@ struct Ipv6RoutingTraits
 
 struct Ipv6AddressHash
 {
+    /**
+     * @brief Hash an IPv6 address for unordered_map storage.
+     * @param addr 128-bit address
+     * @return Combined hash of both 64-bit halves
+     */
     std::size_t operator()(const ipv6::Ipv6Address &addr) const noexcept
     {
         std::uint64_t lo, hi;
@@ -75,6 +108,7 @@ struct Ipv6AddressHash
 
 struct Ipv6AddressEqual
 {
+    /** @brief Byte-wise equality for IPv6 addresses. */
     bool operator()(const ipv6::Ipv6Address &a, const ipv6::Ipv6Address &b) const noexcept
     {
         return a == b;
@@ -109,19 +143,31 @@ struct AddressMapTraits<ipv6::Ipv6Address>
 // collapses to a single O(1) hash probe.
 // ---------------------------------------------------------------------------
 
+/**
+ * @brief Longest-prefix-match routing table.
+ * @tparam Traits Address-family traits (Ipv4RoutingTraits or Ipv6RoutingTraits)
+ */
 template <typename Traits>
 class RoutingTable
 {
   public:
     using Address = typename Traits::Address;
 
+    /** @brief A stored prefix route bound to a session. */
     struct Route
     {
-        Address network;
-        std::uint8_t prefix_length;
-        std::uint64_t session_id;
+        Address network;            ///< Network address (normalized)
+        std::uint8_t prefix_length; ///< Prefix length
+        std::uint64_t session_id;   ///< Owning session
     };
 
+    /**
+     * @brief Insert or replace a route.
+     * @param network Network address (normalized by this call)
+     * @param prefix_length Prefix length (must be <= Traits::kMaxPrefix)
+     * @param session_id Session that owns this prefix
+     * @return false if prefix_length is out of range
+     */
     bool AddRoute(const Address &network, std::uint8_t prefix_length, std::uint64_t session_id)
     {
         if (prefix_length > Traits::kMaxPrefix)
@@ -132,6 +178,12 @@ class RoutingTable
         return true;
     }
 
+    /**
+     * @brief Remove a specific prefix route.
+     * @param network Network address (normalized by this call)
+     * @param prefix_length Prefix length
+     * @return true if a route was removed
+     */
     bool RemoveRoute(const Address &network, std::uint8_t prefix_length)
     {
         if (prefix_length > Traits::kMaxPrefix)
@@ -141,6 +193,11 @@ class RoutingTable
         return levels_[prefix_length].erase(normalized) > 0;
     }
 
+    /**
+     * @brief Longest-prefix-match lookup for a destination.
+     * @param dest Destination address
+     * @return Session ID of the best matching route, or nullopt
+     */
     std::optional<std::uint64_t> Lookup(const Address &dest) const
     {
         for (int p = Traits::kMaxPrefix; p >= 0; --p)
@@ -155,6 +212,11 @@ class RoutingTable
         return std::nullopt;
     }
 
+    /**
+     * @brief List all routes owned by a session.
+     * @param session_id Session to query
+     * @return All matching Route entries
+     */
     std::vector<Route> GetRoutesForSession(std::uint64_t session_id) const
     {
         std::vector<Route> result;
@@ -169,6 +231,11 @@ class RoutingTable
         return result;
     }
 
+    /**
+     * @brief Remove every route owned by a session.
+     * @param session_id Session whose routes should be dropped
+     * @return Number of routes removed
+     */
     std::size_t RemoveSessionRoutes(std::uint64_t session_id)
     {
         std::size_t total = 0;
@@ -182,6 +249,10 @@ class RoutingTable
         return total;
     }
 
+    /**
+     * @brief Total number of stored routes across all prefix lengths.
+     * @return Route count
+     */
     std::size_t GetRouteCount() const
     {
         std::size_t total = 0;
@@ -190,6 +261,7 @@ class RoutingTable
         return total;
     }
 
+    /** @brief Remove all routes from the table. */
     void Clear()
     {
         for (auto &level : levels_)

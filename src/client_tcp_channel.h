@@ -26,7 +26,7 @@
 #include "openvpn/config_exchange.h"
 #include "openvpn/crypto_algorithms.h"
 #include "openvpn/crypto_context.h"
-#include "openvpn/key_derivation.h"
+#include "openvpn/session_key_install.h"
 #include "openvpn/packet.h"
 #include "openvpn/protocol_constants.h"
 #include "openvpn/vpn_config.h"
@@ -36,7 +36,6 @@
 #include <chrono>
 #include <not_null.h>
 #include <stdexcept>
-#include <string>
 
 #include <asio/awaitable.hpp>
 #include <asio/co_spawn.hpp>
@@ -72,6 +71,14 @@ template <typename Adapter>
 class ClientTcpChannel
 {
   public:
+    /**
+     * @brief Construct the client TCP data channel.
+     * @param io_context ASIO context for coroutine loops
+     * @param logger Logger for data-path events
+     * @param config Client configuration (unused at construction)
+     * @param running Shared stop flag
+     * @param adapter Data→control adapter
+     */
     ClientTcpChannel(asio::io_context &io_context,
                      spdlog::logger &logger,
                      const VpnConfig & /*config*/,
@@ -86,6 +93,7 @@ class ClientTcpChannel
         logger_->info("Client TCP channel initialized");
     }
 
+    /** @brief Stop the data path and close the TUN device. */
     ~ClientTcpChannel()
     {
         StopDataPath();
@@ -97,6 +105,7 @@ class ClientTcpChannel
     ClientTcpChannel &operator=(ClientTcpChannel &&) = delete;
 
 
+    /** @brief Send an encrypted keepalive ping on the TCP transport. */
     asio::awaitable<void> SendKeepalivePing()
     {
         if (!tcp_)
@@ -115,11 +124,21 @@ class ClientTcpChannel
 
     // -- TCP lifecycle (called by ClientControlAdapter) ----------------------
 
+    /**
+     * @brief Bind the TCP transport for encrypt/decrypt loops.
+     * @param tcp Connected TCP transport (non-owning)
+     */
     void SetTransport(transport::TcpTransport *tcp)
     {
         tcp_ = tcp;
     }
 
+    /**
+     * @brief Install encrypt/decrypt keys on the channel CryptoContext.
+     * @param encrypt_key Outbound encryption key
+     * @param decrypt_key Inbound decryption key
+     * @param key_id OpenVPN key slot identifier
+     */
     void EngineInstallKeys(const openvpn::EncryptionKey &encrypt_key,
                            const openvpn::EncryptionKey &decrypt_key,
                            std::uint8_t key_id)
@@ -134,11 +153,13 @@ class ClientTcpChannel
         logger_->debug("TCP: Keys installed (key_id={})", key_id);
     }
 
+    /** @brief CryptoContext used for encrypt/decrypt and outbound limits. */
     openvpn::CryptoContext &GetLimitsCryptoContext()
     {
         return crypto_context_;
     }
 
+    /** @brief Start TUN↔TCP coroutine loops (requires transport, TUN, and keys). */
     asio::awaitable<void> StartDataPath()
     {
         if (!tcp_)
@@ -163,6 +184,7 @@ class ClientTcpChannel
         co_await TcpToTunLoop();
     }
 
+    /** @brief Close the TUN device; TCP close is handled by the control adapter. */
     void StopDataPath()
     {
         if (tun_device_)
@@ -173,6 +195,10 @@ class ClientTcpChannel
 
     // -- Inbound data delivery (called by ClientControlAdapter) --------------
 
+    /**
+     * @brief Write decrypted plaintext to the TUN device.
+     * @param plaintext IP packet bytes
+     */
     asio::awaitable<void> DeliverDecryptedPacket(std::vector<std::uint8_t> plaintext)
     {
         if (!tun_device_)
@@ -185,6 +211,7 @@ class ClientTcpChannel
 
     // -- Control adapter hooks (called by ClientControlAdapter) ---------------
 
+    /** @brief Extract TCP transport from a variant handle after handshake. */
     void AttachTransport(transport::TransportHandle &handle,
                          transport::PeerEndpoint /*peer*/,
                          std::uint32_t /*peer_id*/)
@@ -192,19 +219,25 @@ class ClientTcpChannel
         SetTransport(std::get_if<transport::TcpTransport>(&handle));
     }
 
+    /** @brief Derive and install data-path keys (see ClientUdpChannel). */
     void InstallDataPathKeys(const std::vector<std::uint8_t> &key_material,
                              openvpn::CipherAlgorithm cipher_algo,
                              openvpn::HmacAlgorithm hmac_algo,
                              std::uint8_t key_id,
                              openvpn::CryptoContext &crypto_context)
     {
-        if (!openvpn::KeyDerivation::InstallKeys(crypto_context, key_material, cipher_algo, hmac_algo, key_id, openvpn::PeerRole::Client))
-            throw std::runtime_error("TCP: KeyDerivation::InstallKeys failed");
+        openvpn::InstallClientCryptoKeysOrThrow(crypto_context,
+                                                key_material,
+                                                cipher_algo,
+                                                hmac_algo,
+                                                key_id,
+                                                "TCP");
         EngineInstallKeys(crypto_context.GetPrimaryEncryptKey(),
                           crypto_context.GetPrimaryDecryptKey(),
                           key_id);
     }
 
+    /** @brief Create the client TUN device from negotiated config. */
     void ConfigureNetworkInterface(const openvpn::NegotiatedConfig &negotiated,
                                    const VpnConfig &config,
                                    asio::io_context &io_ctx)
@@ -213,6 +246,7 @@ class ClientTcpChannel
         ConfigureClientTun(*tun_device_, negotiated, config.client->dev_name, *logger_);
     }
 
+    /** @brief Install routes pushed by the server onto the TUN device. */
     void InstallNegotiatedRoutes(const openvpn::NegotiatedConfig &negotiated)
     {
         if (!tun_device_)
@@ -220,12 +254,14 @@ class ClientTcpChannel
         InstallClientNegotiatedRoutes(*tun_device_, negotiated, *logger_);
     }
 
+    /** @brief Close the TUN device on session teardown. */
     void OnTeardown()
     {
         if (tun_device_)
             tun_device_->Close();
     }
 
+    /** @brief Spawn the keepalive coroutine when interval > 0. */
     template <std::invocable Fn>
     void LaunchKeepalive(asio::io_context &io_ctx, Fn &&fn, int interval)
     {
@@ -235,6 +271,7 @@ class ClientTcpChannel
 
     // -- Stats ---------------------------------------------------------------
 
+    /** @brief Data-path counter snapshot. */
     DataPathStats SnapshotStats() const
     {
         DataPathStats s{};
@@ -250,14 +287,17 @@ class ClientTcpChannel
         return s;
     }
 
+    /** @brief No-op; TCP path processes one packet at a time. */
     void SetBatchSize(std::size_t)
     { /* no-op */
     }
+    /** @brief Always 1 for the single-packet TCP path. */
     std::size_t GetBatchSize() const
     {
         return 1;
     }
 
+    /** @brief Timestamp of the last outbound TCP transmission. */
     std::chrono::steady_clock::time_point LastTxTime() const noexcept
     {
         return std::chrono::steady_clock::time_point(
@@ -291,43 +331,47 @@ class ClientTcpChannel
             if (adapter_)
                 adapter_->OnRxActivity();
 
-            auto parsed = openvpn::OpenVpnPacket::Parse(wire);
-            if (!parsed)
-                continue;
-
-            if (parsed->IsControl())
+            const auto opcode = openvpn::GetOpcode(wire[0]);
+            if (openvpn::IsDataPacket(opcode) && keys_installed_ && crypto_context_.HasValidKeys())
             {
-                if (adapter_)
-                    adapter_->OnControlPacket(std::move(wire), transport::PeerEndpoint{});
-                continue;
+                auto plaintext = crypto_context_.DecryptPacketInPlace(wire);
+                if (plaintext.empty())
+                {
+                    decrypt_failures_.fetch_add(1, std::memory_order_relaxed);
+                    continue;
+                }
+
+                packets_decrypted_.fetch_add(1, std::memory_order_relaxed);
+
+                switch (openvpn::ClassifyDecryptedPayload(plaintext))
+                {
+                case openvpn::DecryptedPayloadDisposition::Keepalive:
+                    continue;
+                case openvpn::DecryptedPayloadDisposition::Drop:
+                    continue;
+                case openvpn::DecryptedPayloadDisposition::Forward:
+                    {
+                        tun::IpPacket pkt;
+                        pkt.data.assign(plaintext.begin(), plaintext.end());
+
+                        try
+                        {
+                            co_await tun_device_->WritePacket(pkt);
+                            tun_writes_.fetch_add(1, std::memory_order_relaxed);
+                        }
+                        catch (const std::exception &e)
+                        {
+                            if (running_)
+                                logger_->error("TUN write error: {}", e.what());
+                            break;
+                        }
+                        continue;
+                    }
+                }
             }
 
-            if (!parsed->IsData())
-                continue;
-
-            auto plaintext = crypto_context_.DecryptPacket(*parsed);
-            if (plaintext.empty())
-            {
-                decrypt_failures_.fetch_add(1, std::memory_order_relaxed);
-                continue;
-            }
-
-            packets_decrypted_.fetch_add(1, std::memory_order_relaxed);
-
-            tun::IpPacket pkt;
-            pkt.data = std::move(plaintext);
-
-            try
-            {
-                co_await tun_device_->WritePacket(pkt);
-                tun_writes_.fetch_add(1, std::memory_order_relaxed);
-            }
-            catch (const std::exception &e)
-            {
-                if (running_)
-                    logger_->error("TUN write error: {}", e.what());
-                break;
-            }
+            if (adapter_)
+                adapter_->OnControlPacket(std::move(wire), transport::PeerEndpoint{});
         }
     }
 

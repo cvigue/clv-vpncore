@@ -17,6 +17,7 @@
  */
 
 #include "openvpn/crypto_context.h"
+#include "openvpn/data_v2_wire.h"
 #include "openvpn/packet.h"
 #include "routing_table.h"
 #include "udp_engine_types.h"
@@ -56,6 +57,10 @@ namespace ipv6 = clv::net::ipv6;
  */
 struct MultiPeerPolicy
 {
+    /**
+     * @brief Construct a multi-peer dispatch policy.
+     * @param log Logger for decrypt error reporting
+     */
     explicit MultiPeerPolicy(spdlog::logger &log) noexcept
         : logger_(&log)
     {
@@ -96,6 +101,7 @@ struct MultiPeerPolicy
 
     // ---- Thread lifecycle hooks ----
 
+    /** @brief Register the TX thread with QSBR on startup. */
     void OnTxStart()
     {
         if (ctx)
@@ -105,6 +111,7 @@ struct MultiPeerPolicy
         }
     }
 
+    /** @brief Unregister the TX thread from QSBR on shutdown. */
     void OnTxStop()
     {
         if (tx_registered_ && ctx)
@@ -114,6 +121,7 @@ struct MultiPeerPolicy
         }
     }
 
+    /** @brief Register the RX thread with QSBR on startup. */
     void OnRxStart()
     {
         if (ctx)
@@ -123,6 +131,7 @@ struct MultiPeerPolicy
         }
     }
 
+    /** @brief Unregister the RX thread from QSBR on shutdown. */
     void OnRxStop()
     {
         if (rx_registered_ && ctx)
@@ -171,6 +180,7 @@ struct MultiPeerPolicy
             std::span<std::uint8_t>(slot.buf, slot.len));
     }
 
+    /** @brief Post-RX-batch QSBR quiescent-state report. */
     void OnPostRecvBatch(std::size_t /*count*/)
     {
         if (ctx)
@@ -198,6 +208,10 @@ struct MultiPeerPolicy
         return true;
     }
 
+    /**
+     * @brief Socket file descriptor for outbound datagrams.
+     * @return FD set before Start, or -1 if unset
+     */
     int TxSocketFd() const noexcept
     {
         return socket_fd;
@@ -273,12 +287,13 @@ struct MultiPeerPolicy
         auto packet_id = conn->TryAllocateOutboundPacketId();
         if (!packet_id)
             return 0;
+        if (!conn->GetCryptoContext().TryReserveOutboundEncrypt(payload_len,
+                                                                entry->encrypt_key.cipher_algorithm))
+            return 0;
         auto wire_len = txs.encrypt.EncryptInPlace(
             slot_span, payload_len, session_id, *packet_id);
         if (wire_len == 0)
             return 0;
-
-        conn->GetCryptoContext().RecordOutboundEncrypt(payload_len, entry->encrypt_key.cipher_algorithm);
 
         out.data = slot_span.first(wire_len);
         out.dest = conn->GetTransport().GetPeer();
@@ -288,19 +303,20 @@ struct MultiPeerPolicy
 
     // ---- Key / peer management (no-ops: keys arrive via QSBR) ----
 
+    /** @brief No-op; RX keys arrive via QSBR session snapshots. */
     void ApplyDecryptSnapshot(const RxDecryptSnapshot & /*snap*/)
     {
     }
+    /** @brief No-op; TX keys arrive via QSBR session snapshots. */
     void ApplyEncryptKey(const openvpn::EncryptionKey & /*key*/, std::uint8_t /*key_id*/)
     {
     }
+    /** @brief No-op; peer endpoints are resolved from QSBR session index. */
     void SetPeer(transport::PeerEndpoint /*peer*/, openvpn::SessionId /*sid*/, int /*fd*/)
     {
     }
 
-    // Called by UdpCore::CoreStop() — required by the PeerPolicy contract.
-    // For MultiPeerPolicy there is no reconnect path, so this is just cleanup
-    // ahead of destruction; the maps would be destroyed anyway.
+    /** @brief Clear per-session crypto state and cached QSBR snapshots. */
     void Reset()
     {
         tx_states.clear();

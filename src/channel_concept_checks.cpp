@@ -6,6 +6,9 @@
  */
 
 #include "channel_concept.h"
+#include "server_dco_control_adapter.h"
+#include "server_tcp_control_adapter.h"
+#include "server_udp_control_adapter.h"
 #include "transport_types.h"
 
 namespace clv::vpn {

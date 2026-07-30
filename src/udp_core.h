@@ -16,6 +16,7 @@
 #include "data_path_stats.h"
 #include "openvpn/connection.h"
 #include "openvpn/crypto_context.h"
+#include "openvpn/data_v2_wire.h"
 #include "openvpn/packet.h"
 #include "openvpn/protocol_constants.h"
 #include "udp_worker_thread.h"
@@ -25,9 +26,6 @@
 #include "transport/transport.h"
 #include "transport/udp_batch.h"
 
-#include <algorithm>
-#include <exception>
-#include <memory>
 #include "platform/linux/tun/tun_device.h"
 
 #include <asio/awaitable.hpp>
@@ -44,6 +42,9 @@
 
 #include <not_null.h>
 
+#include <algorithm>
+#include <exception>
+#include <memory>
 #include <atomic>
 #include <cerrno>
 #include <cstddef>
@@ -60,10 +61,17 @@ namespace clv::vpn {
 // UdpCore<Derived, PeerPolicy>
 // ============================================================================
 
+/**
+ * @brief CRTP UDP data-channel engine (dedicated RX/TX threads).
+ *
+ * @tparam Derived Final channel type (CRTP)
+ * @tparam PeerPolicy P2PPolicy or MultiPeerPolicy dispatch hooks
+ */
 template <typename Derived, typename PeerPolicy>
 class UdpCore
 {
   public:
+    /** @brief Batch, affinity, and drain tuning for RX/TX worker threads. */
     struct Config
     {
         std::size_t batch_size = transport::kDefaultBatchSize;

@@ -34,6 +34,13 @@ class DataPlane
     DataPlane(DataPlane &&) = delete;
     DataPlane &operator=(DataPlane &&) = delete;
 
+    /**
+     * @brief Construct the active transport engine in-place.
+     * @tparam T Engine type (one of Engines...)
+     * @tparam Args Constructor argument types for @p T
+     * @param args Forwarded to @p T's constructor
+     * @return Reference to the emplaced engine
+     */
     template <typename T, typename... Args>
     T &Emplace(Args &&...args)
     {
@@ -47,12 +54,17 @@ class DataPlane
         VisitImpl(storage_, std::forward<F>(f));
     }
 
+    /** Invoke @p f on the active engine; no-op while empty (monostate). */
     template <typename F>
     void Visit(F &&f) const
     {
         VisitImpl(storage_, std::forward<F>(f));
     }
 
+    /**
+     * @brief Whether no transport engine has been emplaced yet.
+     * @return true while storage holds monostate
+     */
     [[nodiscard]] bool empty() const noexcept
     {
         return std::holds_alternative<std::monostate>(storage_);

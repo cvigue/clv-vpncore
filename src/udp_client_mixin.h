@@ -49,8 +49,10 @@ class UdpClientMixin : public UdpCore<Derived, P2PPolicy>
 
     // -- Inbound data delivery (called by ClientControlAdapter) --------------
 
-    // UDP delivers directly to TUN from the kernel-bypass RX thread;
-    // this path is structurally unreachable but must exist for the template.
+    /**
+     * @brief Deliver decrypted plaintext to TUN (unreachable on UDP P2P path).
+     * @param plaintext IP packet bytes (unused)
+     */
     asio::awaitable<void> DeliverDecryptedPacket(std::vector<std::uint8_t> /*plaintext*/)
     {
         co_return;
@@ -58,11 +60,20 @@ class UdpClientMixin : public UdpCore<Derived, P2PPolicy>
 
     // -- P2P engine lifecycle ------------------------------------------------
 
+    /**
+     * @brief Bind the outbound UDP socket before StartDataPath.
+     * @param socket_fd Raw socket file descriptor
+     */
     void BindSocket(int socket_fd)
     {
         socket_fd_ = socket_fd;
     }
 
+    /**
+     * @brief Configure the single peer endpoint and session.
+     * @param peer Remote UDP endpoint
+     * @param session_id OpenVPN session identifier
+     */
     void SetPeer(transport::PeerEndpoint peer, openvpn::SessionId session_id)
     {
         pending_peer_ = peer;
@@ -71,6 +82,12 @@ class UdpClientMixin : public UdpCore<Derived, P2PPolicy>
             Core::CoreSetPeer(peer, session_id);
     }
 
+    /**
+     * @brief Install encrypt/decrypt keys (applied immediately if engine is running).
+     * @param encrypt_key Outbound encryption key
+     * @param decrypt_key Inbound decryption key
+     * @param key_id OpenVPN key slot identifier
+     */
     void EngineInstallKeys(const openvpn::EncryptionKey &encrypt_key,
                            const openvpn::EncryptionKey &decrypt_key,
                            std::uint8_t key_id)
@@ -82,6 +99,7 @@ class UdpClientMixin : public UdpCore<Derived, P2PPolicy>
             Core::CoreInstallKeys(encrypt_key, decrypt_key, key_id);
     }
 
+    /** @brief Start RX/TX worker threads and bind TUN + socket. */
     asio::awaitable<void> StartDataPath()
     {
         if (socket_fd_ < 0 || !tun_device_)
@@ -106,6 +124,7 @@ class UdpClientMixin : public UdpCore<Derived, P2PPolicy>
         co_return;
     }
 
+    /** @brief Stop workers and close the TUN device. */
     void StopDataPath()
     {
         Core::CoreStop();
@@ -115,6 +134,7 @@ class UdpClientMixin : public UdpCore<Derived, P2PPolicy>
 
     // -- Stats ---------------------------------------------------------------
 
+    /** @brief Data-path counter snapshot (empty when engine is stopped). */
     DataPathStats SnapshotStats() const
     {
         if (Core::CoreRunning())
@@ -122,21 +142,28 @@ class UdpClientMixin : public UdpCore<Derived, P2PPolicy>
         return {};
     }
 
+    /**
+     * @brief Set recvmmsg/sendmmsg batch size (capped at kMaxBatchSize).
+     * @param newSize Desired batch size
+     */
     void SetBatchSize(std::size_t newSize)
     {
         batch_size_ = std::min(newSize, transport::kMaxBatchSize);
     }
 
+    /** @brief Current recvmmsg/sendmmsg batch size. */
     std::size_t GetBatchSize() const
     {
         return batch_size_;
     }
 
+    /** @brief RX batch histogram window for stats logging. */
     BatchHistWindow &GetRxBatchWindow()
     {
         return Core::CoreRxBatchWindow();
     }
 
+    /** @brief TX burst average window for stats logging. */
     TxBurstAvgWindow &GetTxBurstAvgWindow()
     {
         return Core::CoreTxBurstAvgWindow();

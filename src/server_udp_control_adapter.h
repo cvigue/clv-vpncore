@@ -10,8 +10,6 @@
 
 #include "data_path_stats.h"
 #include "log_subsystems.h"
-#include "openvpn/crypto_algorithms.h"
-#include "openvpn/push_exchange_helpers.h"
 #include "openvpn/udp_data_channel.h"
 #include "server_control_base.h"
 #include "server_data_adapter.h"
@@ -24,26 +22,35 @@
 #include <asio/detached.hpp>
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
+#include <tuple>
 #include <utility>
 #include <vector>
 
 namespace clv::vpn {
 
+/**
+ * @brief Server UDP userspace transport leaf.
+ *
+ * Owns UdpListener, UdpDataChannel, and the shared ServerControlBase engine.
+ */
 class ServerUdpTransport : public ServerControlBase<ServerUdpTransport>
 {
   public:
     using channel_type = UdpDataChannel<ServerDataAdapter<ServerUdpTransport>>;
 
+    /**
+     * @brief Construct the UDP server transport leaf.
+     * @param cfg Control-plane resources (io_context, config, loggers, zone)
+     */
     explicit ServerUdpTransport(ServerControlConfig cfg)
-        : ServerControlBase(std::move(cfg))
-        , data_adapter_(*this)
-        , listener_(std::in_place,
-                    *io_context_,
-                    config_->server->host,
-                    config_->server->port)
-        , channel_(*io_context_,
+        : ServerControlBase(std::move(cfg)), data_adapter_(*this), listener_(std::in_place,
+                                                                             *io_context_,
+                                                                             config_->server->host,
+                                                                             config_->server->port),
+          channel_(*io_context_,
                    routing_table_,
                    routing_table_v6_,
                    session_manager_,
@@ -60,9 +67,18 @@ class ServerUdpTransport : public ServerControlBase<ServerUdpTransport>
         currentBatchSize_ = transport::EffectiveBatchSize(config_->performance.batch_size);
     }
 
-    channel_type &channel() noexcept { return channel_; }
-    const channel_type &channel() const noexcept { return channel_; }
+    /** @brief Owned UDP multi-peer data channel. */
+    channel_type &channel() noexcept
+    {
+        return channel_;
+    }
+    /** @brief Owned UDP multi-peer data channel (const). */
+    const channel_type &channel() const noexcept
+    {
+        return channel_;
+    }
 
+    /** @brief Start split-datapath workers and the control-plane base loops. */
     void Start()
     {
         ConfigureDataPlane();
@@ -74,15 +90,21 @@ class ServerUdpTransport : public ServerControlBase<ServerUdpTransport>
         StartBase();
     }
 
+    /** @brief Stop control loops and tear down the UDP listener. */
     void Stop()
     {
         StopBase();
         listener_.reset();
     }
 
-    using ServerControlBase::OnControlPacketFromDataPath;
     using ServerControlBase::HandleTcpDisconnect;
+    using ServerControlBase::OnControlPacketFromDataPath;
 
+    /**
+     * @brief Log periodic data-path stats with batch histograms.
+     * @param delta Counter delta since last tick
+     * @param elapsedSec Wall time since last tick
+     */
     void LogStats(const DataPathStats &delta, double elapsedSec)
     {
         int actualRcvBuf = 0;
@@ -117,6 +139,11 @@ class ServerUdpTransport : public ServerControlBase<ServerUdpTransport>
                       delta.txSmallPktFlush);
     }
 
+    /**
+     * @brief Entry point for control packets from the UDP data adapter.
+     * @param data Serialized OpenVPN control frame
+     * @param sender Source endpoint of the datagram
+     */
     void OnControlPacketFromDataPath(std::vector<std::uint8_t> data,
                                      transport::PeerEndpoint sender)
     {

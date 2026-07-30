@@ -32,6 +32,10 @@ namespace clv::vpn {
 template <typename Control>
 struct ServerDataAdapter
 {
+    /**
+     * @brief Bind to a control plane satisfying ServerControlForAdapter.
+     * @param control Control plane that receives marshalled packets
+     */
     explicit ServerDataAdapter(Control &control)
         : control_(&control)
     {
@@ -39,6 +43,11 @@ struct ServerDataAdapter
                       "Control must satisfy ServerControlForAdapter");
     }
 
+    /**
+     * @brief Post a UDP/DCO control packet to the control io_context.
+     * @param data Serialized OpenVPN control frame
+     * @param sender Source endpoint of the datagram
+     */
     void OnControlPacket(std::vector<std::uint8_t> data,
                          transport::PeerEndpoint sender)
     {
@@ -49,6 +58,12 @@ struct ServerDataAdapter
         });
     }
 
+    /**
+     * @brief Post a TCP control packet with transport handle to the control io_context.
+     * @param data Serialized OpenVPN control frame
+     * @param sender Source endpoint
+     * @param transport Connection handle for replies on the same socket
+     */
     void OnControlPacket(std::vector<std::uint8_t> data,
                          transport::PeerEndpoint sender,
                          transport::TransportHandle transport)
@@ -61,6 +76,10 @@ struct ServerDataAdapter
         });
     }
 
+    /**
+     * @brief Post a TCP disconnect notification to the control plane.
+     * @param sender Endpoint of the closed connection
+     */
     void OnDisconnect(transport::PeerEndpoint sender)
     {
         asio::post(control_->io_context(),
@@ -70,6 +89,10 @@ struct ServerDataAdapter
         });
     }
 
+    /**
+     * @brief Post a dead-peer notification from the keepalive loop.
+     * @param sid Session identifier of the timed-out peer
+     */
     void OnPeerDead(openvpn::SessionId sid)
     {
         asio::post(control_->io_context(),
@@ -79,11 +102,17 @@ struct ServerDataAdapter
         });
     }
 
+    /** @brief No-op; server tracks per-connection activity in MultiPeerPolicy. */
     void OnRxActivity()
     {
         // Server tracks per-connection activity inside MultiPeerPolicy — no-op.
     }
 
+    /**
+     * @brief Encrypt and send a plaintext payload on a session's transport.
+     * @param session Target connection (must have transport)
+     * @param plaintext IP packet bytes to encrypt
+     */
     asio::awaitable<void> SendEncryptedToSession(Connection *session,
                                                  std::span<const std::uint8_t> plaintext)
     {

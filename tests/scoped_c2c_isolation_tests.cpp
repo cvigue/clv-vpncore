@@ -1,6 +1,7 @@
 // Copyright (c) 2026- Charlie Vigue. All rights reserved.
 
 #include "scoped_c2c_isolation.h"
+#include "scoped_masquerade.h"
 #include "test_log_util.h"
 
 #include <net/ipv6_utils.h>
@@ -55,6 +56,11 @@ TEST(ScopedNftIntraPoolDropTest, EmptyIfnameThrows)
 {
     EXPECT_THROW((ScopedNftIntraPoolDrop{"", "10.8.0.0/24", "10.8.0.1", test::NullLogger()}),
                  std::invalid_argument);
+}
+
+TEST(ScopedMasqueradeTest, EmptyIfnameThrows)
+{
+    EXPECT_THROW((ScopedMasquerade{"", "10.8.0.0/24", test::NullLogger()}), std::invalid_argument);
 }
 
 TEST(ScopedNftIntraPoolDropTest, InvalidPoolThrows)

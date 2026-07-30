@@ -27,9 +27,11 @@
  * P2PPolicy::OnBatchSent().
  */
 
+#include <asio/as_tuple.hpp>
 #include <asio/awaitable.hpp>
 #include <asio/error.hpp>
 #include <asio/steady_timer.hpp>
+#include <asio/system_error.hpp>
 #include <asio/use_awaitable.hpp>
 
 #include <spdlog/logger.h>
@@ -81,16 +83,11 @@ asio::awaitable<void> KeepaliveLoop(std::string_view name,
     while (running)
     {
         timer.expires_after(interval);
-        try
-        {
-            co_await timer.async_wait(asio::use_awaitable);
-        }
-        catch (const asio::system_error &e)
-        {
-            if (e.code() == asio::error::operation_aborted)
-                break;
-            throw;
-        }
+        auto [ec] = co_await timer.async_wait(asio::as_tuple(asio::use_awaitable));
+        if (ec == asio::error::operation_aborted)
+            break;
+        if (ec)
+            throw asio::system_error(ec);
 
         if (!running)
             break;

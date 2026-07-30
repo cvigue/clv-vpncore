@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <span>
 #include <utility>
@@ -35,6 +36,7 @@ struct PeerEndpoint
     asio::ip::address addr; ///< IPv4 or IPv6 address
     std::uint16_t port = 0; ///< Port number
 
+    /** @brief Equality by address and port. */
     bool operator==(const PeerEndpoint &) const = default;
 };
 
@@ -219,9 +221,15 @@ struct TransportHandle : std::variant<UdpTransport, TcpTransport>
 } // namespace clv::vpn::transport
 
 // std::hash specialization for PeerEndpoint — enables use as unordered_map key.
+/** @brief Hash support for PeerEndpoint as an unordered_map key. */
 template <>
 struct std::hash<clv::vpn::transport::PeerEndpoint>
 {
+    /**
+     * @brief Hash an endpoint by address bytes and port.
+     * @param ep Endpoint to hash
+     * @return Combined hash value
+     */
     std::size_t operator()(const clv::vpn::transport::PeerEndpoint &ep) const noexcept
     {
         std::size_t h;

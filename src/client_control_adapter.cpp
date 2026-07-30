@@ -402,7 +402,18 @@ asio::awaitable<void> ClientControlPlane<ChannelTpl>::ProcessServerPacket(std::v
         co_return;
 
     if (openvpn::IsDataPacket(packet->opcode_))
+    {
+        if (state_ == VpnClientState::Connected)
+        {
+            if (unexpected_data_on_control_limiter_.Due())
+            {
+                const auto suppressed = unexpected_data_on_control_limiter_.SuppressedCount() + 1;
+                logger_->warn("Dropping data packet on control plane ({}x)", suppressed);
+            }
+            co_return;
+        }
         co_await HandleDataPacket(*packet);
+    }
     else
         co_await HandleControlPacket(*packet);
 }
@@ -458,6 +469,16 @@ asio::awaitable<void> ClientControlPlane<ChannelTpl>::HandleControlPacket(const 
         co_return;
     }
 
+    if (control_channel_->PeerSidMismatch(packet))
+    {
+        logger_->warn(
+            "Dropping control opcode {} — wire sid {:016x} != peer sid {:016x}",
+            static_cast<int>(packet.opcode_),
+            packet.session_id_.value_or(0),
+            control_channel_->GetPeerSessionId()->value);
+        co_return;
+    }
+
     struct SessionActions
     {
         ClientControlPlane<ChannelTpl> &self;
@@ -495,7 +516,7 @@ ClientControlPlane<ChannelTpl>::HandleSoftResetFromServer(const openvpn::OpenVpn
 
     const openvpn::TlsCertConfig cert_config = MakeTlsCertConfig();
 
-    // Crossed soft-reset (plan §4.8 RK2): we already called RequestSoftReset /
+    // Crossed soft-reset: we already called RequestSoftReset /
     // InitiateTlsHandshake. ControlChannel::RespondToSoftReset will ACK without
     // advancing key_id again — do not clear randoms or re-fire ClientHello, or
     // we corrupt the in-flight TLS state.
@@ -526,7 +547,7 @@ ClientControlPlane<ChannelTpl>::HandleSoftResetFromServer(const openvpn::OpenVpn
 
 template <template <typename> class ChannelTpl>
 asio::awaitable<void> ClientControlPlane<ChannelTpl>::ClientRekeyLoop(std::uint32_t reneg_seconds,
-                                                                     std::uint64_t generation)
+                                                                      std::uint64_t generation)
 {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(reneg_seconds);
     const auto poll = co_await PollUntilRekey(
@@ -607,8 +628,15 @@ asio::awaitable<void> ClientControlPlane<ChannelTpl>::HandleDataPacket(const ope
         co_return;
     }
 
-    if (openvpn::IsKeepalivePing(plaintext))
+    switch (openvpn::ClassifyDecryptedPayload(plaintext))
+    {
+    case openvpn::DecryptedPayloadDisposition::Drop:
         co_return;
+    case openvpn::DecryptedPayloadDisposition::Keepalive:
+        co_return;
+    case openvpn::DecryptedPayloadDisposition::Forward:
+        break;
+    }
 
     stats_.packetsDecrypted++;
 
@@ -769,10 +797,10 @@ void ClientControlPlane<ChannelTpl>::DeriveAndInstallKeys()
     std::uint8_t current_key_id = control_channel_->GetKeyId();
 
     ch().InstallDataPathKeys(result->key_material,
-                                            result->cipher_algo,
-                                            result->hmac_algo,
-                                            current_key_id,
-                                            *crypto_context_);
+                             result->cipher_algo,
+                             result->hmac_algo,
+                             current_key_id,
+                             *crypto_context_);
 }
 
 template <template <typename> class ChannelTpl>
@@ -853,9 +881,9 @@ void ClientControlPlane<ChannelTpl>::StartDataPath()
     asio::co_spawn(*io_context_, channel.StartDataPath(), asio::detached);
 
     channel.LaunchKeepalive(*io_context_,
-                       [this]()
+                            [this]()
     { return KeepaliveLoop(); },
-                       config_->client->keepalive_interval);
+                            config_->client->keepalive_interval);
 
     logger_->info("Data path started");
 }
@@ -1105,4 +1133,3 @@ template class ClientControlPlane<ClientDcoChannel>;
 template class ClientControlPlane<ClientTcpChannel>;
 
 } // namespace clv::vpn
-

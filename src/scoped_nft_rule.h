@@ -17,8 +17,26 @@
 
 namespace clv::vpn {
 
+/**
+ * Contract for policies used with @ref ScopedNftRule.
+ *
+ * - @c Remove — fixed signature; called from the RAII base on teardown.
+ * - @c Install — any static member named Install (arity is policy-specific);
+ *   invoked by the concrete leaf ctor, not by ScopedNftRule itself.
+ */
+template <typename P>
+concept NftRulePolicy = requires(NfTablesClient &nft,
+                                 not_null<spdlog::logger *> logger,
+                                 std::uint8_t family,
+                                 const std::string &ifname,
+                                 const std::string &log_context) {
+    { P::Remove(nft, logger, family, ifname, log_context) } noexcept;
+} && requires {
+    &P::Install;
+};
+
 // ---------------------------------------------------------------------------
-// Policy: MASQUERADE (clv_vpn_nat / clv_vpn_nat6)
+// Policy: MASQUERADE (per-ifname clv_vpn_nat[_6]_<if>)
 // ---------------------------------------------------------------------------
 
 struct MasqueradeNftPolicy
@@ -27,8 +45,12 @@ struct MasqueradeNftPolicy
                         not_null<spdlog::logger *> logger,
                         bool &owns,
                         std::uint8_t &family,
+                        const std::string &ifname,
                         const std::string &cidr)
     {
+        if (ifname.empty())
+            throw std::invalid_argument("ScopedMasquerade: ifname is required");
+
         auto target = ParseMasqueradeCidr(cidr);
         if (!target)
             throw std::invalid_argument("ScopedMasquerade: invalid CIDR notation: " + cidr);
@@ -36,28 +58,25 @@ struct MasqueradeNftPolicy
         family = target->family;
         nft.Open();
 
-        if (nft.TableExists(family))
-        {
-            logger->info("Masquerade table for {} already exists", cidr);
-            owns = false;
-            return;
-        }
-
-        if (!nft.EnsureMasquerade(family, target->network.data(), target->prefix_len))
-            throw std::runtime_error("ScopedMasquerade: nftables transaction failed for " + cidr);
+        if (!nft.EnsureMasquerade(family, ifname.c_str(), target->network.data(), target->prefix_len))
+            throw std::runtime_error("ScopedMasquerade: nftables transaction failed for " + cidr
+                                     + " on " + ifname);
 
         owns = true;
-        logger->info("Added nftables masquerade for {} (will remove on shutdown)", cidr);
+        logger->info("Added nftables masquerade for {} on {} (will remove on shutdown)",
+                     cidr,
+                     ifname);
     }
 
     static void Remove(NfTablesClient &nft,
                        not_null<spdlog::logger *> logger,
                        std::uint8_t family,
+                       const std::string &ifname,
                        const std::string &log_context) noexcept
     {
         try
         {
-            if (nft.RemoveMasquerade(family))
+            if (nft.RemoveMasquerade(family, ifname.c_str()))
                 logger->info("Removed nftables masquerade for {}", log_context);
             else
                 logger->warn("Failed to remove nftables masquerade for {}", log_context);
@@ -69,7 +88,7 @@ struct MasqueradeNftPolicy
 };
 
 // ---------------------------------------------------------------------------
-// Policy: intra-pool forward DROP (clv_vpn_filter / clv_vpn_filter6)
+// Policy: intra-pool forward DROP (per-ifname clv_vpn_filter[_6]_<if>)
 // ---------------------------------------------------------------------------
 
 struct IntraPoolDropNftPolicy
@@ -114,11 +133,12 @@ struct IntraPoolDropNftPolicy
     static void Remove(NfTablesClient &nft,
                        not_null<spdlog::logger *> logger,
                        std::uint8_t family,
+                       const std::string &ifname,
                        const std::string &log_context) noexcept
     {
         try
         {
-            if (nft.RemoveIntraPoolDrop(family))
+            if (nft.RemoveIntraPoolDrop(family, ifname.c_str()))
                 logger->info("Removed nftables intra-pool drop for {}", log_context);
             else
                 logger->warn("Failed to remove nftables intra-pool drop for {}", log_context);
@@ -135,8 +155,10 @@ struct IntraPoolDropNftPolicy
 
 /**
  * @brief RAII guard for nftables rules installed via @p Policy.
+ *
+ * @tparam Policy  Must satisfy @ref NftRulePolicy.
  */
-template <typename Policy>
+template <NftRulePolicy Policy>
 class ScopedNftRule
 {
   public:
@@ -146,12 +168,13 @@ class ScopedNftRule
     ~ScopedNftRule() noexcept
     {
         if (ownership_.owns())
-            Policy::Remove(nft_, logger_, family_, log_context_);
+            Policy::Remove(nft_, logger_, family_, ifname_, log_context_);
     }
 
     ScopedNftRule(ScopedNftRule &&other) noexcept
         : logger_(other.logger_),
           nft_(std::move(other.nft_)),
+          ifname_(std::move(other.ifname_)),
           log_context_(std::move(other.log_context_)),
           family_(other.family_),
           ownership_(std::move(other.ownership_))
@@ -163,10 +186,11 @@ class ScopedNftRule
         if (this != &other)
         {
             if (ownership_.owns())
-                Policy::Remove(nft_, logger_, family_, log_context_);
+                Policy::Remove(nft_, logger_, family_, ifname_, log_context_);
 
             logger_ = other.logger_;
             nft_ = std::move(other.nft_);
+            ifname_ = std::move(other.ifname_);
             log_context_ = std::move(other.log_context_);
             family_ = other.family_;
             ownership_ = std::move(other.ownership_);
@@ -177,43 +201,21 @@ class ScopedNftRule
   protected:
     not_null<spdlog::logger *> logger_;
     NfTablesClient nft_;
+    std::string ifname_;
     std::string log_context_;
     std::uint8_t family_ = 0;
     clv::ScopedOwnership ownership_;
 
-    ScopedNftRule(not_null<spdlog::logger *> logger, std::string log_context)
+    ScopedNftRule(not_null<spdlog::logger *> logger, std::string ifname, std::string log_context)
         : logger_(logger),
+          ifname_(std::move(ifname)),
           log_context_(std::move(log_context))
     {
     }
 };
 
-class ScopedMasquerade : public ScopedNftRule<MasqueradeNftPolicy>
-{
-  public:
-    ScopedMasquerade(const std::string &source_cidr, spdlog::logger &logger)
-        : ScopedNftRule<MasqueradeNftPolicy>(not_null{&logger}, source_cidr)
-    {
-        bool owns = ownership_.owns();
-        MasqueradeNftPolicy::Install(nft_, logger_, owns, family_, source_cidr);
-        ownership_.set_owns(owns);
-    }
-};
-
-class ScopedNftIntraPoolDrop : public ScopedNftRule<IntraPoolDropNftPolicy>
-{
-  public:
-    ScopedNftIntraPoolDrop(const std::string &ifname,
-                           const std::string &pool_cidr,
-                           const std::string &bridge_ip,
-                           spdlog::logger &logger)
-        : ScopedNftRule<IntraPoolDropNftPolicy>(not_null{&logger}, pool_cidr + " on " + ifname)
-    {
-        bool owns = ownership_.owns();
-        IntraPoolDropNftPolicy::Install(nft_, logger_, owns, family_, ifname, pool_cidr, bridge_ip);
-        ownership_.set_owns(owns);
-    }
-};
+static_assert(NftRulePolicy<MasqueradeNftPolicy>);
+static_assert(NftRulePolicy<IntraPoolDropNftPolicy>);
 
 } // namespace clv::vpn
 

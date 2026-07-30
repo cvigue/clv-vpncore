@@ -30,6 +30,7 @@ namespace clv::vpn {
 struct VpnConfig
 {
     // ---- Server role (present only when running as server) ----
+    /** @brief Server-role configuration section. */
     struct ServerConfig
     {
         // Listen settings
@@ -74,7 +75,7 @@ struct VpnConfig
         std::filesystem::path crl_file;
 
         // Server-specific tuning
-        static constexpr int kMinRenegotiateSeconds = 30;
+        static constexpr int kMinRenegotiateSeconds = 30; ///< Floor for renegotiate_seconds
         size_t max_clients = 100;
         int ping_timer_remote = 60;
         int renegotiate_seconds = 3600;
@@ -99,6 +100,7 @@ struct VpnConfig
     std::optional<ServerConfig> server;
 
     // ---- Client role (present only when running as client) ----
+    /** @brief Client-role configuration section. */
     struct ClientConfig
     {
         // Server to connect to
@@ -142,6 +144,7 @@ struct VpnConfig
     std::optional<ClientConfig> client;
 
     // ---- Process-global settings ----
+    /** @brief Process-wide settings (affinity, transit routing). */
     struct ProcessConfig
     {
         int cpu_affinity = -1;                              ///< CPU pinning: -1=off, -2=auto, >=0=core
@@ -149,6 +152,7 @@ struct VpnConfig
     } process;
 
     // ---- Shared performance settings ----
+    /** @brief Shared performance / offload settings. */
     struct PerformanceConfig
     {
         bool enable_dco = true;         ///< Use Data Channel Offload if available
@@ -166,6 +170,7 @@ struct VpnConfig
     } performance;
 
     // ---- Shared logging settings ----
+    /** @brief Shared logging verbosity and per-subsystem overrides. */
     struct LoggingConfig
     {
         std::string verbosity = "info"; ///< spdlog level name or numeric (0=trace..6=off)
@@ -174,10 +179,14 @@ struct VpnConfig
     } logging;
 
     // ---- Convenience queries ----
+
+    /** @brief Whether this config includes a server role section. */
     bool HasServerRole() const
     {
         return server.has_value();
     }
+
+    /** @brief Whether this config includes a client role section. */
     bool HasClientRole() const
     {
         return client.has_value();
@@ -195,14 +204,44 @@ using OpenVpnConfig = VpnConfig;
 class VpnConfigParser
 {
   public:
+    /**
+     * @brief Parse configuration from a JSON file on disk.
+     * @param filepath Path to a JSON configuration file
+     * @return Parsed VpnConfig
+     * @throws std::exception on I/O or parse failure
+     */
     static VpnConfig ParseFile(const std::filesystem::path &filepath);
+
+    /**
+     * @brief Parse configuration from a JSON string.
+     * @param jsonString JSON document text
+     * @return Parsed VpnConfig
+     * @throws std::exception on parse failure
+     */
     static VpnConfig ParseString(const std::string &jsonString);
+
+    /**
+     * @brief Parse configuration from a parsed JSON object.
+     * @param json Parsed configuration document
+     * @return Parsed VpnConfig
+     * @throws std::exception on validation failure
+     */
     static VpnConfig ParseJson(const nlohmann::json &json);
 
-    /** Validate server-role config for required fields and consistency. */
+    /**
+     * @brief Validate server-role config for required fields and consistency.
+     * @param config Configuration to validate (must have server role)
+     * @param logger Optional logger for warnings
+     * @throws std::exception on validation failure
+     */
     static void ValidateServer(const VpnConfig &config, std::shared_ptr<spdlog::logger> logger = nullptr);
 
-    /** Validate client-role config for required fields. */
+    /**
+     * @brief Validate client-role config for required fields.
+     * @param config Configuration to validate (must have client role)
+     * @param logger Optional logger for warnings
+     * @throws std::exception on validation failure
+     */
     static void ValidateClient(const VpnConfig &config, std::shared_ptr<spdlog::logger> logger = nullptr);
 
   private:

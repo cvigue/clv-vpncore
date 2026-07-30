@@ -1,13 +1,12 @@
 // Copyright (c) 2025- Charlie Vigue. All rights reserved.
 
 #include "openvpn/tls_crypt_v2.h"
+#include "openvpn/tls_crypt_hmac.h"
 
 #include <HelpSslStreamCipher.h>
 
 #include <openssl/bio.h>
 #include <openssl/crypto.h>
-#include <openssl/evp.h>
-#include <openssl/hmac.h>
 #include <openssl/pem.h>
 #include <openssl/rand.h>
 
@@ -154,29 +153,6 @@ std::optional<std::string> WritePemToString(const char *label,
     return result;
 }
 
-/**
- * Compute HMAC-SHA256.
- */
-std::vector<std::uint8_t> ComputeHmac(std::span<const std::uint8_t> key,
-                                      std::span<const std::uint8_t> data)
-{
-    std::vector<std::uint8_t> hmac(TLS_CRYPT_TAG_SIZE);
-    unsigned int hmac_len = 0;
-
-    HMAC(EVP_sha256(),
-         key.data(),
-         static_cast<int>(key.size()),
-         data.data(),
-         data.size(),
-         hmac.data(),
-         &hmac_len);
-
-    if (hmac_len != TLS_CRYPT_TAG_SIZE)
-        return {};
-
-    return hmac;
-}
-
 } // anonymous namespace
 
 // ── Construction / Destruction ──────────────────────────────────────────────
@@ -291,7 +267,7 @@ std::optional<std::vector<std::uint8_t>> TlsCryptV2::WrapClientKey(
     hmac_input.insert(hmac_input.end(), client_key.begin(), client_key.end());
     hmac_input.insert(hmac_input.end(), metadata.begin(), metadata.end());
 
-    auto tag = ComputeHmac(hmac_key, hmac_input);
+    auto tag = detail::TlsCryptHmacSha256(hmac_key, hmac_input);
     if (tag.size() != TLS_CRYPT_TAG_SIZE)
     {
         logger_->error("HMAC computation failed during WKc wrap");
@@ -394,7 +370,7 @@ std::optional<TlsCryptV2::UnwrapResult> TlsCryptV2::UnwrapClientKey(
     hmac_input.insert(hmac_input.end(), net_len_bytes, net_len_bytes + sizeof(net_len_raw));
     hmac_input.insert(hmac_input.end(), plaintext.begin(), plaintext.end());
 
-    auto computed_tag = ComputeHmac(hmac_key, hmac_input);
+    auto computed_tag = detail::TlsCryptHmacSha256(hmac_key, hmac_input);
     if (computed_tag.size() != TLS_CRYPT_TAG_SIZE)
     {
         logger_->error("HMAC computation failed during WKc unwrap");

@@ -26,6 +26,10 @@ namespace clv::vpn {
 template <typename Control>
 struct ClientDataAdapter
 {
+    /**
+     * @brief Bind to a control plane satisfying ClientControlForAdapter.
+     * @param control Control plane that receives marshalled packets
+     */
     explicit ClientDataAdapter(Control &control)
         : control_(&control)
     {
@@ -33,6 +37,11 @@ struct ClientDataAdapter
                       "Control must satisfy ClientControlForAdapter");
     }
 
+    /**
+     * @brief Post a control packet to the control io_context.
+     * @param data Serialized OpenVPN control frame
+     * @param sender Source endpoint (unused on client)
+     */
     void OnControlPacket(std::vector<std::uint8_t> data,
                          transport::PeerEndpoint /*sender*/)
     {
@@ -43,11 +52,13 @@ struct ClientDataAdapter
         });
     }
 
+    /** @brief Post an RX activity touch to the control plane. */
     void OnRxActivity()
     {
         control_->TouchLastRx();
     }
 
+    /** @brief No-op on client (dead-peer handled by keepalive loop). */
     void OnPeerDead(openvpn::SessionId /*sid*/)
     {
     }

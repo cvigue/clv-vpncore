@@ -19,8 +19,12 @@
 namespace clv::vpn::tun {
 
 /**
- * @brief Create and configure a server-side TUN device from @p srv.
- * @return Actual netdev name (from kernel).
+ * @brief Create and configure a server-side TUN device from server config.
+ * @param tun TUN device to create and configure
+ * @param srv Server network, address, and MTU settings
+ * @param logger Logger for setup events
+ * @return Actual netdev name assigned by the kernel
+ * @throws std::invalid_argument if server network CIDR is invalid
  */
 inline std::string SetupServerTun(TunDevice &tun,
                                   const VpnConfig::ServerConfig &srv,

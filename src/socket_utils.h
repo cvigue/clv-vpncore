@@ -8,10 +8,9 @@
  * @brief Shared socket utility functions for VPN client and server.
  */
 
-#include <spdlog/spdlog.h>
+#include <spdlog/logger.h>
 
 #include <sys/socket.h>
-#include <unistd.h>
 
 namespace clv::vpn {
 

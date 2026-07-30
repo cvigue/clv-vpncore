@@ -1,6 +1,45 @@
 // Copyright (c) 2025- Charlie Vigue. All rights reserved.
 
 #include "server_control_base.h"
+#include "data_path_stats.h"
+#include "ip_pool_manager.h"
+#include "log_subsystems.h"
+#include "net/ipv4_utils.h"
+#include "net/ipv6_utils.h"
+#include "openvpn/config_exchange.h"
+#include "openvpn/connection.h"
+#include "openvpn/control_channel.h"
+#include "openvpn/control_plane_helpers.h"
+#include "openvpn/key_derivation.h"
+#include "openvpn/packet.h"
+#include "openvpn/protocol_constants.h"
+#include "openvpn/psid_cookie.h"
+#include "openvpn/push_exchange_helpers.h"
+#include "openvpn/session_manager.h"
+#include "openvpn/tls_context.h"
+#include "openvpn/tls_crypt.h"
+#include "openvpn/tls_crypt_v2.h"
+#include "routing_table.h"
+#include "transport/transport.h"
+
+#include <atomic>
+#include <bits/chrono.h>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <ctime>
+#include <exception>
+#include <future>
+#include <memory>
+#include <openssl/rand.h>
+#include <optional>
+#include <random>
+#include <span>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 namespace clv::vpn {
 
@@ -59,15 +98,15 @@ void ServerControlBase<Leaf>::HandleDeadPeer(openvpn::SessionId sid)
 
 template <typename Leaf>
 void ServerControlBase<Leaf>::OnControlPacketFromDataPath(std::vector<std::uint8_t> /*data*/,
-                                                    transport::PeerEndpoint /*sender*/)
+                                                          transport::PeerEndpoint /*sender*/)
 {
     logger_->warn("OnControlPacketFromDataPath(2-arg) not implemented for this transport");
 }
 
 template <typename Leaf>
 void ServerControlBase<Leaf>::OnControlPacketFromDataPath(std::vector<std::uint8_t> /*data*/,
-                                                    transport::PeerEndpoint /*sender*/,
-                                                    transport::TransportHandle /*transport*/)
+                                                          transport::PeerEndpoint /*sender*/,
+                                                          transport::TransportHandle /*transport*/)
 {
     logger_->warn("OnControlPacketFromDataPath(3-arg) not implemented for this transport");
 }
@@ -211,16 +250,11 @@ asio::awaitable<void> ServerControlBase<Leaf>::SessionCleanupLoop()
     while (*running_)
     {
         cleanup_timer_->expires_after(cleanup_interval);
-        try
-        {
-            co_await cleanup_timer_->async_wait(asio::use_awaitable);
-        }
-        catch (const asio::system_error &e)
-        {
-            if (e.code() == asio::error::operation_aborted)
-                break;
-            throw;
-        }
+        auto [ec] = co_await cleanup_timer_->async_wait(asio::as_tuple(asio::use_awaitable));
+        if (ec == asio::error::operation_aborted)
+            break;
+        if (ec)
+            throw asio::system_error(ec);
         if (!*running_)
             break;
 
@@ -290,20 +324,15 @@ asio::awaitable<void> ServerControlBase<Leaf>::HandshakeRetransmitLoop()
             // Idle: far-future wait; ArmHandshakeRetransmit cancels this.
             handshake_timer_->expires_after(std::chrono::hours(24));
 
-        try
+        auto [ec] = co_await handshake_timer_->async_wait(asio::as_tuple(asio::use_awaitable));
+        if (ec == asio::error::operation_aborted)
         {
-            co_await handshake_timer_->async_wait(asio::use_awaitable);
+            if (!*running_)
+                break;
+            continue; // kicked or stop: recompute earliest
         }
-        catch (const asio::system_error &e)
-        {
-            if (e.code() == asio::error::operation_aborted)
-            {
-                if (!*running_)
-                    break;
-                continue; // kicked or stop: recompute earliest
-            }
-            throw;
-        }
+        if (ec)
+            throw asio::system_error(ec);
         if (!*running_)
             break;
 
@@ -350,8 +379,8 @@ asio::awaitable<void> ServerControlBase<Leaf>::StatsLoop()
 
 template <typename Leaf>
 asio::awaitable<void> ServerControlBase<Leaf>::ProcessNetworkPacket(std::vector<std::uint8_t> data,
-                                                                       transport::PeerEndpoint sender,
-                                                                       transport::TransportHandle transport)
+                                                                    transport::PeerEndpoint sender,
+                                                                    transport::TransportHandle transport)
 {
     if (data.empty())
         co_return;
@@ -517,12 +546,12 @@ template <typename Leaf>
 
 template <typename Leaf>
 asio::awaitable<void> ServerControlBase<Leaf>::SendCookieChallenge(const openvpn::OpenVpnPacket &client_hr,
-                                                                      openvpn::SessionId client_sid,
-                                                                      openvpn::SessionId server_sid,
-                                                                      const transport::PeerEndpoint &sender,
-                                                                      transport::TransportHandle &transport,
-                                                                      std::optional<openvpn::TlsCrypt> &wrap_key,
-                                                                      bool v2_early_negotiation)
+                                                                   openvpn::SessionId client_sid,
+                                                                   openvpn::SessionId server_sid,
+                                                                   const transport::PeerEndpoint &sender,
+                                                                   transport::TransportHandle &transport,
+                                                                   std::optional<openvpn::TlsCrypt> &wrap_key,
+                                                                   bool v2_early_negotiation)
 {
     const std::uint32_t ack_id = client_hr.packet_id_.value_or(0);
     std::vector<std::uint8_t> payload;
@@ -605,7 +634,7 @@ asio::awaitable<Connection *> ServerControlBase<Leaf>::TryAcceptCookieSession(
         co_return nullptr;
     }
 
-    // M4: only replace an existing endpoint session after cookie proof.
+    // Only replace an existing endpoint session after cookie proof.
     if (Connection *existing = session_manager_.FindSessionByEndpoint(endpoint))
     {
         logger_->info("Cookie-proven new client; replacing session {:016x}",
@@ -641,13 +670,13 @@ asio::awaitable<Connection *> ServerControlBase<Leaf>::TryAcceptCookieSession(
 
 template <typename Leaf>
 asio::awaitable<void> ServerControlBase<Leaf>::HandleControlPacket(Connection *session,
-                                                                      const openvpn::OpenVpnPacket &packet,
-                                                                      const transport::PeerEndpoint &sender,
-                                                                      const Connection::Endpoint &endpoint,
-                                                                      transport::TransportHandle transport,
-                                                                      std::optional<openvpn::TlsCrypt> v2_session_key,
-                                                                      std::optional<openvpn::TlsCryptReplayState> replay_seed,
-                                                                      bool early_negotiation)
+                                                                   const openvpn::OpenVpnPacket &packet,
+                                                                   const transport::PeerEndpoint &sender,
+                                                                   const Connection::Endpoint &endpoint,
+                                                                   transport::TransportHandle transport,
+                                                                   std::optional<openvpn::TlsCrypt> v2_session_key,
+                                                                   std::optional<openvpn::TlsCryptReplayState> replay_seed,
+                                                                   bool early_negotiation)
 {
     logger_->debug("Received control packet (opcode {})", static_cast<int>(packet.opcode_));
 
@@ -684,6 +713,18 @@ asio::awaitable<void> ServerControlBase<Leaf>::HandleControlPacket(Connection *s
     if (session)
     {
         session->UpdateLastActivity();
+
+        if (session->GetControlChannel().PeerSidMismatch(packet))
+        {
+            logger_->warn(
+                "Dropping control opcode {} from {}:{} — wire sid {:016x} != peer sid {:016x}",
+                static_cast<int>(packet.opcode_),
+                sender.addr.to_string(),
+                sender.port,
+                packet.session_id_.value_or(0),
+                session->GetControlChannel().GetPeerSessionId()->value);
+            co_return;
+        }
 
         auto &session_crypt = session->GetSessionTlsCrypt().has_value()
                                   ? session->GetSessionTlsCrypt()
@@ -779,31 +820,17 @@ asio::awaitable<Connection *> ServerControlBase<Leaf>::HandleHardReset(
             co_return session;
         }
 
-        // Different client sid on same endpoint.
-        // Without cookies: replace (legacy). With cookies: drop — do not
-        // challenge or evict. OpenVPN only runs the cookie path when no
-        // instance exists for the real address; challenging here would
-        // reflect a HARD_RESET_SERVER at a live peer (spoofed source).
-        // Legitimate reuse of the endpoint waits for dead-peer cleanup.
-        if (!PsidCookieEnabled())
-        {
-            logger_->info("New client session ID, replacing existing session");
-            RemoveSessionSafe(session->GetSessionId());
-            SplitPublishSessions();
-            session = nullptr;
-        }
-        else
-        {
-            logger_->warn(
-                "Ignoring HARD_RESET with new client sid {:016x} from {}:{} — "
-                "endpoint already has session {:016x} (peer sid {:016x})",
-                client_session_id.value,
-                sender.addr.to_string(),
-                sender.port,
-                session->GetSessionId().value,
-                peer_session ? peer_session->value : 0);
-            co_return session;
-        }
+        // Do not challenge or evict: a spoofed HARD_RESET would kick a live
+        // peer. Same-bind reconnect waits for dead-peer cleanup.
+        logger_->warn(
+            "Ignoring HARD_RESET with new client sid {:016x} from {}:{} — "
+            "endpoint already has session {:016x} (peer sid {:016x})",
+            client_session_id.value,
+            sender.addr.to_string(),
+            sender.port,
+            session->GetSessionId().value,
+            peer_session ? peer_session->value : 0);
+        co_return session;
     }
 
     const bool is_v2_hr = packet.opcode_ == openvpn::Opcode::P_CONTROL_HARD_RESET_CLIENT_V3;
@@ -888,7 +915,7 @@ asio::awaitable<Connection *> ServerControlBase<Leaf>::HandleHardReset(
 
 template <typename Leaf>
 asio::awaitable<void> ServerControlBase<Leaf>::HandleSoftReset(Connection *session,
-                                                                  const openvpn::OpenVpnPacket &packet)
+                                                               const openvpn::OpenVpnPacket &packet)
 {
     logger_->info("Received soft reset (key renegotiation) request");
     [[maybe_unused]] std::uint8_t old_key_id = session->GetControlChannel().GetKeyId();
@@ -914,7 +941,7 @@ asio::awaitable<void> ServerControlBase<Leaf>::HandleSoftReset(Connection *sessi
 
 template <typename Leaf>
 asio::awaitable<void> ServerControlBase<Leaf>::ProcessPlaintext(Connection *session,
-                                                                   std::vector<std::uint8_t> plaintext)
+                                                                std::vector<std::uint8_t> plaintext)
 {
     logger_->debug("Received plaintext from client: {} bytes", plaintext.size());
 
@@ -939,7 +966,7 @@ asio::awaitable<void> ServerControlBase<Leaf>::ProcessPlaintext(Connection *sess
 
 template <typename Leaf>
 asio::awaitable<void> ServerControlBase<Leaf>::HandleKeyMethod2(Connection *session,
-                                                                   const std::vector<uint8_t> &plaintext)
+                                                                const std::vector<uint8_t> &plaintext)
 {
     auto parsed = openvpn::ParseKeyMethod2Message(plaintext);
     if (!parsed)
@@ -1126,7 +1153,7 @@ asio::awaitable<void> ServerControlBase<Leaf>::RekeyLoop(openvpn::SessionId sid,
     {
         const openvpn::TlsCertConfig cert_config = MakeTlsCertConfig();
 
-        // Crossed soft-reset (plan §4.8 RK2): client may already have put
+        // Crossed soft-reset: client may already have put
         // the channel into TlsHandshake. RequestSoftReset returns empty in
         // that state — yield and let the in-flight renegotiation finish.
         auto soft_reset = session->GetControlChannel().RequestSoftReset(openvpn::PeerRole::Server, cert_config);
@@ -1227,7 +1254,7 @@ bool ServerControlBase<Leaf>::DeriveAndInstallKeys(Connection *session)
 
 template <typename Leaf>
 asio::awaitable<void> ServerControlBase<Leaf>::SendWrappedPacket(std::vector<std::uint8_t> data,
-                                                                    Connection *session)
+                                                                 Connection *session)
 {
     if (!session || !session->HasTransport())
     {
@@ -1246,8 +1273,8 @@ asio::awaitable<void> ServerControlBase<Leaf>::SendWrappedPacket(std::vector<std
 
 template <typename Leaf>
 asio::awaitable<bool> ServerControlBase<Leaf>::SendTlsControlData(Connection *session,
-                                                                     std::span<const std::uint8_t> data,
-                                                                     std::string_view description)
+                                                                  std::span<const std::uint8_t> data,
+                                                                  std::string_view description)
 {
     if (!session || !session->HasTransport())
     {

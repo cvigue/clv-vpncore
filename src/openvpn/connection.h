@@ -56,11 +56,13 @@ enum class ConnectionRole
 class Connection
 {
   public:
+    /** @brief Peer network endpoint used as a session lookup key. */
     struct Endpoint
     {
         asio::ip::address addr; ///< Peer's IP address (v4 or v6)
         uint16_t port;          ///< Peer's transport port
 
+        /** @brief Equality by address and port. */
         bool operator==(const Endpoint &other) const
         {
             return addr == other.addr && port == other.port;
@@ -95,6 +97,7 @@ class Connection
                std::optional<openvpn::TlsCertConfig> cert_config,
                spdlog::logger &logger);
 
+    /** @brief Destroy the connection and its owned channels. */
     ~Connection() = default;
 
     // Non-copyable, non-movable (atomic members are not movable)
@@ -148,6 +151,7 @@ class Connection
     {
         return control_channel_;
     }
+    /** @brief Access the control channel (const). */
     const openvpn::ControlChannel &GetControlChannel() const
     {
         return control_channel_;
@@ -160,6 +164,7 @@ class Connection
     {
         return crypto_context_;
     }
+    /** @brief Access the data-channel crypto context (const). */
     const openvpn::CryptoContext &GetCryptoContext() const
     {
         return crypto_context_;
@@ -452,6 +457,7 @@ class Connection
         return *transport_;
     }
 
+    /** @brief Access the session transport handle (const). */
     const transport::TransportHandle &GetTransport() const
     {
         return *transport_;
@@ -539,9 +545,15 @@ class Connection
 
 // std::hash specialization for Connection::Endpoint — enables use as
 // unordered_map key for O(1) endpoint-based session lookup.
+/** @brief Hash support for Connection::Endpoint as an unordered_map key. */
 template <>
 struct std::hash<clv::vpn::Connection::Endpoint>
 {
+    /**
+     * @brief Hash an endpoint by address bytes and port.
+     * @param ep Endpoint to hash
+     * @return Combined hash value
+     */
     std::size_t operator()(const clv::vpn::Connection::Endpoint &ep) const noexcept
     {
         // Hash the address bytes directly.  For v4 the 4-byte representation

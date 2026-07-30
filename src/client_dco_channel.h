@@ -64,6 +64,14 @@ class ClientDcoChannel : public DcoClientDataMixin<ClientDcoChannel<Adapter>>
     friend DcoCore<ClientDcoChannel<Adapter>>;
 
   public:
+    /**
+     * @brief Construct the client DCO data channel.
+     * @param io_context ASIO context for the control recv loop
+     * @param logger Logger for DCO events
+     * @param config Client configuration (keepalive intervals)
+     * @param running Shared stop flag
+     * @param adapter Data→control adapter
+     */
     ClientDcoChannel(asio::io_context &io_context,
                      spdlog::logger &logger,
                      const VpnConfig &config,
@@ -78,6 +86,7 @@ class ClientDcoChannel : public DcoClientDataMixin<ClientDcoChannel<Adapter>>
     {
     }
 
+    /** @brief Default destructor; mixin tears down DCO resources. */
     ~ClientDcoChannel() = default;
 
     ClientDcoChannel(const ClientDcoChannel &) = delete;
@@ -102,6 +111,11 @@ class ClientDcoChannel : public DcoClientDataMixin<ClientDcoChannel<Adapter>>
     using DataMixinBase::StopDataPath;
 
 
+    /**
+     * @brief Report "just now" so KeepaliveLoop skips userspace PINGs.
+     *
+     * DCO keepalives are handled by the kernel.
+     */
     std::chrono::steady_clock::time_point LastTxTime() const noexcept
     {
         // DCO keepalives are managed by the kernel; always report "just now" so
@@ -111,6 +125,7 @@ class ClientDcoChannel : public DcoClientDataMixin<ClientDcoChannel<Adapter>>
 
     // -- Control adapter hooks (called by ClientControlAdapter) ---------------
 
+    /** @brief Bind UDP socket, peer, and push any pending keys to the kernel. */
     void AttachTransport(transport::TransportHandle &handle,
                          transport::PeerEndpoint peer,
                          std::uint32_t peer_id)
@@ -127,6 +142,7 @@ class ClientDcoChannel : public DcoClientDataMixin<ClientDcoChannel<Adapter>>
         }
     }
 
+    /** @brief Stage or push data-path keys to the DCO kernel peer. */
     void InstallDataPathKeys(const std::vector<std::uint8_t> &key_material,
                              openvpn::CipherAlgorithm cipher_algo,
                              openvpn::HmacAlgorithm /*hmac_algo*/,
@@ -145,6 +161,7 @@ class ClientDcoChannel : public DcoClientDataMixin<ClientDcoChannel<Adapter>>
         }
     }
 
+    /** @brief Configure the DCO netdev from negotiated PUSH settings. */
     void ConfigureNetworkInterface(const openvpn::NegotiatedConfig &negotiated,
                                    const VpnConfig & /*config*/,
                                    asio::io_context & /*io_ctx*/)
@@ -171,6 +188,7 @@ class ClientDcoChannel : public DcoClientDataMixin<ClientDcoChannel<Adapter>>
                                              static_cast<std::uint16_t>(negotiated.tun_mtu));
     }
 
+    /** @brief Install negotiated routes on the DCO interface. */
     void InstallNegotiatedRoutes(const openvpn::NegotiatedConfig &negotiated)
     {
         for (const auto &[network, gw, metric] : negotiated.routes)
@@ -179,14 +197,7 @@ class ClientDcoChannel : public DcoClientDataMixin<ClientDcoChannel<Adapter>>
             const std::string cidr = NormalizeNegotiatedRoute4(network, gw);
 
             this->logger_->info("Route: {} dev {}", cidr, DataMixinBase::GetIfName());
-            try
-            {
-                DataMixinBase::InstallRoute(cidr);
-            }
-            catch (const std::exception &e)
-            {
-                this->logger_->error("Route failed: {}", e.what());
-            }
+            DataMixinBase::InstallRoute(cidr);
         }
 
         for (const auto &[network, gw, metric] : negotiated.routes_ipv6)
@@ -194,32 +205,29 @@ class ClientDcoChannel : public DcoClientDataMixin<ClientDcoChannel<Adapter>>
             (void)gw;
             (void)metric;
             this->logger_->info("IPv6 route: {} dev {}", network, DataMixinBase::GetIfName());
-            try
-            {
-                DataMixinBase::InstallRoute(network, /*is_ipv6=*/true);
-            }
-            catch (const std::exception &e)
-            {
-                this->logger_->error("IPv6 route failed: {}", e.what());
-            }
+            DataMixinBase::InstallRoute(network, /*is_ipv6=*/true);
         }
     }
 
+    /** @brief No-op; DCO netdev lifetime is managed by the mixin. */
     void OnTeardown()
     {
     }
 
     // For DCO this is a NoOp, as the kernel handles keepalives autonomously.
+    /** @brief No-op; kernel handles keepalives. */
     template <std::invocable Fn>
     void LaunchKeepalive(asio::io_context & /*io_ctx*/, Fn && /*fn*/, int /*interval*/)
     {
     }
 
+    /** @brief No-op; kernel handles keepalives. */
     asio::awaitable<void> SendKeepalivePing()
     {
         co_return; // DCO kernel handles keepalives autonomously
     }
 
+    /** @brief CryptoContext used for outbound limits bookkeeping. */
     openvpn::CryptoContext &GetLimitsCryptoContext()
     {
         if (!limits_crypto_)

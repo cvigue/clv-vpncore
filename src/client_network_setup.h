@@ -5,7 +5,7 @@
 
 /**
  * @file client_network_setup.h
- * @brief Shared client TUN addressing and negotiated-route install (DRY F1).
+ * @brief Shared client TUN addressing and negotiated-route install.
  *
  * Userspace UDP/TCP channels call ConfigureClientTun + InstallClientNegotiatedRoutes.
  * DCO keeps its install backend but reuses NormalizeNegotiatedRoute4.
@@ -34,8 +34,8 @@ inline constexpr std::uint16_t kClientDefaultTunMtu = 1400;
                                                     const std::string &gw);
 
 /**
- * Connected IPv4 CIDR from ifconfig (host & mask), or empty if unavailable.
- * Used to skip kernel-managed connected-subnet routes on userspace TUN.
+ * Connected IPv4 CIDR from ifconfig when topology is subnet; empty otherwise.
+ * Invalid host/mask throws (aborts connect via ConnectionLoop).
  */
 [[nodiscard]] std::string ConnectedCidrFromIfconfig(const openvpn::NegotiatedConfig &negotiated);
 

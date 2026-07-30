@@ -4,6 +4,9 @@
 
 #include "cpu_affinity.h"
 #include "log_subsystems.h"
+#include "server_dco_control_adapter.h"
+#include "server_tcp_control_adapter.h"
+#include "server_udp_control_adapter.h"
 #include "transport_mode.h"
 #include "openvpn/vpn_config.h"
 #include "server_control_base.h"
@@ -81,6 +84,7 @@ spdlog::level::level_enum ParseLogLevel(const std::string &str)
 VpnServer::VpnServer(asio::io_context &io_context, const VpnConfig &config, TunnelZone &zone)
     : io_context_(io_context),
       config_(config),
+      zone_(zone),
       logger_(spdlog::stdout_color_mt("vpn_server"))
 {
     // Set log level from config (env var VPN_LOG_LEVEL overrides)
@@ -153,6 +157,8 @@ void VpnServer::Start()
                   transport::EffectiveBatchSize(config_.performance.batch_size),
                   config_.performance.stats_interval_seconds,
                   AffinityModeString(config_.process.cpu_affinity));
+
+    zone_.EnsureTransitRouting();
 
     running_ = true;
 

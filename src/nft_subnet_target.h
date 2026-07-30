@@ -3,8 +3,6 @@
 #ifndef CLV_VPN_NFT_SUBNET_TARGET_H
 #define CLV_VPN_NFT_SUBNET_TARGET_H
 
-#include "platform/linux/nftables/nftables_client.h"
-
 #include <array>
 #include <cstdint>
 #include <optional>

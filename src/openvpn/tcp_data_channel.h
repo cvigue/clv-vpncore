@@ -23,7 +23,7 @@
 #include "openvpn/connection.h"
 #include "keepalive_loop.h"
 #include "openvpn/crypto_context.h"
-#include "openvpn/key_derivation.h"
+#include "openvpn/session_key_install.h"
 #include "openvpn/packet.h"
 #include "openvpn/protocol_constants.h"
 #include "openvpn/session_manager.h"
@@ -83,6 +83,21 @@ template <typename Adapter>
 class TcpDataChannel
 {
   public:
+    /**
+     * @brief Construct the server TCP data channel.
+     * @param host Listen address
+     * @param port Listen port
+     * @param routing_table IPv4 client routing table
+     * @param routing_table_v6 IPv6 client routing table
+     * @param session_manager Active session table
+     * @param logger Data-path logger
+     * @param rx_counters Shared RX counter storage
+     * @param tx_counters Shared TX counter storage
+     * @param keepalive_interval PING interval in seconds
+     * @param keepalive_timeout Dead-peer timeout in seconds
+     * @param running_flag Shared stop flag
+     * @param adapter Data→control adapter
+     */
     TcpDataChannel(const std::string &host,
                    std::uint16_t port,
                    RoutingTableIpv4 &routing_table,
@@ -111,6 +126,7 @@ class TcpDataChannel
     {
     }
 
+    /** @brief Destroy the channel and stop the internal thread. */
     ~TcpDataChannel() = default;
 
     TcpDataChannel(const TcpDataChannel &) = delete;
@@ -119,6 +135,7 @@ class TcpDataChannel
     TcpDataChannel &operator=(TcpDataChannel &&) = delete;
 
 
+    /** @brief Internal io_context used for accept and TUN loops. */
     asio::io_context &InternalContext()
     {
         return internal_ctx_;
@@ -126,6 +143,10 @@ class TcpDataChannel
 
     // -- Data plane setup (called from ServerControlBase::ConfigureDataPlane) ---
 
+    /**
+     * @brief Create hub TUN and register with the tunnel zone.
+     * @return Hub TUN device name
+     */
     std::string ConfigureDataPlane(const VpnConfig::ServerConfig &srv,
                                    asio::io_context & /*io_ctx*/,
                                    TunnelZone *zone)
@@ -140,6 +161,11 @@ class TcpDataChannel
 
     // ---- Data-plane interface ----
 
+    /**
+     * @brief Decrypt a data packet on the control thread and write to TUN.
+     * @param session Owning connection
+     * @param packet Encrypted OpenVPN data frame
+     */
     asio::awaitable<void> ProcessIncomingDataPacket(Connection *session,
                                                     const openvpn::OpenVpnPacket &packet)
     {
@@ -177,6 +203,12 @@ class TcpDataChannel
         }
     }
 
+    /**
+     * @brief Decrypt a datagram in place; return plaintext only for forwardable IP payloads.
+     * @param session Owning connection
+     * @param datagram Mutable wire buffer
+     * @return Plaintext span, or empty for keepalive/drop/failure
+     */
     std::span<std::uint8_t> DecryptAndStripInPlace(Connection *session,
                                                    std::span<std::uint8_t> datagram)
     {
@@ -187,6 +219,7 @@ class TcpDataChannel
         return plaintext;
     }
 
+    /** @brief Start accept loop, TUN transmit loop, and internal io_context thread. */
     asio::awaitable<void> StartDataPath()
     {
         if (!adapter_)
@@ -208,6 +241,8 @@ class TcpDataChannel
         co_return;
     }
 
+    /** @brief Stop internal thread and release hub attachment. */
+    /** @brief Stop internal thread and release hub attachment. */
     void StopDataPath()
     {
         hub_attachment_.Release();
@@ -217,32 +252,25 @@ class TcpDataChannel
             tun_device_->Close();
     }
 
+    /**
+     * @brief Derive and install session keys on a connection.
+     * @return false on key derivation or install failure
+     */
     bool InstallKeys(Connection *session,
                      const std::vector<uint8_t> &key_material,
                      openvpn::CipherAlgorithm cipher_algo,
                      openvpn::HmacAlgorithm hmac_algo,
                      std::uint8_t key_id)
     {
-        bool keys_installed = openvpn::KeyDerivation::InstallKeys(
-            session->GetCryptoContext(),
-            key_material,
-            cipher_algo,
-            hmac_algo,
-            key_id);
-
-        if (keys_installed)
-        {
-            logger_->info("Data channel session keys installed successfully (key_id={})", key_id);
-            session->GetCryptoContext().SetCurrentKeyId(key_id);
-        }
-        else
-        {
-            logger_->error("Failed to install data channel session keys");
-        }
-
-        return keys_installed;
+        return openvpn::InstallSessionKeys(session,
+                                           key_material,
+                                           cipher_algo,
+                                           hmac_algo,
+                                           key_id,
+                                           *logger_);
     }
 
+    /** @brief Send an encrypted keepalive ping on a session's TCP transport. */
     asio::awaitable<void> SendKeepAlivePing(Connection *session)
     {
         if (!session || !session->HasTransport())
@@ -278,6 +306,7 @@ class TcpDataChannel
         }
     }
 
+    /** @brief Run the server keepalive monitor coroutine. */
     asio::awaitable<void> RunKeepaliveMonitor()
     {
         return KeepaliveLoop(
@@ -295,19 +324,23 @@ class TcpDataChannel
         { adapter_->OnPeerDead(sv.conn->GetSessionId()); });
     }
 
+    /** @brief Cancel the keepalive monitor timer. */
     void StopKeepaliveMonitor()
     {
         keepalive_timer_.cancel();
     }
 
+    /** @brief No-op; TCP path processes one packet at a time. */
     void SetBatchSize(std::size_t)
     { /* no-op for TCP */
     }
+    /** @brief Always 1 for the single-packet TCP path. */
     std::size_t GetBatchSize() const
     {
         return 1;
     }
 
+    /** @brief Merged RX/TX counter snapshot. */
     DataPathStats SnapshotStats() const
     {
         return DataPathStats::Merge(rx_counters_, tx_counters_);
@@ -476,8 +509,7 @@ class TcpDataChannel
                     if (session && session->GetCryptoContext().HasValidKeys())
                     {
                         session->UpdateLastActivity();
-                        auto plaintext =
-                            session->GetCryptoContext().DecryptPacketInPlace(data);
+                        auto plaintext = session->GetCryptoContext().DecryptPacketInPlace(data);
                         if (plaintext.empty())
                         {
                             rx_counters_.decryptFailures++;
@@ -493,13 +525,13 @@ class TcpDataChannel
                         case openvpn::DecryptedPayloadDisposition::Drop:
                             continue;
                         case openvpn::DecryptedPayloadDisposition::Forward:
-                        {
-                            tun::IpPacket ip_packet;
-                            ip_packet.data.assign(plaintext.begin(), plaintext.end());
-                            rx_counters_.tunWrites++;
-                            co_await SendToTun(ip_packet);
-                            continue;
-                        }
+                            {
+                                tun::IpPacket ip_packet;
+                                ip_packet.data.assign(plaintext.begin(), plaintext.end());
+                                rx_counters_.tunWrites++;
+                                co_await SendToTun(ip_packet);
+                                continue;
+                            }
                         }
                     }
                 }

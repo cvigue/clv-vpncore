@@ -31,6 +31,7 @@
 #include "openvpn/crypto_algorithms.h"
 #include "openvpn/crypto_context.h"
 #include "openvpn/key_derivation.h"
+#include "openvpn/session_key_install.h"
 #include "openvpn/packet.h"
 #include "openvpn/protocol_constants.h"
 #include "openvpn/session_manager.h"
@@ -75,6 +76,13 @@ class UdpServerMixin : public UdpCore<Derived, MultiPeerPolicy>
   public:
     // -- Data plane setup (called from ServerControlBase::ConfigureDataPlane) ---
 
+    /**
+     * @brief Create hub TUN and register with the tunnel zone.
+     * @param srv Server configuration (network, dev name, policy)
+     * @param io_ctx ASIO context for the TUN device
+     * @param zone Tunnel zone for hub attachment (may be null)
+     * @return Hub TUN device name
+     */
     std::string ConfigureDataPlane(const VpnConfig::ServerConfig &srv,
                                    asio::io_context &io_ctx,
                                    TunnelZone *zone)
@@ -88,11 +96,19 @@ class UdpServerMixin : public UdpCore<Derived, MultiPeerPolicy>
 
     // -- Pre-start configuration ---------------------------------------------
 
+    /**
+     * @brief Wire QSBR publication context before StartDataPath.
+     * @param ctx Split-datapath engine context
+     */
     void SetSplitContext(UdpEngineContext *ctx)
     {
         split_ctx_ = ctx;
     }
 
+    /**
+     * @brief Bind the shared UDP socket before StartDataPath.
+     * @param fd Raw socket file descriptor
+     */
     void SetSocketFd(int fd)
     {
         socket_fd_ = fd;
@@ -100,6 +116,7 @@ class UdpServerMixin : public UdpCore<Derived, MultiPeerPolicy>
 
     // -- Engine lifecycle ----------------------------------------------------
 
+    /** @brief Start multi-peer RX/TX worker threads. */
     asio::awaitable<void> StartDataPath()
     {
         if (!split_ctx_ || !tun_device_ || socket_fd_ < 0)
@@ -123,6 +140,7 @@ class UdpServerMixin : public UdpCore<Derived, MultiPeerPolicy>
         co_return;
     }
 
+    /** @brief Stop workers, release hub attachment, and close TUN. */
     void StopDataPath()
     {
         hub_attachment_.Release();
@@ -133,6 +151,11 @@ class UdpServerMixin : public UdpCore<Derived, MultiPeerPolicy>
 
     // -- Slow-path packet processing (control-plane thread) ------------------
 
+    /**
+     * @brief Decrypt a data packet on the control thread and write to TUN.
+     * @param session Owning connection
+     * @param packet Encrypted OpenVPN data frame
+     */
     asio::awaitable<void> ProcessIncomingDataPacket(Connection *session,
                                                     const openvpn::OpenVpnPacket &packet)
     {
@@ -150,15 +173,21 @@ class UdpServerMixin : public UdpCore<Derived, MultiPeerPolicy>
             Core::logger().debug("Received OpenVPN keepalive ping from client");
             co_return;
         case openvpn::DecryptedPayloadDisposition::Forward:
-        {
-            tun::IpPacket ip_packet;
-            ip_packet.data = std::move(plaintext);
-            co_await SendToTun(ip_packet);
-            co_return;
-        }
+            {
+                tun::IpPacket ip_packet;
+                ip_packet.data = std::move(plaintext);
+                co_await SendToTun(ip_packet);
+                co_return;
+            }
         }
     }
 
+    /**
+     * @brief Decrypt a datagram in place and strip non-forwardable payloads.
+     * @param session Owning connection
+     * @param datagram Mutable wire buffer
+     * @return Plaintext span, or empty for keepalive/drop/failure
+     */
     std::span<std::uint8_t> DecryptAndStripInPlace(Connection *session,
                                                    std::span<std::uint8_t> datagram)
     {
@@ -173,40 +202,34 @@ class UdpServerMixin : public UdpCore<Derived, MultiPeerPolicy>
 
     // -- Key management ------------------------------------------------------
 
+    /**
+     * @brief Derive and install session keys on a connection.
+     * @return false on key derivation or install failure
+     */
     bool InstallKeys(Connection *session,
                      const std::vector<uint8_t> &key_material,
                      openvpn::CipherAlgorithm cipher_algo,
                      openvpn::HmacAlgorithm hmac_algo,
                      std::uint8_t key_id)
     {
-        bool keys_installed = openvpn::KeyDerivation::InstallKeys(
-            session->GetCryptoContext(),
-            key_material,
-            cipher_algo,
-            hmac_algo,
-            key_id);
-
-        if (keys_installed)
-        {
-            Core::logger().info("Data channel session keys installed successfully (key_id={})", key_id);
-            session->GetCryptoContext().SetCurrentKeyId(key_id);
-        }
-        else
-        {
-            Core::logger().error("Failed to install data channel session keys");
-        }
-
-        return keys_installed;
+        return openvpn::InstallSessionKeys(session,
+                                           key_material,
+                                           cipher_algo,
+                                           hmac_algo,
+                                           key_id,
+                                           Core::logger());
     }
 
     // -- Keepalive -----------------------------------------------------------
 
+    /** @brief Send an encrypted keepalive ping to a session. */
     asio::awaitable<void> SendKeepAlivePing(Connection *session)
     {
         co_await this->derived().SendEncryptedToSession(
             session, std::span<const std::uint8_t>{openvpn::KEEPALIVE_PING_PAYLOAD, openvpn::KEEPALIVE_PING_SIZE});
     }
 
+    /** @brief Run the server keepalive monitor coroutine. */
     asio::awaitable<void> RunKeepaliveMonitor()
     {
         return KeepaliveLoop(
@@ -224,6 +247,7 @@ class UdpServerMixin : public UdpCore<Derived, MultiPeerPolicy>
         { this->derived().OnPeerDead(sv.conn->GetSessionId()); });
     }
 
+    /** @brief Cancel the keepalive monitor timer. */
     void StopKeepaliveMonitor()
     {
         keepalive_timer_.cancel();
@@ -231,6 +255,7 @@ class UdpServerMixin : public UdpCore<Derived, MultiPeerPolicy>
 
     // -- Stats ---------------------------------------------------------------
 
+    /** @brief Data-path counter snapshot including route lookup misses. */
     DataPathStats SnapshotStats() const
     {
         if (Core::CoreRunning())
@@ -242,22 +267,26 @@ class UdpServerMixin : public UdpCore<Derived, MultiPeerPolicy>
         return {};
     }
 
+    /** @brief Set recvmmsg/sendmmsg batch size. */
     void SetBatchSize(std::size_t newSize)
     {
         perf_config_.batch_size = static_cast<int>(
             std::min(newSize, transport::kMaxBatchSize));
     }
 
+    /** @brief Effective batch size from performance config. */
     std::size_t GetBatchSize() const
     {
         return transport::EffectiveBatchSize(perf_config_.batch_size);
     }
 
+    /** @brief RX batch histogram window for stats logging. */
     BatchHistWindow &GetRxBatchWindow()
     {
         return Core::CoreRxBatchWindow();
     }
 
+    /** @brief TX burst average window for stats logging. */
     TxBurstAvgWindow &GetTxBurstAvgWindow()
     {
         return Core::CoreTxBurstAvgWindow();

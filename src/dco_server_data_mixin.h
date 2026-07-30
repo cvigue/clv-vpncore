@@ -52,8 +52,10 @@
 #include <net/ipv6_utils.h>
 #include <util/netlink_helper.h>
 
+#include <asio/as_tuple.hpp>
 #include <asio/awaitable.hpp>
 #include <asio/buffer.hpp>
+#include <asio/error.hpp>
 #include <asio/io_context.hpp>
 #include <asio/ip/udp.hpp>
 #include <asio/posix/stream_descriptor.hpp>
@@ -142,8 +144,10 @@ class DcoServerDataMixin : public DcoCore<Derived>
   public:
     // -- Data plane setup (called from ServerControlBase::ConfigureDataPlane) ---
 
-    // DCO device is fully configured during construction (InitializeDco).
-    // Returns the netdev name for logging; attaches hub to zone when present.
+    /**
+     * @brief Register hub attachment with the tunnel zone.
+     * @return DCO netdev name
+     */
     std::string ConfigureDataPlane(const VpnConfig::ServerConfig &srv,
                                    [[maybe_unused]] asio::io_context &io_ctx,
                                    TunnelZone *zone)
@@ -156,6 +160,7 @@ class DcoServerDataMixin : public DcoCore<Derived>
 
     // -- Data-path no-ops (kernel handles everything) -----------------------
 
+    /** @brief Should not be called; kernel handles inbound data. */
     asio::awaitable<void> ProcessIncomingDataPacket(
         [[maybe_unused]] Connection *session,
         [[maybe_unused]] const openvpn::OpenVpnPacket &packet)
@@ -164,17 +169,20 @@ class DcoServerDataMixin : public DcoCore<Derived>
         co_return;
     }
 
+    /** @brief No-op; kernel decrypts inbound datagrams. */
     std::span<std::uint8_t> DecryptAndStripInPlace(Connection *, std::span<std::uint8_t>)
     {
         return {};
     }
 
+    /** @brief Should not be called; kernel handles TUN egress. */
     asio::awaitable<void> ProcessOutgoingTunPacket([[maybe_unused]] tun::IpPacket &packet)
     {
         this->logger_->warn("DCO: ProcessOutgoingTunPacket called unexpectedly");
         co_return;
     }
 
+    /** @brief No-op; kernel handles keepalives. */
     asio::awaitable<void> SendKeepAlivePing([[maybe_unused]] Connection *session)
     {
         co_return; // kernel handles keepalive autonomously
@@ -182,6 +190,10 @@ class DcoServerDataMixin : public DcoCore<Derived>
 
     // -- Key installation ---------------------------------------------------
 
+    /**
+     * @brief Create a DCO peer and push session keys to the kernel.
+     * @return false on peer creation or netlink failure
+     */
     bool InstallKeys(Connection *session,
                      const std::vector<uint8_t> &key_material,
                      openvpn::CipherAlgorithm cipher_algo,
@@ -253,11 +265,20 @@ class DcoServerDataMixin : public DcoCore<Derived>
 
     // -- Peer management ----------------------------------------------------
 
+    /**
+     * @brief Extract the DCO peer_id from a session identifier.
+     * @param session Connection whose session ID encodes the peer_id
+     * @return Low 24 bits of the session ID
+     */
     uint32_t GetPeerId(Connection *session) const
     {
         return static_cast<uint32_t>(session->GetSessionId().value & openvpn::PEER_ID_MASK);
     }
 
+    /**
+     * @brief Remove a peer from the kernel and local tracking maps.
+     * @param session Connection being torn down
+     */
     void RemoveDcoPeer(Connection *session)
     {
         if (!this->dco_initialized_)
@@ -273,6 +294,7 @@ class DcoServerDataMixin : public DcoCore<Derived>
 
     // -- Receive loop (CRTP — no std::function) -----------------------------
 
+    /** @brief Run the UDP control-packet receive loop. */
     asio::awaitable<void> StartDataPath()
     {
         constexpr std::size_t kMaxPacket = 4096;
@@ -283,27 +305,26 @@ class DcoServerDataMixin : public DcoCore<Derived>
         while (this->running_)
         {
             asio::ip::udp::endpoint remote;
-            try
+            auto [ec, n] = co_await socket_.async_receive_from(
+                asio::buffer(buf), remote, asio::as_tuple(asio::use_awaitable));
+            if (ec)
             {
-                auto n = co_await socket_.async_receive_from(
-                    asio::buffer(buf), remote, asio::use_awaitable);
-
-                auto sender = transport::FromAsioEndpoint(remote);
-                std::vector<std::uint8_t> data(buf.begin(),
-                                               buf.begin() + static_cast<std::ptrdiff_t>(n));
-                this->derived().OnControlPacket(std::move(data), sender);
-            }
-            catch (const asio::system_error &e)
-            {
-                if (e.code() == asio::error::operation_aborted)
+                if (ec == asio::error::operation_aborted)
                     break;
-                this->logger_->warn("DCO: receive error: {}", e.what());
+                this->logger_->warn("DCO: receive error: {}", ec.message());
+                continue;
             }
+
+            auto sender = transport::FromAsioEndpoint(remote);
+            std::vector<std::uint8_t> data(buf.begin(),
+                                           buf.begin() + static_cast<std::ptrdiff_t>(n));
+            this->derived().OnControlPacket(std::move(data), sender);
         }
 
         this->logger_->debug("DCO: control receive loop exiting");
     }
 
+    /** @brief Release hub attachment; socket is shared and not closed here. */
     void StopDataPath()
     {
         // Socket is shared / not owned; still release hub attachment here so
@@ -311,8 +332,14 @@ class DcoServerDataMixin : public DcoCore<Derived>
         hub_attachment_.Release();
     }
 
-    // -- Keepalive monitor (CRTP — no std::function) ------------------------
+    // -- Keepalive monitor ------------------------
 
+    /**
+     * @brief Monitor kernel DCO peer-death multicast events.
+     *
+     * Invokes OnPeerDead on the derived channel when the kernel reports
+     * a peer was removed (typically keepalive timeout).
+     */
     asio::awaitable<void> RunKeepaliveMonitor()
     {
         NetlinkHelper mcast_helper;
@@ -483,6 +510,7 @@ class DcoServerDataMixin : public DcoCore<Derived>
         nl_stream_.reset();
     }
 
+    /** @brief Close the netlink multicast stream used by RunKeepaliveMonitor. */
     void StopKeepaliveMonitor()
     {
         if (nl_stream_)
@@ -491,14 +519,18 @@ class DcoServerDataMixin : public DcoCore<Derived>
 
     // -- Stats --------------------------------------------------------------
 
+    /** @brief Data-path counter snapshot from DcoCore. */
     DataPathStats SnapshotStats() const
     {
         return this->SnapshotStatsImpl();
     }
 
+    /** @brief No-op; DCO has no userspace batching. */
     void SetBatchSize(std::size_t)
     { /* no-op */
     }
+
+    /** @brief Always 0; DCO has no userspace batching. */
     std::size_t GetBatchSize() const
     {
         return 0;

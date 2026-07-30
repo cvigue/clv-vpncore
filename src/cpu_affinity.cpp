@@ -2,6 +2,9 @@
 
 #include "cpu_affinity.h"
 
+#include <algorithm>
+#include <atomic>
+#include <cstdint>
 #include <spdlog/spdlog.h>
 
 #include <sched.h>  // sched_setaffinity, sched_getcpu, cpu_set_t

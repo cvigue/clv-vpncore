@@ -15,9 +15,11 @@
 #include <string>
 #include <utility>
 
+#include <asio/as_tuple.hpp>
 #include <asio/awaitable.hpp>
 #include <asio/error.hpp>
 #include <asio/steady_timer.hpp>
+#include <asio/system_error.hpp>
 #include <asio/use_awaitable.hpp>
 
 #include <spdlog/spdlog.h>
@@ -412,7 +414,7 @@ struct TxBurstAvgWindow
 };
 
 /**
- * Periodic stats timer loop shared by client and server (DRY F5).
+ * Periodic stats timer loop shared by client and server.
  *
  * @param still_alive  Stop when false (e.g. running_ / Connected).
  * @param snapshot     Capture current DataPathStats (may throw — skipped).
@@ -431,16 +433,11 @@ asio::awaitable<void> RunStatsLoop(asio::steady_timer &timer,
     while (still_alive())
     {
         timer.expires_after(interval);
-        try
-        {
-            co_await timer.async_wait(asio::use_awaitable);
-        }
-        catch (const asio::system_error &e)
-        {
-            if (e.code() == asio::error::operation_aborted)
-                break;
-            throw;
-        }
+        auto [ec] = co_await timer.async_wait(asio::as_tuple(asio::use_awaitable));
+        if (ec == asio::error::operation_aborted)
+            break;
+        if (ec)
+            throw asio::system_error(ec);
 
         if (!still_alive())
             break;

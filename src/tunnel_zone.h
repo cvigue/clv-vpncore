@@ -22,11 +22,18 @@ namespace clv::vpn {
  * @brief Per-process traffic-policy controller for tunnel attachments.
  *
  * Owns hub/link attachment registry and kernel policy guards (masquerade and
- * intra-pool nft isolation when client_to_client=false).
+ * intra-pool nft isolation when client_to_client=false). VpnServer::Start
+ * calls EnsureTransitRouting() when ZonePolicy::ip_forward is set.
  */
 class TunnelZone
 {
   public:
+    /**
+     * @brief Construct a zone with the given traffic policy.
+     * @param policy Masquerade, C2C isolation, and forwarding rules
+     * @param logger Logger for kernel policy installation events
+     * @param install_kernel_policy When false, skip nft/masquerade (testing)
+     */
     explicit TunnelZone(ZonePolicy policy,
                         spdlog::logger &logger,
                         bool install_kernel_policy = true);
@@ -36,19 +43,52 @@ class TunnelZone
     TunnelZone(TunnelZone &&) = delete;
     TunnelZone &operator=(TunnelZone &&) = delete;
 
+    /**
+     * @brief Register a hub TUN attachment and install per-hub kernel policy.
+     * @param spec Hub device name, tunnel pools, and attachment metadata
+     */
     void RegisterHubAttachment(HubAttachmentSpec spec);
+
+    /**
+     * @brief Remove a hub attachment and tear down its kernel policy guards.
+     * @param data_dev Hub TUN device name previously passed to RegisterHubAttachment
+     */
     void UnregisterHubAttachment(const std::string &data_dev);
 
-    /** Enable process-level IPv4/IPv6 forwarding per @c ZonePolicy::ip_forward. */
+    /**
+     * @brief Enable process-level IPv4/IPv6 forwarding per ZonePolicy::ip_forward.
+     *
+     * Called by VpnServer::Start when transit routing is required.
+     */
     void EnsureTransitRouting();
 
+    /**
+     * @brief Active zone traffic policy.
+     * @return Policy supplied at construction
+     */
     ZonePolicy Policy() const noexcept
     {
         return policy_;
     }
 
+    /**
+     * @brief Number of registered hub attachments.
+     * @return Count of active hub TUN devices
+     */
     std::size_t HubAttachmentCount() const;
+
+    /**
+     * @brief Whether a hub attachment is registered for the given device.
+     * @param data_dev Hub TUN device name
+     * @return true if the device is registered
+     */
     bool HasHubAttachment(const std::string &data_dev) const;
+
+    /**
+     * @brief Look up a registered hub attachment by device name.
+     * @param data_dev Hub TUN device name
+     * @return Attachment spec, or nullopt if not registered
+     */
     std::optional<HubAttachmentSpec> FindHubAttachment(const std::string &data_dev) const;
 
   private:

@@ -53,13 +53,23 @@ struct TlsCertConfig
 class TlsContext
 {
   public:
+    /**
+     * @brief Construct a TLS context for the given peer role.
+     * @param role Client or server
+     * @param cert_config Optional certificate paths (server usually required)
+     * @param logger Logger for handshake events
+     */
     explicit TlsContext(PeerRole role, std::optional<TlsCertConfig> cert_config, spdlog::logger &logger);
+
+    /** @brief Destroy the TLS context. */
     ~TlsContext() = default;
 
     // Non-copyable, movable
     TlsContext(const TlsContext &) = delete;
     TlsContext &operator=(const TlsContext &) = delete;
+    /** @brief Move-construct a TLS context. */
     TlsContext(TlsContext &&) = default;
+    /** @brief Move-assign a TLS context. */
     TlsContext &operator=(TlsContext &&) = default;
 
     /**

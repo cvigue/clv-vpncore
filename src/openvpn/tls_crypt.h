@@ -40,11 +40,13 @@ class TlsCryptReplayState
         return true;
     }
 
+    /** @brief Clear the replay window (new session key). */
     void Reset() noexcept
     {
         window_.Reset();
     }
 
+    /** @brief Highest accepted packet ID in the replay window. */
     [[nodiscard]] std::uint32_t highest() const noexcept
     {
         return window_.highest_id();

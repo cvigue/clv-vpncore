@@ -172,7 +172,7 @@ void ControlChannel::ResetReliabilityForRekey(bool reset_inbound_to_max)
     outbound_packet_id_ = 0;
     unacked_packets_.clear();
     // Defense-in-depth: drop already-serialized fragments so they cannot flush
-    // under the new key_id (cve-audit F2 / CVE-2026-40215 hygiene).
+    // under the new key_id (drop stale fragments on rekey).
     pending_fragments_.clear();
     if (reset_inbound_to_max)
     {
@@ -202,6 +202,14 @@ std::vector<std::uint8_t> ControlChannel::HandleSoftReset(const OpenVpnPacket &p
     if (!packet.IsSoftReset())
     {
         logger_->warn("HandleSoftReset: invalid opcode {}", static_cast<int>(packet.opcode_));
+        return {};
+    }
+
+    if (PeerSidMismatch(packet))
+    {
+        logger_->warn("HandleSoftReset: rejected — wire sid {:016x} != peer sid {:016x}",
+                      packet.session_id_.value_or(0),
+                      peer_session_id_->value);
         return {};
     }
 
@@ -407,6 +415,14 @@ std::vector<std::uint8_t> ControlChannel::RespondToSoftReset(const OpenVpnPacket
     if (!packet.IsSoftReset())
     {
         logger_->warn("RespondToSoftReset: invalid opcode {}", static_cast<int>(packet.opcode_));
+        return {};
+    }
+
+    if (PeerSidMismatch(packet))
+    {
+        logger_->warn("RespondToSoftReset: rejected — wire sid {:016x} != peer sid {:016x}",
+                      packet.session_id_.value_or(0),
+                      peer_session_id_->value);
         return {};
     }
 

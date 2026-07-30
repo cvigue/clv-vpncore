@@ -52,6 +52,15 @@ class DcoDataChannel : public DcoServerDataMixin<DcoDataChannel<Adapter>>
   public:
     using NetworkConfig = DcoServerMixinBase::NetworkConfig;
 
+    /**
+     * @brief Construct the server DCO data channel.
+     * @param io_context ASIO context for recv and keepalive loops
+     * @param socket Shared UDP socket for control traffic
+     * @param network_config Server network and keepalive settings
+     * @param logger Data-path logger
+     * @param running_flag Shared stop flag
+     * @param adapter Data→control adapter
+     */
     DcoDataChannel(asio::io_context &io_context,
                    asio::ip::udp::socket &socket,
                    const NetworkConfig &network_config,
@@ -63,6 +72,7 @@ class DcoDataChannel : public DcoServerDataMixin<DcoDataChannel<Adapter>>
     {
     }
 
+    /** @brief Destroy the channel; mixin tears down DCO resources. */
     ~DcoDataChannel() = default;
 
     DcoDataChannel(const DcoDataChannel &) = delete;
@@ -81,6 +91,7 @@ class DcoDataChannel : public DcoServerDataMixin<DcoDataChannel<Adapter>>
     using DcoServerMixinBase::ProcessOutgoingTunPacket;
     using DcoServerMixinBase::RemoveDcoPeer;
 
+    /** @brief No-op; kernel handles keepalives via netlink. */
     asio::awaitable<void> SendKeepalivePing()
     {
         // DCO keepalives are handled by the kernel via netlink.

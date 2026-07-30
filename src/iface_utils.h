@@ -11,8 +11,6 @@
  * and point-to-point destination via ioctl.  Used by both the DCO server
  * (`DcoDataChannel::ConfigureDcoInterface`) and DCO client
  * (`VpnClient::ConfigureDcoInterface`).
- *
- * Covers factoring items F8 and F18 from goals-plan.md §6.
  */
 
 #include <numeric_util.h>
@@ -46,7 +44,7 @@ using clv::netlink::NetlinkHelper;
  * @brief Copy an interface name into an ifreq, rejecting oversized names.
  *
  * strncpy with a zeroed ifreq is NUL-safe but silently truncates names of
- * IFNAMSIZ-1 chars or longer, which would target the wrong interface (H5).
+ * IFNAMSIZ-1 chars or longer, which would target the wrong interface.
  * Validate the length at the boundary and throw instead.
  */
 inline void CopyIfName(struct ifreq &ifr, const char *ifname)
@@ -262,7 +260,7 @@ inline std::vector<std::string> QueryInterfaceAddresses(const std::string &ifnam
         if (nbytes <= 0)
             break;
 
-        // Guard ssize_t → int narrowing for NLMSG_OK arithmetic (H4)
+        // Guard ssize_t → int narrowing for NLMSG_OK arithmetic.
         auto remaining_opt = clv::checked_cast<int>(nbytes);
         if (!remaining_opt)
             break;

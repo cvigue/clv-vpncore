@@ -58,6 +58,12 @@ enum class PeerRole : std::uint8_t
     Client
 };
 
+/**
+ * @brief OpenVPN session key derivation and installation helpers.
+ *
+ * Module-level overview is in the file comment above; this class exposes
+ * PRF derivation, KeyMethod2, and CryptoContext key install.
+ */
 class KeyDerivation
 {
   public:
@@ -72,7 +78,7 @@ class KeyDerivation
      * Implements: PRF(master_secret, label) = HMAC-SHA256(master_secret, label || counter)
      * Counter increments each iteration if more than 32 bytes needed.
      *
-     * @warning **Not on the wire key path** (M1, confirmed 2026-07-05). Live
+     * @warning **Not on the wire key path.** Live
      * KeyMethod2 derivation uses OpenSSL's TLS 1.0 PRF via
      * DeriveKeyMaterialWithSecret(). This helper only serves unit tests as a
      * deterministic key-material generator; do not wire it into protocol code
@@ -144,6 +150,12 @@ class KeyDerivation
      */
     struct KeyMethod2Result
     {
+        /**
+         * @brief Construct a key-method-2 result.
+         * @param key_material Derived raw key bytes
+         * @param cipher_algo Resolved cipher
+         * @param hmac_algo Resolved HMAC
+         */
         KeyMethod2Result(std::vector<std::uint8_t> key_material,
                          CipherAlgorithm cipher_algo,
                          HmacAlgorithm hmac_algo)

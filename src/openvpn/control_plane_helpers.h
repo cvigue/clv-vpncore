@@ -20,7 +20,9 @@
 #include "openvpn/tls_crypt.h"
 #include "transport/transport.h"
 
+#include <asio/as_tuple.hpp>
 #include <asio/awaitable.hpp>
+#include <asio/error.hpp>
 #include <asio/io_context.hpp>
 #include <asio/steady_timer.hpp>
 #include <asio/use_awaitable.hpp>
@@ -34,7 +36,6 @@
 #include <span>
 #include <string>
 #include <string_view>
-#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -291,7 +292,7 @@ asio::awaitable<void> DispatchSessionControlPacket(openvpn::ControlChannel &cont
     }
 }
 
-inline constexpr int kDefaultTunMtu = 1500;
+inline constexpr int kDefaultTunMtu = 1500; ///< Default TUN MTU used in key-method 2 options
 
 /**
  * @brief Build the OpenVPN key-method 2 options string.
@@ -354,7 +355,7 @@ inline std::string BuildKeyMethod2Options(openvpn::PeerRole role,
 }
 
 /**
- * Outcome of @ref PollUntilRekey (DRY F3). Callers keep trigger / re-arm policy.
+ * Outcome of @ref PollUntilRekey. Callers keep trigger / re-arm policy.
  */
 enum class RekeyPollResult : std::uint8_t
 {
@@ -377,30 +378,25 @@ asio::awaitable<RekeyPollResult> PollUntilRekey(
     TakeRekeyRequest take_rekey_request)
 {
     asio::steady_timer timer(io_context);
-    try
+    while (std::chrono::steady_clock::now() < deadline)
     {
-        while (std::chrono::steady_clock::now() < deadline)
-        {
-            if (!still_active())
-                co_return RekeyPollResult::Cancelled;
-            if (take_rekey_request())
-                co_return RekeyPollResult::RekeyRequested;
+        if (!still_active())
+            co_return RekeyPollResult::Cancelled;
+        if (take_rekey_request())
+            co_return RekeyPollResult::RekeyRequested;
 
-            auto remaining = deadline - std::chrono::steady_clock::now();
-            if (remaining <= std::chrono::seconds(0))
-                break;
+        auto remaining = deadline - std::chrono::steady_clock::now();
+        if (remaining <= std::chrono::seconds(0))
+            break;
 
-            constexpr auto one_second = std::chrono::seconds(1);
-            timer.expires_after(remaining < one_second ? remaining : one_second);
-            co_await timer.async_wait(asio::use_awaitable);
+        constexpr auto one_second = std::chrono::seconds(1);
+        timer.expires_after(remaining < one_second ? remaining : one_second);
+        auto [ec] = co_await timer.async_wait(asio::as_tuple(asio::use_awaitable));
+        if (ec)
+            co_return RekeyPollResult::Cancelled;
 
-            if (!still_active())
-                co_return RekeyPollResult::Cancelled;
-        }
-    }
-    catch (const asio::system_error &)
-    {
-        co_return RekeyPollResult::Cancelled;
+        if (!still_active())
+            co_return RekeyPollResult::Cancelled;
     }
     co_return RekeyPollResult::Expired;
 }

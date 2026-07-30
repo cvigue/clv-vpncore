@@ -491,7 +491,7 @@ TEST_F(VpnConfigTest, NegativeBatchSizeClampedToZero)
 }
 
 // ============================================================================
-// H3: JSON numeric fields — type checks + bounds before assignment
+// JSON numeric fields — type checks + bounds before assignment
 // ============================================================================
 
 TEST_F(VpnConfigTest, RejectNonIntegerServerPort)

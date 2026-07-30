@@ -165,7 +165,7 @@ TEST_F(CryptoContextLimitsTest, GcmUsageViaCryptoContextRequestsRekey)
     channel_->SetAeadUsageForTest(blocks, invocations);
     EXPECT_FALSE(channel_->IsRekeyRequestedForTest());
 
-    channel_->RecordOutboundEncrypt(chunk, CipherAlgorithm::AES_128_GCM);
+    EXPECT_TRUE(channel_->TryReserveOutboundEncrypt(chunk, CipherAlgorithm::AES_128_GCM));
     EXPECT_TRUE(channel_->IsRekeyRequestedForTest());
     EXPECT_FALSE(channel_->IsOutboundEncryptBlocked());
     EXPECT_TRUE(channel_->TakeRekeyRequest());
@@ -180,7 +180,8 @@ TEST_F(CryptoContextLimitsTest, GcmHardLimitBlocksEncrypt)
     channel_->SetAeadUsageForTest(limit_minus_delta / 2,
                                   limit_minus_delta - (limit_minus_delta / 2));
 
-    channel_->RecordOutboundEncrypt(1, CipherAlgorithm::AES_128_GCM);
+    // Crossing packet is refused before encrypt (fail closed).
+    EXPECT_FALSE(channel_->TryReserveOutboundEncrypt(1, CipherAlgorithm::AES_128_GCM));
     EXPECT_TRUE(channel_->IsOutboundEncryptBlocked());
     EXPECT_FALSE(channel_->AllocateOutboundPacketId().has_value());
 
@@ -237,7 +238,8 @@ TEST_F(CryptoContextLimitsTest, ChaChaUsageDoesNotRequestRekey)
     channel_->InstallNewKeys(key, key, 0);
 
     channel_->SetAeadUsageForTest(kLegacyAeadUsageLimit / 2, kLegacyAeadUsageLimit / 2);
-    channel_->RecordOutboundEncrypt(kLegacyAeadMaxPlaintextBytes, CipherAlgorithm::CHACHA20_POLY1305);
+    EXPECT_TRUE(channel_->TryReserveOutboundEncrypt(kLegacyAeadMaxPlaintextBytes,
+                                                    CipherAlgorithm::CHACHA20_POLY1305));
 
     EXPECT_FALSE(channel_->IsRekeyRequestedForTest());
     EXPECT_FALSE(channel_->IsOutboundEncryptBlocked());

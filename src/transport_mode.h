@@ -8,6 +8,7 @@
 
 namespace clv::vpn {
 
+/** @brief Active data-plane transport engine selection. */
 enum class TransportMode
 {
     Udp,
@@ -31,6 +32,11 @@ inline TransportMode ResolveTransportMode(const VpnConfig &config)
     return TransportMode::Udp;
 }
 
+/**
+ * @brief Human-readable label for a TransportMode value.
+ * @param mode Transport mode to stringify
+ * @return Static description string
+ */
 inline const char *TransportModeString(TransportMode mode)
 {
     switch (mode)

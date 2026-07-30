@@ -5,24 +5,19 @@
 
 /**
  * @file transport_types.h
- * @brief Concrete transport engine aliases.
+ * @brief Concrete client transport engine aliases.
  *
- * Server leaves are concrete classes owning Channel + ServerDataAdapter.
- * Client leaves are ClientControlPlane parameterized on the channel type.
+ * Client leaves are ClientControlPlane parameterized on the channel template.
+ * Server leaves are the concrete ServerUdp/Dco/TcpTransport types (include
+ * those headers directly where needed).
  */
 
 #include "client_control_adapter.h"
 #include "client_dco_channel.h"
 #include "client_tcp_channel.h"
 #include "client_udp_channel.h"
-#include "server_dco_control_adapter.h"
-#include "server_tcp_control_adapter.h"
-#include "server_udp_control_adapter.h"
 
 namespace clv::vpn {
-
-// Server transports are the leaf classes themselves.
-// (aliases kept for VpnServer / DataPlane readability)
 
 using ClientUdpTransport = ClientControlPlane<ClientUdpChannel>;
 using ClientDcoTransport = ClientControlPlane<ClientDcoChannel>;

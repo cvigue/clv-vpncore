@@ -16,14 +16,16 @@
 namespace clv::vpn::openvpn {
 
 /**
- * @brief Configuration option types from config/push directives
+ * @brief Thrown when a config option cannot be parsed or applied.
  */
-/** Thrown when a config option cannot be parsed or applied. */
 struct ConfigParseError : std::runtime_error
 {
     using std::runtime_error::runtime_error;
 };
 
+/**
+ * @brief Configuration option types from config/push directives.
+ */
 enum class ConfigOptionType
 {
     CIPHER,           ///< cipher <algo> - Data channel cipher algorithm
@@ -245,7 +247,9 @@ class ConfigExchange
     /** Timeout waiting for PUSH_REPLY (milliseconds) */
     static constexpr int PUSH_REPLY_TIMEOUT = 5000;
 
+    /** @brief Default-construct an empty config exchange state machine. */
     ConfigExchange() = default;
+    /** @brief Destroy the config exchange. */
     ~ConfigExchange() = default;
 
     // Non-copyable

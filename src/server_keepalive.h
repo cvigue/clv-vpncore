@@ -5,7 +5,7 @@
 
 /**
  * @file server_keepalive.h
- * @brief Shared server keepalive SessionView + session-list collect (DRY F2).
+ * @brief Shared server keepalive SessionView + session-list collect.
  */
 
 #include "openvpn/connection.h"

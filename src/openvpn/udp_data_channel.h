@@ -31,8 +31,6 @@
 #include "routing_table.h"
 #include "transport/transport.h"
 
-#include "platform/linux/tun/tun_device.h"
-
 #include <asio/io_context.hpp>
 
 #include <spdlog/logger.h>
@@ -46,6 +44,11 @@
 
 namespace clv::vpn {
 
+/**
+ * @brief Server-side UDP multi-peer data channel.
+ *
+ * @tparam Adapter Data→control adapter type for CRTP dispatch.
+ */
 template <typename Adapter>
 class UdpDataChannel
     : public UdpServerMixin<UdpDataChannel<Adapter>>
@@ -55,6 +58,19 @@ class UdpDataChannel
     friend UdpCore<UdpDataChannel<Adapter>, MultiPeerPolicy>;
 
   public:
+    /**
+     * @brief Construct the server UDP data channel.
+     * @param io_context ASIO context for keepalive timer
+     * @param routing_table IPv4 client routing table
+     * @param routing_table_v6 IPv6 client routing table
+     * @param session_manager Active session table
+     * @param logger Data-path logger
+     * @param perf_config Batch and affinity settings
+     * @param keepalive_interval PING interval in seconds
+     * @param keepalive_timeout Dead-peer timeout in seconds
+     * @param running_flag Shared stop flag
+     * @param adapter Data→control adapter
+     */
     UdpDataChannel(asio::io_context &io_context,
                    RoutingTableIpv4 &routing_table,
                    RoutingTableIpv6 &routing_table_v6,
@@ -78,6 +94,7 @@ class UdpDataChannel
     {
     }
 
+    /** @brief Destroy the channel; mixin stops the data path. */
     ~UdpDataChannel() = default;
 
     UdpDataChannel(const UdpDataChannel &) = delete;
@@ -98,6 +115,11 @@ class UdpDataChannel
     // Client-side keepalive interface (no-arg): called by the generic KeepaliveLoop
     // via derived().SendKeepalivePing().  Injects the raw ping payload into the TUN
     // fd so the TX drain loop encrypts and sends it through the unified outbound_packet_id counter.
+    /**
+     * @brief Inject a keepalive ping onto the TUN so the TX path encrypts it.
+     *
+     * Server KeepaliveLoop uses the session-arg SendKeepAlivePing instead.
+     */
     asio::awaitable<void> SendKeepalivePing()
     {
         int fd = this->TunNativeHandle();

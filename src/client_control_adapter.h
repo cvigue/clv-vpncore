@@ -35,6 +35,7 @@
 
 
 #include <log_utils.h>
+#include <rate_limiter.h>
 
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
@@ -74,6 +75,11 @@ enum class VpnClientState
     Error
 };
 
+/**
+ * @brief Human-readable name for a VpnClientState value.
+ * @param state State to stringify
+ * @return Static string literal (e.g. "Connected")
+ */
 const char *VpnClientStateToString(VpnClientState state);
 
 /**
@@ -81,10 +87,10 @@ const char *VpnClientStateToString(VpnClientState state);
  */
 struct ClientControlConfig
 {
-    asio::io_context &io_context;
-    const VpnConfig &config;
-    spdlog::logger &logger;
-    std::atomic<bool> &running;
+    asio::io_context &io_context; ///< ASIO context for coroutines and timers
+    const VpnConfig &config;      ///< Client configuration
+    spdlog::logger &logger;       ///< Logger for control-plane events
+    std::atomic<bool> &running;   ///< Shared stop flag with the VpnClient shell
 };
 
 /**
@@ -99,37 +105,115 @@ class ClientControlPlane
     using Adapter = ClientDataAdapter<ClientControlPlane>;
     using channel_type = ChannelTpl<Adapter>;
 
+    /**
+     * @brief Construct the control plane and its channel.
+     * @param cfg External resources (io_context, config, logger, running flag)
+     */
     explicit ClientControlPlane(ClientControlConfig cfg);
 
     // -- Public accessors (used by VpnClient shell) ---------------------------
 
+    /** @brief ASIO context used by this control plane. */
     asio::io_context &io_context() noexcept;
+
+    /** @brief Current connection state. */
     VpnClientState GetState() const;
+
+    /** @brief Whether the session has reached Connected. */
     bool IsConnected() const;
+
+    /** @brief Client configuration reference. */
     const VpnConfig &GetConfig() const;
+
+    /**
+     * @brief Assigned tunnel IPv4 from the server's PUSH reply.
+     * @return Dotted-quad string, or empty if not yet assigned
+     */
     std::string GetAssignedIp() const;
+
+    /**
+     * @brief Routes pushed by the server.
+     * @return CIDR strings
+     */
     std::vector<std::string> GetRoutes() const;
+
+    /**
+     * @brief DNS servers pushed by the server.
+     * @return Resolver addresses
+     */
     std::vector<std::string> GetDnsServers() const;
+
+    /**
+     * @brief DNS search domains pushed by the server.
+     * @return Search suffix strings
+     */
     std::vector<std::string> GetDnsSearchDomains() const;
+
+    /** @brief Data-path counter snapshot. */
     DataPathStats GetStats() const;
+
+    /**
+     * @brief Time since Connected was reached.
+     * @return Zero when not connected
+     */
     std::chrono::seconds GetUptime() const;
 
     /// App-facing; type-erased (open set of callers).
     using StateCallback = std::function<void(VpnClientState, VpnClientState)>;
+
+    /**
+     * @brief Register a callback for connection state changes.
+     * @param cb Called with (old_state, new_state) on each transition
+     */
     void SetStateCallback(StateCallback cb);
 
+    /**
+     * @brief Record inbound activity for keepalive dead-peer detection.
+     *
+     * Called by the data adapter when any RX arrives on the control or data path.
+     */
     void TouchLastRx();
 
+    /** @brief Begin the connection handshake (non-blocking). */
     void Connect();
+
+    /** @brief Tear down the session and return to Disconnected. */
     void Disconnect();
 
+    /**
+     * @brief Deliver a control packet from the data adapter.
+     * @param data Serialized OpenVPN control frame
+     */
     void OnControlPacketFromDataPath(std::vector<std::uint8_t> data);
 
-    channel_type &channel() noexcept { return channel_; }
-    const channel_type &channel() const noexcept { return channel_; }
-    channel_type &ch() noexcept { return channel_; }
-    const channel_type &ch() const noexcept { return channel_; }
+    /** @brief Owned data-channel engine. */
+    channel_type &channel() noexcept
+    {
+        return channel_;
+    }
 
+    /** @brief Owned data-channel engine (const). */
+    const channel_type &channel() const noexcept
+    {
+        return channel_;
+    }
+
+    /** @brief Alias for channel(). */
+    channel_type &ch() noexcept
+    {
+        return channel_;
+    }
+
+    /** @brief Alias for channel() (const). */
+    const channel_type &ch() const noexcept
+    {
+        return channel_;
+    }
+
+    /**
+     * @brief Timestamp of the last outbound data-channel transmission.
+     * @return Steady-clock time point from the channel
+     */
     std::chrono::steady_clock::time_point LastTxTime() const
     {
         return channel_.LastTxTime();
@@ -225,6 +309,8 @@ class ClientControlPlane
     std::chrono::steady_clock::time_point last_server_rekey_at_;
     std::vector<std::string> effective_data_ciphers_;
     std::string negotiated_cipher_;
+
+    clv::RateLimiter<> unexpected_data_on_control_limiter_{std::chrono::seconds{1}};
 };
 
 } // namespace clv::vpn

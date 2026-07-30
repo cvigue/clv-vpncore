@@ -32,15 +32,19 @@ namespace clv::vpn::openvpn {
 
 /** @brief Early-negotiation marker in the tls-crypt wrapper packet-id counter. */
 inline constexpr std::uint32_t EARLY_NEG_MASK = 0xff000000u;
+/** @brief Counter high bits indicating early negotiation (with EARLY_NEG_MASK). */
 inline constexpr std::uint32_t EARLY_NEG_START = 0x0f000000u;
 
 /** @brief HARD_RESET payload TLV: early-negotiation flags (OpenVPN ssl_pkt.h). */
 inline constexpr std::uint16_t TLV_TYPE_EARLY_NEG_FLAGS = 0x0001;
+/** @brief Early-neg flag: client must resend WKc with the cookie response. */
 inline constexpr std::uint16_t EARLY_NEG_FLAG_RESEND_WKC = 0x0001;
 
 /** @brief OpenVPN control TLV framing: [type:u16][length:u16][value...]. */
 inline constexpr std::size_t kTlvTypeSize = 2;
+/** @brief Size of the TLV length field in bytes. */
 inline constexpr std::size_t kTlvLengthSize = 2;
+/** @brief Size of the TLV type+length header in bytes. */
 inline constexpr std::size_t kTlvHeaderSize = kTlvTypeSize + kTlvLengthSize;
 /** @brief Length of the EARLY_NEG_FLAGS value (flags u16). */
 inline constexpr std::uint16_t kEarlyNegFlagsLength = 2;
@@ -60,6 +64,7 @@ class PsidCookieKey
     /** @brief Construct from explicit key material (tests). Must be 32 bytes. */
     [[nodiscard]] static std::optional<PsidCookieKey> FromBytes(std::span<const std::uint8_t> key);
 
+    /** @brief View of the 32-byte HMAC key material. */
     [[nodiscard]] std::span<const std::uint8_t> bytes() const noexcept
     {
         return key_;

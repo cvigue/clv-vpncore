@@ -20,14 +20,9 @@
 #include "openvpn/config_exchange.h"
 #include "openvpn/connection.h"
 #include "openvpn/control_channel.h"
-#include "openvpn/control_plane_helpers.h"
-#include "openvpn/crypto_algorithms.h"
 #include "openvpn/crypto_context.h"
-#include "openvpn/key_derivation.h"
 #include "openvpn/packet.h"
-#include "openvpn/protocol_constants.h"
 #include "openvpn/psid_cookie.h"
-#include "openvpn/push_exchange_helpers.h"
 #include "openvpn/session_manager.h"
 #include "openvpn/tls_context.h"
 #include "openvpn/tls_crypt.h"
@@ -38,18 +33,19 @@
 #include "udp_engine_types.h"
 #include "transport/transport.h"
 
-#include <exception>
 #include <log_utils.h>
 #include <net/ipv4_utils.h>
 #include <net/ipv6_utils.h>
 #include <rate_limiter.h>
 
+#include <asio/as_tuple.hpp>
 #include <asio/awaitable.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
 #include <asio/dispatch.hpp>
 #include <asio/io_context.hpp>
 #include <asio/steady_timer.hpp>
+#include <asio/system_error.hpp>
 #include <asio/use_awaitable.hpp>
 
 #include <openssl/rand.h>
@@ -58,24 +54,15 @@
 
 #include <atomic>
 #include <chrono>
-#include <cstddef>
 #include <cstdint>
-#include <ctime>
 #include <future>
 #include <memory>
 #include <optional>
-#include <random>
 #include <span>
-#include <stdexcept>
-#include <string>
 #include <string_view>
-#include <utility>
 #include <vector>
 
 namespace clv::vpn {
-
-namespace ipv4 = clv::net::ipv4;
-namespace ipv6 = clv::net::ipv6;
 
 // ---- Shared helpers --------------------------------------------------------
 
@@ -138,14 +125,32 @@ template <typename Leaf>
 class ServerControlBase
 {
   protected:
-    Leaf &leaf() noexcept { return static_cast<Leaf &>(*this); }
-    const Leaf &leaf() const noexcept { return static_cast<const Leaf &>(*this); }
+    Leaf &leaf() noexcept
+    {
+        return static_cast<Leaf &>(*this);
+    }
+    const Leaf &leaf() const noexcept
+    {
+        return static_cast<const Leaf &>(*this);
+    }
 
-    auto &ch() noexcept { return leaf().channel(); }
-    const auto &ch() const noexcept { return leaf().channel(); }
+    auto &ch() noexcept
+    {
+        return leaf().channel();
+    }
+    const auto &ch() const noexcept
+    {
+        return leaf().channel();
+    }
 
   public:
+    /**
+     * @brief Construct the shared server control engine.
+     * @param cfg External resources (io_context, config, loggers, running flag, zone)
+     */
     explicit ServerControlBase(ServerControlConfig cfg);
+
+    /** @brief Default destructor; derived leaves tear down transport-specific state. */
     ~ServerControlBase() = default;
 
     ServerControlBase(const ServerControlBase &) = delete;
@@ -155,24 +160,46 @@ class ServerControlBase
 
     // -- Adapter / shell accessors -------------------------------------------
 
+    /** @brief ASIO context used by this control plane. */
     asio::io_context &io_context() noexcept;
 
+    /**
+     * @brief Handle a dead peer reported by the data channel keepalive loop.
+     * @param sid Session identifier of the timed-out peer
+     */
     void HandleDeadPeer(openvpn::SessionId sid);
 
-    /** Default: warn. UDP/DCO leaves hide with a real implementation. */
+    /**
+     * @brief Default control-packet entry point (UDP/DCO leaves override).
+     * @param data Serialized OpenVPN control frame
+     * @param sender Source endpoint of the datagram
+     */
     void OnControlPacketFromDataPath(std::vector<std::uint8_t> data,
                                      transport::PeerEndpoint sender);
 
-    /** Default: warn. TCP leaf hides with a real implementation. */
+    /**
+     * @brief Default control-packet entry point with transport handle (TCP leaf overrides).
+     * @param data Serialized OpenVPN control frame
+     * @param sender Source endpoint
+     * @param transport Connection handle for replies on the same socket
+     */
     void OnControlPacketFromDataPath(std::vector<std::uint8_t> data,
                                      transport::PeerEndpoint sender,
                                      transport::TransportHandle transport);
 
-    /** Default: no-op. TCP leaf hides with disconnect handling. */
+    /**
+     * @brief Default TCP disconnect handler (TCP leaf overrides).
+     * @param sender Endpoint of the closed connection
+     */
     void HandleTcpDisconnect(transport::PeerEndpoint sender);
 
+    /** @brief Active session table. */
     SessionManager &session_manager() noexcept;
+
+    /** @brief IPv4 client routing table (prefix -> session). */
     RoutingTableIpv4 &routing_table() noexcept;
+
+    /** @brief IPv6 client routing table (prefix -> session). */
     RoutingTableIpv6 &routing_table_v6() noexcept;
 
   protected:

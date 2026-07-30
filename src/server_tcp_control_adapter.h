@@ -11,7 +11,6 @@
 #include "data_path_stats.h"
 #include "log_subsystems.h"
 #include "openvpn/connection.h"
-#include "openvpn/crypto_algorithms.h"
 #include "openvpn/tcp_data_channel.h"
 #include "server_control_base.h"
 #include "server_data_adapter.h"
@@ -26,32 +25,48 @@
 
 namespace clv::vpn {
 
+/**
+ * @brief Server TCP transport leaf.
+ *
+ * Owns TcpDataChannel and the shared ServerControlBase engine.
+ */
 class ServerTcpTransport : public ServerControlBase<ServerTcpTransport>
 {
   public:
     using channel_type = TcpDataChannel<ServerDataAdapter<ServerTcpTransport>>;
 
+    /**
+     * @brief Construct the TCP server transport leaf.
+     * @param cfg Control-plane resources (io_context, config, loggers, zone)
+     */
     explicit ServerTcpTransport(ServerControlConfig cfg)
-        : ServerControlBase(std::move(cfg))
-        , data_adapter_(*this)
-        , channel_(config_->server->host,
-                   config_->server->port,
-                   routing_table_,
-                   routing_table_v6_,
-                   session_manager_,
-                   logger_manager_->GetLogger(logging::Subsystem::dataio),
-                   rx_counters_,
-                   tx_counters_,
-                   config_->server->keepalive.first,
-                   config_->server->keepalive.second,
-                   *running_,
-                   data_adapter_)
+        : ServerControlBase(std::move(cfg)), data_adapter_(*this), channel_(config_->server->host,
+                                                                            config_->server->port,
+                                                                            routing_table_,
+                                                                            routing_table_v6_,
+                                                                            session_manager_,
+                                                                            logger_manager_->GetLogger(logging::Subsystem::dataio),
+                                                                            rx_counters_,
+                                                                            tx_counters_,
+                                                                            config_->server->keepalive.first,
+                                                                            config_->server->keepalive.second,
+                                                                            *running_,
+                                                                            data_adapter_)
     {
     }
 
-    channel_type &channel() noexcept { return channel_; }
-    const channel_type &channel() const noexcept { return channel_; }
+    /** @brief Owned TCP data channel. */
+    channel_type &channel() noexcept
+    {
+        return channel_;
+    }
+    /** @brief Owned TCP data channel (const). */
+    const channel_type &channel() const noexcept
+    {
+        return channel_;
+    }
 
+    /** @brief Start the TCP accept loop and control-plane base loops. */
     void Start()
     {
         ConfigureDataPlane();
@@ -60,6 +75,7 @@ class ServerTcpTransport : public ServerControlBase<ServerTcpTransport>
         StartBase();
     }
 
+    /** @brief Stop control loops and tear down TCP sessions. */
     void Stop()
     {
         StopBase();
@@ -67,6 +83,11 @@ class ServerTcpTransport : public ServerControlBase<ServerTcpTransport>
 
     using ServerControlBase::OnControlPacketFromDataPath;
 
+    /**
+     * @brief Log periodic TCP data-path stats.
+     * @param delta Counter delta since last tick
+     * @param elapsedSec Wall time since last tick
+     */
     void LogStats(const DataPathStats &delta, double elapsedSec)
     {
         auto rates = ComputeStatsRates(delta, elapsedSec, 0, 0);
@@ -85,6 +106,12 @@ class ServerTcpTransport : public ServerControlBase<ServerTcpTransport>
                       session_manager_.GetSessionCount());
     }
 
+    /**
+     * @brief Entry point for control packets from the TCP data adapter.
+     * @param data Serialized OpenVPN control frame
+     * @param sender Source endpoint
+     * @param transport Connection handle for replies
+     */
     void OnControlPacketFromDataPath(std::vector<std::uint8_t> data,
                                      transport::PeerEndpoint sender,
                                      transport::TransportHandle transport)
@@ -94,6 +121,10 @@ class ServerTcpTransport : public ServerControlBase<ServerTcpTransport>
                        asio::detached);
     }
 
+    /**
+     * @brief Handle TCP client disconnect by tearing down the session.
+     * @param sender Endpoint of the closed connection
+     */
     void HandleTcpDisconnect(transport::PeerEndpoint sender)
     {
         Connection::Endpoint endpoint{.addr = sender.addr, .port = sender.port};

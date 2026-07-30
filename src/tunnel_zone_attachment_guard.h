@@ -21,10 +21,18 @@
 
 namespace clv::vpn {
 
+/**
+ * @brief RAII hub attachment for TunnelZone.
+ *
+ * Registers on Reset(); unregisters on Release() or destruction.
+ */
 class TunnelZoneAttachmentGuard
 {
   public:
+    /** @brief Default-constructed guard (not attached). */
     TunnelZoneAttachmentGuard() = default;
+
+    /** @brief Unregister any active attachment. */
     ~TunnelZoneAttachmentGuard()
     {
         Release();
@@ -60,11 +68,20 @@ class TunnelZoneAttachmentGuard
         ifname_.reset();
     }
 
+    /**
+     * @brief Whether a hub attachment is currently registered.
+     * @return true after a successful Reset()
+     */
     [[nodiscard]] bool attached() const noexcept
     {
         return zone_ != nullptr && ifname_.has_value();
     }
 
+    /**
+     * @brief Hub device name of the active attachment.
+     * @return data_dev passed to Reset()
+     * @pre attached() is true
+     */
     [[nodiscard]] const std::string &data_dev() const
     {
         return *ifname_;

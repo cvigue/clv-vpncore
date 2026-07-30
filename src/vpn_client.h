@@ -30,9 +30,36 @@ namespace clv::vpn {
  */
 struct VpnClientConfig
 {
+    /**
+     * @brief Parse client configuration from a JSON object.
+     * @param json Parsed configuration document
+     * @return VpnConfig with client role fields populated
+     * @throws std::exception on parse or validation failure
+     */
     static VpnConfig ParseJson(const nlohmann::json &json);
+
+    /**
+     * @brief Load client configuration from a JSON file.
+     * @param path Path to a JSON configuration file
+     * @return VpnConfig with client role fields populated
+     * @throws std::exception if the file cannot be read or parsed
+     */
     static VpnConfig LoadFromFile(const std::string &path);
+
+    /**
+     * @brief Load client configuration from an OpenVPN .ovpn profile.
+     * @param path Path to an .ovpn file
+     * @return VpnConfig with client role fields populated
+     * @throws std::exception if the file cannot be read or parsed
+     */
     static VpnConfig LoadFromOvpnFile(const std::string &path);
+
+    /**
+     * @brief Load client configuration, auto-detecting JSON vs .ovpn by extension.
+     * @param path Path to a JSON or .ovpn configuration file
+     * @return VpnConfig with client role fields populated
+     * @throws std::exception if the file cannot be read or parsed
+     */
     static VpnConfig Load(const std::string &path);
 };
 
@@ -47,7 +74,14 @@ struct VpnClientConfig
 class VpnClient
 {
   public:
+    /**
+     * @brief Construct a client for the given configuration.
+     * @param io_context ASIO context used by the control and data planes
+     * @param config Client configuration (must include client role)
+     */
     VpnClient(asio::io_context &io_context, const VpnConfig &config);
+
+    /** @brief Stop the client and tear down the active transport. */
     ~VpnClient();
 
     VpnClient(const VpnClient &) = delete;
@@ -55,17 +89,29 @@ class VpnClient
     VpnClient(VpnClient &&) noexcept = delete;
     VpnClient &operator=(VpnClient &&) noexcept = delete;
 
+    /** @brief Callback invoked on connection state transitions. */
     using StateCallback = std::function<void(VpnClientState, VpnClientState)>;
 
+    /**
+     * @brief Register a callback for connection state changes.
+     * @param cb Called with (old_state, new_state) on each transition
+     */
     void SetStateCallback(StateCallback cb)
     {
         data_plane_.Visit([&](auto &dp)
         { dp.SetStateCallback(std::move(cb)); });
     }
 
+    /** @brief Begin the connection handshake (non-blocking). */
     void Connect();
+
+    /** @brief Tear down the session and return to Disconnected. */
     void Disconnect();
 
+    /**
+     * @brief Current connection state.
+     * @return State of the control-plane handshake and session
+     */
     VpnClientState GetState() const
     {
         VpnClientState s = VpnClientState::Disconnected;
@@ -74,6 +120,10 @@ class VpnClient
         return s;
     }
 
+    /**
+     * @brief Whether the client has a fully established session.
+     * @return true when state is Connected
+     */
     bool IsConnected() const
     {
         bool c = false;
@@ -82,6 +132,10 @@ class VpnClient
         return c;
     }
 
+    /**
+     * @brief Assigned tunnel IPv4 address from the server's PUSH reply.
+     * @return Dotted-quad string, or empty if not yet assigned
+     */
     std::string GetAssignedIp() const
     {
         std::string ip;
@@ -90,6 +144,10 @@ class VpnClient
         return ip;
     }
 
+    /**
+     * @brief Routes pushed by the server.
+     * @return CIDR strings (e.g. "10.0.0.0/8")
+     */
     std::vector<std::string> GetRoutes() const
     {
         std::vector<std::string> r;
@@ -98,6 +156,10 @@ class VpnClient
         return r;
     }
 
+    /**
+     * @brief DNS servers pushed by the server.
+     * @return Resolver addresses in dotted-quad or bracketed IPv6 form
+     */
     std::vector<std::string> GetDnsServers() const
     {
         std::vector<std::string> d;
@@ -106,11 +168,19 @@ class VpnClient
         return d;
     }
 
+    /**
+     * @brief Immutable client configuration.
+     * @return Reference to the config supplied at construction
+     */
     const VpnConfig &GetConfig() const
     {
         return config_;
     }
 
+    /**
+     * @brief Total encrypted bytes sent on the data channel.
+     * @return Cumulative TX byte count since connect
+     */
     std::uint64_t GetBytesSent() const
     {
         std::uint64_t v = 0;
@@ -119,6 +189,10 @@ class VpnClient
         return v;
     }
 
+    /**
+     * @brief Total encrypted bytes received on the data channel.
+     * @return Cumulative RX byte count since connect
+     */
     std::uint64_t GetBytesReceived() const
     {
         std::uint64_t v = 0;
@@ -127,6 +201,10 @@ class VpnClient
         return v;
     }
 
+    /**
+     * @brief Time since the session reached Connected.
+     * @return Zero when not connected
+     */
     std::chrono::seconds GetUptime() const
     {
         std::chrono::seconds u(0);
@@ -135,6 +213,10 @@ class VpnClient
         return u;
     }
 
+    /**
+     * @brief Snapshot of data-path counters and rates.
+     * @return Full DataPathStats from the active transport
+     */
     DataPathStats GetStats() const
     {
         DataPathStats s{};

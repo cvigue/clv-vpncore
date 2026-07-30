@@ -111,21 +111,25 @@ class AckTracker
         return sent_at_ + CurrentRetransmitTimeout();
     }
 
+    /** @brief Whether this packet ID has already been acknowledged. */
     bool IsAcknowledged() const noexcept
     {
         return acknowledged_;
     }
 
+    /** @brief Mark this packet ID as acknowledged. */
     void MarkAcknowledged() noexcept
     {
         acknowledged_ = true;
     }
 
+    /** @brief Number of retransmit attempts so far. */
     int RetransmitCount() const noexcept
     {
         return retransmit_count_;
     }
 
+    /** @brief Whether retransmit attempts have been exhausted. */
     bool ExhaustedRetransmits() const noexcept
     {
         return retransmit_count_ >= MAX_RETRANSMIT_ATTEMPTS;
@@ -191,13 +195,16 @@ class ControlChannel
     explicit ControlChannel(spdlog::logger &logger) : logger_(&logger)
     {
     }
+    /** @brief Destroy the control channel. */
     ~ControlChannel() = default;
 
     // Non-copyable
     ControlChannel(const ControlChannel &) = delete;
     ControlChannel &operator=(const ControlChannel &) = delete;
     // Moveable
+    /** @brief Move-construct a control channel. */
     ControlChannel(ControlChannel &&) = default;
+    /** @brief Move-assign a control channel. */
     ControlChannel &operator=(ControlChannel &&) = default;
 
 
@@ -401,6 +408,14 @@ class ControlChannel
         return peer_session_id_;
     }
 
+    /// True when peer SID is known and the wire SID is missing or mismatched.
+    [[nodiscard]] bool PeerSidMismatch(const OpenVpnPacket &packet) const noexcept
+    {
+        if (!peer_session_id_)
+            return false;
+        return !packet.session_id_ || packet.session_id_.value() != peer_session_id_->value;
+    }
+
     /**
      * @brief Get next outbound packet ID (for sequencing)
      */
@@ -462,6 +477,7 @@ class ControlChannel
         return tls_context_ ? &(*tls_context_) : nullptr;
     }
 
+    /** @brief Access the TLS context (const); nullptr if not initialized. */
     const openvpn::TlsContext *GetTlsContext() const
     {
         return tls_context_ ? &(*tls_context_) : nullptr;
@@ -561,14 +577,14 @@ class ControlChannel
     clv::not_null<spdlog::logger *> logger_;
 
     /**
-     * Soft-reset / rekey shared transition (F11).
+     * Soft-reset / rekey shared transition.
      * Advances key_id with OpenVPN wrap (1-7, skip 0).
      */
     void AdvanceRekeyKeyId();
 
     /**
      * Reset outbound reliability for a new soft-reset handshake.
-     * Clears unacked + pending_fragments_ (cve-audit F2). When
+     * Clears unacked + pending_fragments_ on rekey. When
      * reset_inbound_to_max is true (local RequestSoftReset), also sets
      * last_received_packet_id_ to UINT32_MAX so packet_id 0 is accepted.
      */

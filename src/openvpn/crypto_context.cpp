@@ -172,28 +172,31 @@ std::optional<std::uint32_t> CryptoContext::AllocateOutboundPacketId() noexcept
     }
 }
 
-void CryptoContext::RecordOutboundEncrypt(std::size_t plaintext_len,
-                                          CipherAlgorithm cipher) noexcept
+bool CryptoContext::TryReserveOutboundEncrypt(std::size_t plaintext_len,
+                                              CipherAlgorithm cipher) noexcept
 {
     if (!IsLegacyAeadUsageLimited(cipher))
-        return;
+        return true;
 
     const auto delta = LegacyAeadUsageForEncrypt(plaintext_len);
-    aead_usage_invocations_.fetch_add(delta.invocations, std::memory_order_relaxed);
-    aead_usage_blocks_.fetch_add(delta.blocks, std::memory_order_relaxed);
 
-    const auto flags = LegacyAeadLimitFlagsForUsage(
-        aead_usage_invocations_.load(std::memory_order_relaxed),
-        aead_usage_blocks_.load(std::memory_order_relaxed));
-    if (flags.is_blocked)
+    // Charge first, then decide. Concurrent overshoot refuses encrypt (fail closed).
+    const auto prev_inv = aead_usage_invocations_.fetch_add(delta.invocations, std::memory_order_acq_rel);
+    const auto prev_blk = aead_usage_blocks_.fetch_add(delta.blocks, std::memory_order_acq_rel);
+    const auto new_inv = prev_inv + delta.invocations;
+    const auto new_blk = prev_blk + delta.blocks;
+
+    if (LegacyAeadIsBlocked(prev_inv, prev_blk) || LegacyAeadIsBlocked(new_inv, new_blk))
     {
         outbound_encrypt_blocked_.store(true, std::memory_order_release);
         rekey_requested_.store(true, std::memory_order_release);
+        return false;
     }
-    else if (flags.needs_reneg)
-    {
+
+    if (LegacyAeadNeedsReneg(new_inv, new_blk))
         rekey_requested_.store(true, std::memory_order_release);
-    }
+
+    return true;
 }
 
 bool CryptoContext::TakeRekeyRequest() noexcept
@@ -228,6 +231,9 @@ std::vector<std::uint8_t> CryptoContext::EncryptPacketWithId(std::span<const std
                                                              std::uint32_t packet_id)
 {
     if (!primary_encrypt_.is_valid || IsOutboundEncryptBlocked())
+        return {};
+
+    if (!TryReserveOutboundEncrypt(plaintext.size(), primary_encrypt_.cipher_algorithm))
         return {};
 
     const auto &key = primary_encrypt_;
@@ -279,7 +285,6 @@ std::vector<std::uint8_t> CryptoContext::EncryptPacketWithId(std::span<const std
         encrypted_packet.payload_ = ReorderTagToFront(encrypted);
     }
 
-    RecordOutboundEncrypt(plaintext.size(), primary_encrypt_.cipher_algorithm);
     return encrypted_packet.Serialize();
 }
 
@@ -293,6 +298,9 @@ std::size_t CryptoContext::EncryptPacketInPlaceWithId(std::span<std::uint8_t> bu
                                                       std::uint32_t packet_id)
 {
     if (!primary_encrypt_.is_valid || IsOutboundEncryptBlocked())
+        return 0;
+
+    if (!TryReserveOutboundEncrypt(payload_len, primary_encrypt_.cipher_algorithm))
         return 0;
 
     if (!IsSupportedAead(primary_encrypt_.cipher_algorithm) || !encrypt_ctx_)
@@ -331,12 +339,7 @@ std::size_t CryptoContext::EncryptPacketInPlace(std::span<std::uint8_t> buf,
     if (!packet_id)
         return 0;
 
-    const auto wire_len = EncryptPacketInPlaceWithId(buf, payload_len, session_id, *packet_id);
-    if (wire_len == 0)
-        return 0;
-
-    RecordOutboundEncrypt(payload_len, primary_encrypt_.cipher_algorithm);
-    return wire_len;
+    return EncryptPacketInPlaceWithId(buf, payload_len, session_id, *packet_id);
 }
 
 std::span<std::uint8_t> CryptoContext::DecryptPacketInPlace(std::span<std::uint8_t> buf)

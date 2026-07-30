@@ -5,19 +5,19 @@
 
 /**
  * @file dco_netlink_ops.h
- * @brief Shared DCO netlink operations used by both VpnClient and DcoDataChannel.
+ * @brief Shared DCO netlink helpers (peer lifecycle, key install).
  *
  * Each function builds a single netlink message, sends it via NetlinkHelper or
  * rtnetlink, and parses the kernel ACK.  Parameters are all primitives so there
  * is no coupling to VpnClient/VpnServer/DcoDataChannel types.
- *
- * Covers factoring items F10–F15 from goals-plan.md §6.
  */
 
 #include "openvpn/crypto_algorithms.h"
 #include "openvpn/key_derivation.h" // PeerRole
 #include "openvpn/ovpn_dco.h"
 
+#include <exception>
+#include <sys/socket.h>
 #include <unique_fd.h>
 #include <util/netlink_helper.h>
 #include <util/nla_helpers.h>

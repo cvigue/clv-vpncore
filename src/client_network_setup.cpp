@@ -3,13 +3,15 @@
 #include "client_network_setup.h"
 
 #include "iface_utils.h"
+#include "openvpn/config_exchange.h"
+#include "platform/linux/tun/tun_device.h"
 #include "route_utils.h"
 
-#include <asio/ip/address_v4.hpp>
+#include <cstdint>
 #include <net/ipv4_utils.h>
 #include <spdlog/spdlog.h>
 
-#include <exception>
+#include <stdexcept>
 #include <string>
 
 namespace clv::vpn {
@@ -25,34 +27,28 @@ std::string NormalizeNegotiatedRoute4(const std::string &network, const std::str
         return network;
     if (!gw.empty())
     {
-        try
-        {
-            auto prefix = ipv4::MaskToPrefix(asio::ip::make_address_v4(gw).to_uint());
-            return network + "/" + std::to_string(prefix);
-        }
-        catch (...)
-        {
-            return network + "/32";
-        }
+        if (auto mask = ipv4::ParseIpv4(gw))
+            return network + "/" + std::to_string(ipv4::MaskToPrefix(*mask));
     }
     return network + "/32";
 }
 
 std::string ConnectedCidrFromIfconfig(const openvpn::NegotiatedConfig &negotiated)
 {
+    // Only subnet topology uses ifconfig.second as a netmask; p2p/net30 store a peer IP.
+    if (negotiated.topology != "subnet")
+        return {};
     if (negotiated.ifconfig.first.empty() || negotiated.ifconfig.second.empty())
         return {};
-    try
-    {
-        auto host = asio::ip::make_address_v4(negotiated.ifconfig.first).to_uint();
-        auto prefix = ipv4::MaskToPrefix(asio::ip::make_address_v4(negotiated.ifconfig.second).to_uint());
-        auto net = host & ipv4::CreateMask(prefix);
-        return ipv4::Ipv4ToString(net) + "/" + std::to_string(prefix);
-    }
-    catch (...)
-    {
-        return {};
-    }
+
+    auto host = ipv4::ParseIpv4(negotiated.ifconfig.first);
+    auto mask = ipv4::ParseIpv4(negotiated.ifconfig.second);
+    if (!host || !mask)
+        throw std::runtime_error("Invalid ifconfig for connected subnet CIDR");
+
+    auto prefix = ipv4::MaskToPrefix(*mask);
+    auto net = *host & ipv4::CreateMask(prefix);
+    return ipv4::Ipv4ToString(net) + "/" + std::to_string(prefix);
 }
 
 void ConfigureClientTun(tun::TunDevice &tun,
@@ -68,8 +64,10 @@ void ConfigureClientTun(tun::TunDevice &tun,
 
     if (negotiated.topology == "subnet" && !assigned_netmask.empty())
     {
-        auto prefix = ipv4::MaskToPrefix(asio::ip::make_address_v4(assigned_netmask).to_uint());
-        tun.SetAddress(assigned_ip, prefix);
+        auto mask = ipv4::ParseIpv4(assigned_netmask);
+        if (!mask)
+            throw std::runtime_error("Invalid ifconfig netmask: " + assigned_netmask);
+        tun.SetAddress(assigned_ip, ipv4::MaskToPrefix(*mask));
     }
     else
     {
@@ -112,14 +110,7 @@ void InstallClientNegotiatedRoutes(tun::TunDevice &tun,
         if (!negotiated.route_gateway.empty())
             via = negotiated.route_gateway;
         logger.info("Route: {} dev {}{}", cidr, dev, via.empty() ? "" : " via " + via);
-        try
-        {
-            route::ReplaceRoute4(dev, cidr, via);
-        }
-        catch (const std::exception &e)
-        {
-            logger.error("Route failed: {}", e.what());
-        }
+        route::ReplaceRoute4(dev, cidr, via);
     }
 
     for (const auto &[network, gw, metric] : negotiated.routes_ipv6)
@@ -127,14 +118,7 @@ void InstallClientNegotiatedRoutes(tun::TunDevice &tun,
         (void)gw;
         (void)metric;
         logger.info("IPv6 route: {} dev {}", network, dev);
-        try
-        {
-            route::ReplaceRoute6(dev, network);
-        }
-        catch (const std::exception &e)
-        {
-            logger.error("IPv6 route failed: {}", e.what());
-        }
+        route::ReplaceRoute6(dev, network);
     }
 }
 
