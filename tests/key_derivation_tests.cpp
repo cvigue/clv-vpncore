@@ -334,7 +334,7 @@ TEST_F(KeyDerivationTest, FullWorkflowAes256Gcm)
     std::vector<uint8_t> plaintext = {1, 2, 3, 4, 5};
     SessionId session_id{0x12345678};
 
-    auto encrypted = crypto_context.EncryptPacket(plaintext, session_id);
+    auto encrypted = crypto_context.EncryptPacket(plaintext, static_cast<std::uint32_t>(session_id.value));
     EXPECT_FALSE(encrypted.empty());
 }
 

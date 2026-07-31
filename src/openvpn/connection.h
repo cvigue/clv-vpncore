@@ -8,6 +8,9 @@
 #include "openvpn/packet.h"
 #include "openvpn/tls_context.h"
 #include "openvpn/tls_crypt.h"
+#include "ip_pool_manager.h"
+#include "peer_slot_table.h"
+#include "resource_lease.h"
 #include "transport/transport.h"
 
 #include <asio/steady_timer.hpp>
@@ -122,6 +125,19 @@ class Connection
     const Endpoint &GetEndpoint() const
     {
         return endpoint_;
+    }
+
+    /**
+     * @brief Move the connection to a new remote endpoint (peer float).
+     *
+     * Control-plane only, and only via SessionManager::RebindEndpoint so the
+     * endpoint index stays in sync.
+     *
+     * @param endpoint Newly authenticated remote endpoint
+     */
+    void SetEndpoint(const Endpoint &endpoint)
+    {
+        endpoint_ = endpoint;
     }
 
     /**
@@ -300,10 +316,55 @@ class Connection
             rekey_timer_->cancel();
     }
 
-    // ── IP Assignment ───────────────────────────────────────────────────
+    // ── IP / peer-id assignment (leases own pool membership) ────────────
+
+    using PeerIdLease = PeerSlotTable::Lease;
+    using Ipv4Lease = PoolLease<IpPoolManager, std::uint32_t>;
+    using Ipv6Lease = PoolLease<IpPoolManager, ipv6::Ipv6Address>;
 
     /**
-     * @brief Set assigned VPN IPv4 address
+     * @brief Take ownership of a wire peer-id slot lease.
+     * @param lease Move-only lease from PeerSlotTable::Reserve()
+     */
+    void TakePeerIdLease(PeerIdLease lease)
+    {
+        peer_id_lease_ = std::move(lease);
+    }
+
+    /**
+     * @brief Take ownership of a pooled IPv4 lease and mirror the address.
+     * @param lease Move-only lease releasing via IpPoolManager::Release(uint32_t)
+     */
+    void TakeIpv4Lease(Ipv4Lease lease)
+    {
+        if (lease)
+            assigned_ipv4_ = lease.value();
+        ipv4_lease_ = std::move(lease);
+    }
+
+    /**
+     * @brief Take ownership of a pooled IPv6 lease and mirror the address.
+     * @param lease Move-only lease releasing via IpPoolManager::Release(Ipv6Address)
+     */
+    void TakeIpv6Lease(Ipv6Lease lease)
+    {
+        if (lease)
+            assigned_ipv6_ = lease.value();
+        ipv6_lease_ = std::move(lease);
+    }
+
+    /**
+     * @brief Server-assigned DATA_V2 / DCO peer id, if leased.
+     */
+    std::optional<std::uint32_t> GetWirePeerId() const
+    {
+        if (peer_id_lease_)
+            return peer_id_lease_.value();
+        return std::nullopt;
+    }
+
+    /**
+     * @brief Set assigned VPN IPv4 address (test / non-pooled path)
      * @param ipv4 VPN IPv4 address in host byte order
      */
     void SetAssignedIpv4(uint32_t ipv4)
@@ -321,7 +382,7 @@ class Connection
     }
 
     /**
-     * @brief Set assigned VPN IPv6 address
+     * @brief Set assigned VPN IPv6 address (test / non-pooled path)
      * @param ipv6 VPN IPv6 address (16 bytes, network byte order)
      */
     void SetAssignedIpv6(const ipv6::Ipv6Address &ipv6)
@@ -528,6 +589,9 @@ class Connection
 #endif
     std::optional<uint32_t> assigned_ipv4_;               // VPN IPv4 address assigned to this connection
     std::optional<ipv6::Ipv6Address> assigned_ipv6_;      // VPN IPv6 address assigned to this connection
+    PeerIdLease peer_id_lease_;                           // Pooled wire peer-id (returns on destroy)
+    Ipv4Lease ipv4_lease_;                                // Pooled IPv4 (returns on destroy)
+    Ipv6Lease ipv6_lease_;                                // Pooled IPv6 (returns on destroy)
     bool rekey_timer_armed_{false};                       // Server-side rekey timer guard (control thread only)
     std::optional<asio::steady_timer> rekey_timer_;       // Optional; see ArmRekeyTimer / RekeyTimer
     bool sent_key_method_2_{false};                       // Whether key-method 2 message has been sent

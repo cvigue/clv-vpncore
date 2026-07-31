@@ -141,7 +141,9 @@ openvpn::NegotiatedConfig BuildServerPushReplyConfig(const VpnConfig::ServerConf
     cfg.tun_mtu = static_cast<std::uint16_t>(srv.tun_mtu);
     cfg.ping_interval = static_cast<std::uint32_t>(srv.keepalive.first);
     cfg.ping_restart = static_cast<std::uint32_t>(srv.keepalive.second);
-    cfg.peer_id = static_cast<std::int32_t>(session.GetSessionId().value & openvpn::PEER_ID_MASK);
+    // Left at -1 (omitted from PUSH_REPLY) when no slot is held; 0 is a real peer-id.
+    if (auto peer_id = session.GetWirePeerId())
+        cfg.peer_id = static_cast<std::int32_t>(*peer_id);
 
     const auto reneg = EffectiveRenegotiateSeconds(srv);
     if (reneg > 0)

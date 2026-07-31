@@ -7,6 +7,8 @@ add_executable(test_vpncore
     crypto_context_limits_tests.cpp
     crypto_context_tests.cpp
     ip_pool_manager_tests.cpp
+    peer_float_tests.cpp
+    peer_slot_table_tests.cpp
     ipv4_utils_tests.cpp
     key_derivation_tests.cpp
     log_subsystems_tests.cpp
@@ -27,6 +29,7 @@ add_executable(test_vpncore
     vpn_client_tests.cpp
     vpn_config_tests.cpp
     udp_engine_tests.cpp
+    udp_core_shutdown_tests.cpp
     tx_drain_tests.cpp
     transport_mode_tests.cpp
     transport_tests.cpp

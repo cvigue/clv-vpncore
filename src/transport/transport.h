@@ -13,6 +13,7 @@
 #include <cstring>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <utility>
 #include <variant>
@@ -134,6 +135,15 @@ class UdpTransport
  * socket to be referenced by both the per-client receive loop and the
  * session's send path.
  *
+ * RX uses a fixed link buffer: `async_read_some` into the free tail (up to
+ * whatever the kernel has), then peel complete frames by advancing an offset
+ * (no memmove). Before the next fill, any unconsumed tail (partial frame) is
+ * slid to the front. Only one Receive() coroutine may run per connection.
+ *
+ * Prefer ReceiveInPlace() on the data path — the returned span aliases the link
+ * buffer and is valid until the next Receive/ReceiveInPlace that fills (compacts).
+ * Receive() copies into a heap vector (control / TransportHandle).
+ *
  * ASIO guarantees that one outstanding async_read and one outstanding
  * async_write may coexist on the same socket, so a single receive loop
  * and the send path can operate concurrently. Multiple concurrent writes
@@ -156,11 +166,34 @@ class TcpTransport
     asio::awaitable<void> Send(std::span<const std::uint8_t> data);
 
     /**
-     * @brief Receive one framed message.
-     * @details Reads a 2-byte big-endian length prefix, then reads that many payload bytes.
-     * @return Received message payload
+     * @brief Receive one framed message (heap copy).
+     * @details Prefer ReceiveInPlace() on the hot path. This copies the peel into
+     *          a new vector for callers that need ownership (e.g. TransportHandle).
+     * @return Received message payload (empty on orderly EOF / zero-length frame)
      */
     asio::awaitable<std::vector<std::uint8_t>> Receive();
+
+    /**
+     * @brief Receive one framed message without copying.
+     * @return Mutable span into the link buffer covering the frame payload.
+     *         Valid until the next Receive/ReceiveInPlace that fills (compacts).
+     *         Empty on orderly EOF / zero-length frame.
+     */
+    asio::awaitable<std::span<std::uint8_t>> ReceiveInPlace();
+
+    /**
+     * @brief Non-blocking peel of one complete frame already in the link buffer.
+     * @return Payload span if a full frame is buffered; empty optional if more
+     *         socket data is required (call ReceiveInPlace / Fill). Does not
+     *         read from the socket. Span validity same as ReceiveInPlace.
+     */
+    std::optional<std::span<std::uint8_t>> TryPeelInPlace();
+
+    /**
+     * @brief Write raw bytes (already length-prefixed frames) to the socket.
+     * @details Used to flush a coalesced TX batch built by the data path.
+     */
+    asio::awaitable<void> SendRaw(std::span<const std::uint8_t> framed);
 
     /** @brief Get the remote peer identity. */
     PeerEndpoint GetPeer() const;
@@ -171,9 +204,55 @@ class TcpTransport
     /** @brief Close the connection gracefully. */
     void Close();
 
+    /** @brief Apply SO_RCVBUF/SO_SNDBUF (with FORCE fallback) to the socket. */
+    void ApplySocketBuffers(int recv_buf, int send_buf, spdlog::logger &logger);
+
   private:
+    struct RxBuffer
+    {
+        std::vector<std::uint8_t> data;
+        std::size_t begin = 0;
+        std::size_t end = 0;
+    };
+
+    /// Per-connection stream working set; kernel SO_RCVBUF holds the real backlog.
+    static constexpr std::size_t kRxSize = 256 * 1024;
+
+    void CompactRx();
+    asio::awaitable<bool> FillRx();
+
     std::shared_ptr<asio::ip::tcp::socket> socket_;
+    std::shared_ptr<RxBuffer> rx_;
 };
+
+/**
+ * @brief Append an OpenVPN TCP length-prefixed frame to @p out.
+ * @param out Destination buffer (grows)
+ * @param payload Frame payload (not including the 2-byte length)
+ */
+void AppendLengthPrefixedFrame(std::vector<std::uint8_t> &out,
+                               std::span<const std::uint8_t> payload);
+
+/**
+ * @brief Grow @p out by (2 + ovpn_cap) and return the OpenVPN-packet region.
+ * @details Layout: [2-byte length][ovpn_cap bytes for EncryptPacketInPlace].
+ *          After encrypt, call FinishTcpTxFrame with the wire length.
+ * @return {prefix_index, span of size ovpn_cap starting after the length prefix}
+ */
+std::pair<std::size_t, std::span<std::uint8_t>>
+BeginTcpTxFrame(std::vector<std::uint8_t> &out, std::size_t ovpn_cap);
+
+/**
+ * @brief Write the length prefix and shrink @p out to the finished frame.
+ * @param prefix_index Value returned by BeginTcpTxFrame
+ * @param wire_len OpenVPN packet length (not including the 2-byte TCP prefix)
+ */
+void FinishTcpTxFrame(std::vector<std::uint8_t> &out,
+                      std::size_t prefix_index,
+                      std::size_t wire_len);
+
+/** @brief Abort an unfinished BeginTcpTxFrame (resize back to @p prefix_index). */
+void AbortTcpTxFrame(std::vector<std::uint8_t> &out, std::size_t prefix_index);
 
 // ---------------------------------------------------------------------------
 // TransportHandle — variant dispatch (matches DataPlane pattern)
@@ -192,6 +271,12 @@ struct TransportHandle : std::variant<UdpTransport, TcpTransport>
 
     /** @brief Send data via the underlying transport. */
     asio::awaitable<void> Send(std::span<const std::uint8_t> data);
+
+    /**
+     * @brief Write a pre-framed byte stream (TCP length-prefixed batch).
+     * @details TCP-only; UDP throws. Used to flush coalesced TX batches.
+     */
+    asio::awaitable<void> SendRaw(std::span<const std::uint8_t> framed);
 
     /** @brief Receive one message via the underlying transport. */
     asio::awaitable<std::vector<std::uint8_t>> Receive();

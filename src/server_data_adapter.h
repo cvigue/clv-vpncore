@@ -15,6 +15,7 @@
 #include "openvpn/connection.h"
 #include "openvpn/packet.h"
 #include "transport/transport.h"
+#include "udp_engine_types.h"
 
 #include <not_null.h>
 
@@ -30,7 +31,7 @@
 namespace clv::vpn {
 
 template <typename Control>
-struct ServerDataAdapter
+struct ServerDataAdapter : PeerFloatSink
 {
     /**
      * @brief Bind to a control plane satisfying ServerControlForAdapter.
@@ -102,6 +103,21 @@ struct ServerDataAdapter
         });
     }
 
+    /**
+     * @brief Post an RX-observed peer float to the control plane.
+     * @param session_id Session that floated
+     * @param endpoint Newly authenticated source endpoint
+     */
+    void OnPeerFloat(std::uint64_t session_id,
+                     const transport::PeerEndpoint &endpoint) override
+    {
+        asio::post(control_->io_context(),
+                   [c = control_, sid = openvpn::SessionId{session_id}, endpoint]
+        {
+            c->HandlePeerFloat(sid, endpoint);
+        });
+    }
+
     /** @brief No-op; server tracks per-connection activity in MultiPeerPolicy. */
     void OnRxActivity()
     {
@@ -119,11 +135,15 @@ struct ServerDataAdapter
         if (!session || !session->HasTransport())
             co_return;
 
+        auto peer_id = session->GetWirePeerId();
+        if (!peer_id)
+            co_return;
+
         auto packet_id = session->TryAllocateOutboundPacketId();
         if (!packet_id)
             co_return;
         auto encrypted = session->GetCryptoContext().EncryptPacketWithId(
-            plaintext, session->GetSessionId(), *packet_id);
+            plaintext, *peer_id, *packet_id);
         if (encrypted.empty())
             co_return;
 

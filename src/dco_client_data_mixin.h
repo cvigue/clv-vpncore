@@ -111,12 +111,12 @@ class DcoClientDataMixin : public DcoCore<Derived>
     /**
      * @brief Configure peer endpoint and create the kernel DCO peer.
      * @param peer Remote UDP endpoint
-     * @param session_id OpenVPN session identifier (low bits become peer_id)
+     * @param peer_id Server-assigned DATA_V2 / DCO peer id
      */
-    void SetPeer(transport::PeerEndpoint peer, openvpn::SessionId session_id)
+    void SetPeer(transport::PeerEndpoint peer, std::uint32_t peer_id)
     {
         peer_ = peer;
-        peer_id_ = static_cast<std::uint32_t>(session_id.value & openvpn::PEER_ID_MASK);
+        peer_id_ = peer_id & openvpn::PEER_ID_MASK;
 
         if (this->dco_initialized_ && socket_fd_ >= 0)
             CreatePeer();

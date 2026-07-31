@@ -31,6 +31,7 @@
 #include <asio/awaitable.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
+#include <asio/dispatch.hpp>
 #include <asio/io_context.hpp>
 #include <asio/posix/stream_descriptor.hpp>
 #include <asio/post.hpp>
@@ -44,6 +45,7 @@
 
 #include <algorithm>
 #include <exception>
+#include <future>
 #include <memory>
 #include <atomic>
 #include <cerrno>
@@ -160,6 +162,23 @@ class UdpCore
 
     void CoreStop()
     {
+        // Supervisor-thread Disconnect() must not tear down workers while
+        // CoreStart() is still on the control io_context.
+        if (!control_ctx_.get_executor().running_in_this_thread() && !control_ctx_.stopped()
+            && running_.load(std::memory_order_acquire))
+        {
+            std::promise<void> done;
+            auto fut = done.get_future();
+            auto work = asio::make_work_guard(control_ctx_);
+            asio::dispatch(control_ctx_, [this, &done]
+            {
+                CoreStop();
+                done.set_value();
+            });
+            fut.wait();
+            return;
+        }
+
         if (!running_.exchange(false))
             return;
 
@@ -216,21 +235,21 @@ class UdpCore
         logger_->debug("UdpCore::CoreInstallKeys: key_id={}", key_id);
     }
 
-    void CoreSetPeer(transport::PeerEndpoint peer, openvpn::SessionId session_id)
+    void CoreSetPeer(transport::PeerEndpoint peer, std::uint32_t peer_id)
     {
         if (tx_thread_ && tx_thread_->running())
         {
-            asio::post(tx_thread_->context(), [this, peer, session_id]()
+            asio::post(tx_thread_->context(), [this, peer, peer_id]()
             {
-                policy_.SetPeer(peer, session_id, socket_fd_);
+                policy_.SetPeer(peer, peer_id, socket_fd_);
             });
         }
         else
         {
-            policy_.SetPeer(peer, session_id, socket_fd_);
+            policy_.SetPeer(peer, peer_id, socket_fd_);
         }
 
-        logger_->debug("UdpCore::CoreSetPeer: session_id={}", session_id.value);
+        logger_->debug("UdpCore::CoreSetPeer: peer_id={}", peer_id);
     }
 
     // -- Stats ---------------------------------------------------------------

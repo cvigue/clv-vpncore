@@ -3,6 +3,7 @@
 #include "server_control_base.h"
 #include "data_path_stats.h"
 #include "ip_pool_manager.h"
+#include "peer_slot_table.h"
 #include "log_subsystems.h"
 #include "net/ipv4_utils.h"
 #include "net/ipv6_utils.h"
@@ -23,6 +24,7 @@
 #include "transport/transport.h"
 
 #include <atomic>
+#include <algorithm>
 #include <bits/chrono.h>
 #include <chrono>
 #include <cstddef>
@@ -80,20 +82,56 @@ void ServerControlBase<Leaf>::HandleDeadPeer(openvpn::SessionId sid)
     if (!session)
         return;
 
-    if (ip_pool_)
-    {
-        ip_pool_->ReleaseIpv4(sid.value);
-        ip_pool_->ReleaseIpv6(sid.value);
-    }
-
     if (auto vpn_ip = session->GetAssignedIpv4())
         routing_table_.RemoveRoute(*vpn_ip, 32);
     routing_table_v6_.RemoveSessionRoutes(sid.value);
 
+    // Retires the peer-id slot; the id itself frees when the Connection does.
     RemoveSessionSafe(sid);
-    SplitPublishRoutes();
-    SplitPublishSessions();
+    PublishRoutes();
+    PublishSessions();
     keepalive_logger.info("Peer dead: removed session {}", sid);
+}
+
+template <typename Leaf>
+void ServerControlBase<Leaf>::HandlePeerFloat(openvpn::SessionId sid,
+                                              transport::PeerEndpoint endpoint)
+{
+    auto *session = session_manager_.FindSession(sid);
+    if (!session)
+        return; // retired between the RX notification and this post
+
+    auto peer_id = session->GetWirePeerId();
+    if (!peer_id)
+        return;
+
+    const Connection::Endpoint ep{.addr = endpoint.addr, .port = endpoint.port};
+    if (session->GetEndpoint() == ep)
+        return; // already caught up (repeat notification within one batch)
+
+    if (!session_manager_.RebindEndpoint(sid, ep))
+    {
+        // Another live session already answers to this endpoint. The slot
+        // endpoint is RX-owned, so we cannot take it back from here; drop the
+        // floated session instead and let the client re-handshake. Two live
+        // slots must never claim one endpoint.
+        logger_->warn("Peer {} float to {}:{} collides with another session; dropping {:016x}",
+                      *peer_id,
+                      endpoint.addr.to_string(),
+                      endpoint.port,
+                      sid.value);
+        HandleDeadPeer(sid);
+        return;
+    }
+
+    leaf().RebindPeerTransport(session, endpoint);
+    PublishSessions();
+
+    logger_->info("Session {:016x} (peer {}) followed float to {}:{}",
+                  sid.value,
+                  *peer_id,
+                  endpoint.addr.to_string(),
+                  endpoint.port);
 }
 
 template <typename Leaf>
@@ -136,6 +174,8 @@ ServerControlBase<Leaf>::ServerControlBase(ServerControlConfig cfg)
     {
         ip_pool_->EnableIpv6Pool(server_cfg.network_v6, true, max_clients);
     }
+    peer_slots_ = std::make_unique<PeerSlotTable>(
+        max_clients > 0 ? max_clients : std::max<std::size_t>(ip_pool_->TotalCount(), 1));
 
     // TLS-Crypt keys
     LoadTlsCryptKeys();
@@ -173,7 +213,7 @@ void ServerControlBase<Leaf>::StopBase()
 {
     using WorkGuard = asio::executor_work_guard<asio::io_context::executor_type>;
     std::optional<WorkGuard> work_guard;
-    if (split_ctx_)
+    if (data_plane_)
         work_guard.emplace(io_context_->get_executor());
 
     // Cancel rekey timers FIRST so their operation_aborted completions are
@@ -198,26 +238,32 @@ void ServerControlBase<Leaf>::StopBase()
     if (handshake_future_.valid())
         handshake_future_.get();
 
-    // Release all IPs
-    if (ip_pool_)
+    // Data-path threads are joined; the rest of teardown (and every lease
+    // destructor it triggers) runs on this thread, not the control context.
+    peer_slots_->RebindControlThread();
+
+    // Tear down per-peer kernel state before the slots become allocatable.
+    for (auto sid : session_manager_.GetAllSessionIds())
     {
-        auto session_ids = session_manager_.GetAllSessionIds();
-        for (const auto &sid : session_ids)
-        {
-            ip_pool_->ReleaseIpv4(sid.value);
-            ip_pool_->ReleaseIpv6(sid.value);
-        }
+        auto *session = session_manager_.FindSession(sid);
+        if (!session)
+            continue;
+        if (auto peer_id = session->GetWirePeerId())
+            peer_slots_->Retire(*peer_id);
+        ch().RemovePeer(session);
     }
+
+    // Session destroy returns leased IPs / peer ids to their pools.
     session_manager_.ClearAllSessions();
 
-    if (split_ctx_)
+    if (data_plane_)
     {
         std::promise<void> done;
         auto fut = done.get_future();
         // Move the work guard into the lambda: it is released on the IO thread
         // after ForceReclaimAll() completes, allowing run() to finish naturally.
         asio::dispatch(*io_context_,
-                       [ctx = split_ctx_.get(), wg = std::move(*work_guard), &done]() mutable
+                       [ctx = data_plane_.get(), wg = std::move(*work_guard), &done]() mutable
         {
             ctx->ForceReclaimAll();
             wg.reset();
@@ -226,7 +272,7 @@ void ServerControlBase<Leaf>::StopBase()
         work_guard.reset(); // already moved; make optional empty
         fut.wait();
     }
-    split_ctx_.reset();
+    data_plane_.reset();
 }
 
 template <typename Leaf>
@@ -640,7 +686,7 @@ asio::awaitable<Connection *> ServerControlBase<Leaf>::TryAcceptCookieSession(
         logger_->info("Cookie-proven new client; replacing session {:016x}",
                       existing->GetSessionId().value);
         RemoveSessionSafe(existing->GetSessionId());
-        SplitPublishSessions();
+        PublishSessions();
     }
 
     openvpn::TlsCertConfig cert_config = MakeTlsCertConfig();
@@ -657,7 +703,7 @@ asio::awaitable<Connection *> ServerControlBase<Leaf>::TryAcceptCookieSession(
     {
         logger_->error("CompleteCookieHandshake failed for {:016x}", cookie_sid.value);
         RemoveSessionSafe(cookie_sid);
-        SplitPublishSessions();
+        PublishSessions();
         co_return nullptr;
     }
 
@@ -751,7 +797,7 @@ asio::awaitable<void> ServerControlBase<Leaf>::HandleControlPacket(Connection *s
             }
             asio::awaitable<void> OnHandshakeComplete()
             {
-                self.EnsureIpAllocated(session);
+                self.EnsureSessionResources(session);
                 co_return;
             }
         };
@@ -775,7 +821,7 @@ asio::awaitable<void> ServerControlBase<Leaf>::HandleControlPacket(Connection *s
             && !session->GetControlChannel().HasPendingOutbound())
         {
             session->SetKeysPendingActivation(false);
-            SplitPublishSessions();
+            PublishSessions();
             logger_->info("TX keys activated (client ACKed KEY_METHOD_2)");
         }
     }
@@ -961,7 +1007,7 @@ asio::awaitable<void> ServerControlBase<Leaf>::ProcessPlaintext(Connection *sess
             logger_->warn("Unhandled control message: {}", msg);
     }
 
-    EnsureIpAllocated(session);
+    EnsureSessionResources(session);
 }
 
 template <typename Leaf>
@@ -995,8 +1041,8 @@ asio::awaitable<void> ServerControlBase<Leaf>::HandleKeyMethod2(Connection *sess
 
     auto key_method_msg = openvpn::BuildKeyMethod2Message(server_random, options, "", "");
 
-    EnsureIpAllocated(session);
-    SplitPublishRoutes();
+    EnsureSessionResources(session);
+    PublishRoutes();
 
     session->SetServerRandom(server_random);
     if (!DeriveAndInstallKeys(session))
@@ -1020,13 +1066,15 @@ asio::awaitable<void> ServerControlBase<Leaf>::HandleKeyMethod2(Connection *sess
     const std::uint8_t key_id = session->GetControlChannel().GetKeyId();
     if (key_id == 0)
     {
-        SplitPublishSessions();
+        PublishSessions();
+        OccupyPeerSlot(session);
         session->SetKeysPendingActivation(false);
         logger_->info("Key-method 2 exchange complete, keys derived; RX+TX activated (initial)");
     }
     else
     {
-        SplitPublishSessionsRx();
+        PublishSessionsRx();
+        OccupyPeerSlot(session);
         session->SetKeysPendingActivation(true);
         logger_->info("Key-method 2 exchange complete, keys derived; RX activated, awaiting ACK for TX (rekey)");
     }
@@ -1200,14 +1248,28 @@ openvpn::TlsCertConfig ServerControlBase<Leaf>::MakeTlsCertConfig() const
 }
 
 template <typename Leaf>
-void ServerControlBase<Leaf>::EnsureIpAllocated(Connection *session)
+void ServerControlBase<Leaf>::EnsureSessionResources(Connection *session)
 {
+    if (!session->GetWirePeerId())
+    {
+        auto peer_lease = peer_slots_->Reserve();
+        if (!peer_lease)
+        {
+            logger_->warn("Peer-id slots exhausted - cannot assign peer-id");
+            return;
+        }
+        logger_->info("Assigned peer-id {} to session {:016x}",
+                      peer_lease->value(),
+                      session->GetSessionId().value);
+        session->TakePeerIdLease(std::move(*peer_lease));
+    }
+
     if (!session->GetAssignedIpv4())
     {
         auto ip_opt = ip_pool_->AllocateIpv4(session->GetSessionId().value);
         if (ip_opt)
         {
-            session->SetAssignedIpv4(*ip_opt);
+            session->TakeIpv4Lease(Connection::Ipv4Lease{ip_pool_.get(), *ip_opt});
             routing_table_.AddRoute(*ip_opt, 32, session->GetSessionId().value);
             logger_->info("Assigned IPv4 {} to session {:016x}",
                           ipv4::Ipv4ToString(*ip_opt),
@@ -1224,7 +1286,7 @@ void ServerControlBase<Leaf>::EnsureIpAllocated(Connection *session)
         auto ipv6_opt = ip_pool_->AllocateIpv6(session->GetSessionId().value);
         if (ipv6_opt)
         {
-            session->SetAssignedIpv6(*ipv6_opt);
+            session->TakeIpv6Lease(Connection::Ipv6Lease{ip_pool_.get(), *ipv6_opt});
             routing_table_v6_.AddRoute(*ipv6_opt, 128, session->GetSessionId().value);
             logger_->info("Assigned IPv6 {} to session {:016x}",
                           ipv6::Ipv6ToString(*ipv6_opt),
@@ -1302,37 +1364,65 @@ asio::awaitable<bool> ServerControlBase<Leaf>::SendTlsControlData(Connection *se
 }
 
 template <typename Leaf>
-void ServerControlBase<Leaf>::SplitPublishRoutes()
+void ServerControlBase<Leaf>::PublishRoutes()
 {
-    if (split_ctx_)
-        split_ctx_->PublishRoutes(routing_table_, routing_table_v6_);
+    if (data_plane_)
+        data_plane_->PublishRoutes(routing_table_, routing_table_v6_);
 }
 
 template <typename Leaf>
-void ServerControlBase<Leaf>::SplitPublishSessions()
+void ServerControlBase<Leaf>::PublishSessions()
 {
-    if (split_ctx_)
+    if (data_plane_)
     {
-        split_ctx_->PublishSessions(session_manager_);
-        split_ctx_->ReclaimDeferred();
+        data_plane_->PublishSessions(session_manager_);
+        data_plane_->ReclaimDeferred();
     }
 }
 
 template <typename Leaf>
-void ServerControlBase<Leaf>::SplitPublishSessionsRx()
+void ServerControlBase<Leaf>::PublishSessionsRx()
 {
-    if (split_ctx_)
-        split_ctx_->PublishSessionsRx(session_manager_);
+    if (data_plane_)
+        data_plane_->PublishSessionsRx(session_manager_);
+}
+
+template <typename Leaf>
+void ServerControlBase<Leaf>::OccupyPeerSlot(Connection *session)
+{
+    auto peer_id = session->GetWirePeerId();
+    if (!peer_id)
+        return;
+
+    // Rekey: the slot is already live and may hold a floated endpoint that the
+    // Connection has not caught up with. Only the initial publication seeds it.
+    if (peer_slots_->StateOf(*peer_id) == PeerSlotState::Occupied)
+        return;
+
+    const auto &ep = session->GetEndpoint();
+    peer_slots_->Occupy(*peer_id,
+                        session->GetSessionId().value,
+                        transport::PeerEndpoint{.addr = ep.addr, .port = ep.port});
 }
 
 template <typename Leaf>
 void ServerControlBase<Leaf>::RemoveSessionSafe(openvpn::SessionId sid)
 {
-    if (split_ctx_)
+    if (auto *session = session_manager_.FindSession(sid))
+    {
+        // Retire first: an unreachable slot cannot be picked up by RX/TX while
+        // the kernel peer teardown and the QSBR grace period are still pending.
+        // The lease destructor frees the id once the Connection is destroyed.
+        if (auto peer_id = session->GetWirePeerId())
+            peer_slots_->Retire(*peer_id);
+        ch().RemovePeer(session);
+    }
+
+    if (data_plane_)
     {
         auto conn = session_manager_.ExtractSession(sid);
         if (conn)
-            split_ctx_->DeferDestruction(std::move(conn));
+            data_plane_->DeferDestruction(std::move(conn));
     }
     else
     {

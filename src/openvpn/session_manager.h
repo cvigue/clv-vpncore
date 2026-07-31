@@ -60,6 +60,19 @@ class SessionManager
     Connection *FindSessionByEndpoint(const Connection::Endpoint &endpoint);
 
     /**
+     * @brief Move a session to a new endpoint, keeping the endpoint index in sync.
+     *
+     * Refuses the move when another live session already answers to
+     * @p endpoint: two sessions on one endpoint would make control demux
+     * ambiguous.
+     *
+     * @param session_id Session to move
+     * @param endpoint New remote endpoint
+     * @return true if the session was moved
+     */
+    bool RebindEndpoint(openvpn::SessionId session_id, const Connection::Endpoint &endpoint);
+
+    /**
      * @brief Remove a session
      * @param session_id The session to remove
      * @return True if removed, false if not found

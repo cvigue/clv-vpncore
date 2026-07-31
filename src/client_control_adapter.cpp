@@ -18,11 +18,15 @@
 #include "openvpn/vpn_config.h"
 #include "transport/connector.h"
 #include "transport/transport.h"
+
+#include <asio/dispatch.hpp>
+
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <exception>
+#include <future>
 #include <openssl/rand.h>
 #include <optional>
 #include <span>
@@ -187,6 +191,29 @@ void ClientControlPlane<ChannelTpl>::Disconnect()
     if (state_ == VpnClientState::Disconnected)
         return;
 
+    if (io_context_->get_executor().running_in_this_thread() || io_context_->stopped())
+    {
+        DisconnectOnControl();
+        return;
+    }
+
+    std::promise<void> done;
+    auto fut = done.get_future();
+    auto work = asio::make_work_guard(*io_context_);
+    asio::dispatch(*io_context_, [this, &done]
+    {
+        DisconnectOnControl();
+        done.set_value();
+    });
+    fut.wait();
+}
+
+template <template <typename> class ChannelTpl>
+void ClientControlPlane<ChannelTpl>::DisconnectOnControl()
+{
+    if (state_ == VpnClientState::Disconnected)
+        return;
+
     logger_->info("Disconnecting...");
     *running_ = false;
 
@@ -256,6 +283,8 @@ asio::awaitable<void> ClientControlPlane<ChannelTpl>::ConnectionLoop()
     try
     {
         co_await SendHardReset();
+        if (!*running_ || !control_channel_)
+            co_return;
         auto handshake_start = std::chrono::steady_clock::now();
 
         while (*running_)
@@ -353,6 +382,9 @@ asio::awaitable<void> ClientControlPlane<ChannelTpl>::ReconnectLoop()
 template <template <typename> class ChannelTpl>
 asio::awaitable<void> ClientControlPlane<ChannelTpl>::SendHardReset()
 {
+    if (!*running_ || !control_channel_)
+        co_return;
+
     const bool v2_mode = !tls_crypt_v2_wkc_.empty();
     const int reset_version = v2_mode ? 3 : 2;
 
@@ -385,6 +417,9 @@ asio::awaitable<void> ClientControlPlane<ChannelTpl>::SendHardReset()
         }
         co_await SendRawPacket(serialized);
     }
+
+    if (!*running_)
+        co_return;
 
     SetState(VpnClientState::TlsHandshake);
 }
@@ -878,7 +913,15 @@ void ClientControlPlane<ChannelTpl>::StartDataPath()
         return;
     }
 
-    asio::co_spawn(*io_context_, channel.StartDataPath(), asio::detached);
+    asio::co_spawn(
+        *io_context_,
+        [this]() -> asio::awaitable<void>
+        {
+            if (!*running_ || state_ != VpnClientState::Connected)
+                co_return;
+            co_await ch().StartDataPath();
+        },
+        asio::detached);
 
     channel.LaunchKeepalive(*io_context_,
                             [this]()
@@ -1030,6 +1073,12 @@ void ClientControlPlane<ChannelTpl>::InitializeTransport()
     if (auto *udp = std::get_if<transport::UdpTransport>(&*transport_))
     {
         udp->ApplySocketBuffers(config_->performance.socket_recv_buffer,
+                                config_->performance.socket_send_buffer,
+                                *logger_);
+    }
+    else if (auto *tcp = std::get_if<transport::TcpTransport>(&*transport_))
+    {
+        tcp->ApplySocketBuffers(config_->performance.socket_recv_buffer,
                                 config_->performance.socket_send_buffer,
                                 *logger_);
     }

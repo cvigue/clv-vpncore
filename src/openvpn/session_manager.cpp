@@ -68,6 +68,27 @@ Connection *SessionManager::FindSessionByEndpoint(const Connection::Endpoint &en
     return nullptr;
 }
 
+bool SessionManager::RebindEndpoint(openvpn::SessionId session_id,
+                                   const Connection::Endpoint &endpoint)
+{
+    auto it = sessions_.find(HashSessionId(session_id));
+    if (it == sessions_.end())
+        return false;
+
+    Connection *conn = it->second.get();
+    if (conn->GetEndpoint() == endpoint)
+        return true;
+
+    auto existing = endpoint_index_.find(endpoint);
+    if (existing != endpoint_index_.end() && existing->second != conn)
+        return false;
+
+    endpoint_index_.erase(conn->GetEndpoint());
+    conn->SetEndpoint(endpoint);
+    endpoint_index_[endpoint] = conn;
+    return true;
+}
+
 bool SessionManager::RemoveSession(openvpn::SessionId session_id)
 {
     uint64_t key = HashSessionId(session_id);

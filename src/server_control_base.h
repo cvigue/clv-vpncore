@@ -16,6 +16,7 @@
 
 #include "data_path_stats.h"
 #include "ip_pool_manager.h"
+#include "peer_slot_table.h"
 #include "log_subsystems.h"
 #include "openvpn/config_exchange.h"
 #include "openvpn/connection.h"
@@ -170,6 +171,18 @@ class ServerControlBase
     void HandleDeadPeer(openvpn::SessionId sid);
 
     /**
+     * @brief Follow an RX-observed peer float on the control plane.
+     *
+     * The data path already moved the peer slot, so egress follows without
+     * this. This catches up the endpoint index and control transport, and
+     * reverts the slot when the new endpoint collides with another session.
+     *
+     * @param sid Session that floated
+     * @param endpoint Newly authenticated source endpoint
+     */
+    void HandlePeerFloat(openvpn::SessionId sid, transport::PeerEndpoint endpoint);
+
+    /**
      * @brief Default control-packet entry point (UDP/DCO leaves override).
      * @param data Serialized OpenVPN control frame
      * @param sender Source endpoint of the datagram
@@ -206,6 +219,17 @@ class ServerControlBase
     void StartBase();
     void StopBase();
     void ConfigureDataPlane();
+
+    /**
+     * @brief Point a session's control transport at a new endpoint after a float.
+     *
+     * Default is a no-op for transports that cannot float (TCP). UDP-family
+     * leaves hide this with a listener-backed rebind.
+     */
+    void RebindPeerTransport(Connection * /*session*/,
+                             const transport::PeerEndpoint & /*endpoint*/)
+    {
+    }
 
     // -- Supervisory coroutines ----------------------------------------------
 
@@ -275,7 +299,7 @@ class ServerControlBase
     asio::awaitable<void> RekeyLoop(openvpn::SessionId sid, std::uint32_t reneg_seconds);
 
     openvpn::TlsCertConfig MakeTlsCertConfig() const;
-    void EnsureIpAllocated(Connection *session);
+    void EnsureSessionResources(Connection *session);
     bool DeriveAndInstallKeys(Connection *session);
 
     asio::awaitable<void> SendWrappedPacket(std::vector<std::uint8_t> data,
@@ -285,10 +309,13 @@ class ServerControlBase
                                              std::span<const std::uint8_t> data,
                                              std::string_view description);
 
-    void SplitPublishRoutes();
-    void SplitPublishSessions();
-    void SplitPublishSessionsRx();
+    void PublishRoutes();
+    void PublishSessions();
+    void PublishSessionsRx();
     void RemoveSessionSafe(openvpn::SessionId sid);
+
+    /// Publish a keyed session's peer-id slot to the data path (idempotent).
+    void OccupyPeerSlot(Connection *session);
 
     // -- State ---------------------------------------------------------------
 
@@ -298,10 +325,12 @@ class ServerControlBase
     std::shared_ptr<spdlog::logger> logger_;
     std::atomic<bool> *running_ = nullptr;
 
+    // Pools must outlive SessionManager: Connection leases release into them on destroy.
+    std::unique_ptr<IpPoolManager> ip_pool_;
+    std::unique_ptr<PeerSlotTable> peer_slots_;
     SessionManager session_manager_;
     RoutingTableIpv4 routing_table_;
     RoutingTableIpv6 routing_table_v6_;
-    std::unique_ptr<IpPoolManager> ip_pool_;
     std::unique_ptr<openvpn::ConfigExchange> config_exchange_;
     std::optional<openvpn::TlsCrypt> tls_crypt_;
     std::optional<openvpn::TlsCryptV2> tls_crypt_v2_;
@@ -310,7 +339,9 @@ class ServerControlBase
     DataPathStats::RxCounters rx_counters_{};
     DataPathStats::TxCounters tx_counters_{};
 
-    std::unique_ptr<UdpEngineContext> split_ctx_;
+    /// Set by leaves whose data path reads sessions off the control thread;
+    /// null for DCO, where the kernel owns the data path.
+    std::unique_ptr<DataPlaneContext> data_plane_;
     std::optional<asio::steady_timer> cleanup_timer_;
     std::optional<asio::steady_timer> stats_timer_;
     std::optional<asio::steady_timer> handshake_timer_;

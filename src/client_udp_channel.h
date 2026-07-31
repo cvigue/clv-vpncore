@@ -174,7 +174,7 @@ class ClientUdpChannel
         const auto wire_len = ping_tx_state_.EncryptInPlace(
             std::span<std::uint8_t>(buf.data(), kBufSize),
             openvpn::KEEPALIVE_PING_SIZE,
-            snap.session_id,
+            snap.peer_id,
             *pkt_id);
 
         if (wire_len == 0)
@@ -210,7 +210,7 @@ class ClientUdpChannel
     {
         auto &udp = std::get<transport::UdpTransport>(handle);
         UdpClientMixinBase::BindSocket(udp.RawSocket().native_handle());
-        UdpClientMixinBase::SetPeer(peer, openvpn::SessionId{static_cast<std::uint64_t>(peer_id)});
+        UdpClientMixinBase::SetPeer(peer, peer_id);
     }
 
     /**

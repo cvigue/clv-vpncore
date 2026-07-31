@@ -249,6 +249,7 @@ class ClientControlPlane
 
     void SetState(VpnClientState new_state);
     void StartDataPath();
+    void DisconnectOnControl();
 
     asio::awaitable<void> KeepaliveLoop();
     asio::awaitable<void> StatsLoop();

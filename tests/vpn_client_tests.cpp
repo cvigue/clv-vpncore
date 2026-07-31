@@ -4,9 +4,11 @@
 
 #include <nlohmann/json.hpp>
 #include <asio.hpp>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
 
 #include "vpn_client.h"
 
@@ -314,6 +316,21 @@ TEST_F(VpnClientTest, MultipleDisconnectCalls)
     EXPECT_EQ(client.GetState(), VpnClientState::Disconnected);
 }
 
+TEST_F(VpnClientTest, DisconnectFromSupervisorThreadWhileConnecting)
+{
+    auto work = asio::make_work_guard(io_context_);
+    std::jthread runner([&] { io_context_.run(); });
+
+    VpnClient client(io_context_, config_);
+    client.Connect();
+    client.Disconnect();
+
+    EXPECT_EQ(client.GetState(), VpnClientState::Disconnected);
+
+    work.reset();
+    io_context_.stop();
+}
+
 // ============================================================================
 // VpnClient Connect Tests (require mock or real server)
 // ============================================================================
@@ -357,46 +374,45 @@ TEST_F(VpnClientConnectTest, ConnectFailsWithBadTlsCryptPath)
 
 TEST_F(VpnClientConnectTest, ConnectWithoutTlsCrypt)
 {
-    // Don't set tls_crypt_key - should try to connect without TLS-Crypt
     config_.client->tls_crypt_key = "";
 
-    VpnClient client(io_context_, config_);
+    auto work = asio::make_work_guard(io_context_);
+    std::jthread runner([&] { io_context_.run(); });
 
-    // This will fail to resolve or connect, but shouldn't crash
+    VpnClient client(io_context_, config_);
     client.Connect();
 
-    // Run briefly
-    io_context_.poll();
+    for (int i = 0; i < 50 && client.GetState() == VpnClientState::Disconnected; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
-    // State should be past Disconnected
     EXPECT_NE(client.GetState(), VpnClientState::Disconnected);
 
-    // Clean shutdown: cancel all coroutine I/O before destroying client/io_context
     client.Disconnect();
-    io_context_.restart();
-    io_context_.run();
+    work.reset();
+    io_context_.stop();
 }
 
 TEST_F(VpnClientConnectTest, ConnectWhileRunning)
 {
     config_.client->tls_crypt_key = "";
 
+    auto work = asio::make_work_guard(io_context_);
+    std::jthread runner([&] { io_context_.run(); });
+
     VpnClient client(io_context_, config_);
     client.Connect();
-    io_context_.poll();
 
-    // Second connect should be ignored (logged as warning)
+    for (int i = 0; i < 50 && client.GetState() == VpnClientState::Disconnected; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
     client.Connect();
-    io_context_.poll();
 
-    // Should still be in a connection state
     auto state = client.GetState();
     EXPECT_TRUE(state == VpnClientState::Connecting || state == VpnClientState::TlsHandshake || state == VpnClientState::Error);
 
-    // Clean shutdown: cancel all coroutine I/O before destroying client/io_context
     client.Disconnect();
-    io_context_.restart();
-    io_context_.run();
+    work.reset();
+    io_context_.stop();
 }
 
 // ============================================================================

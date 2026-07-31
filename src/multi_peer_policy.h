@@ -10,7 +10,7 @@
  * Provides the PeerPolicy hooks that UdpCore calls on the RX and TX
  * hot paths.  Unlike P2PPolicy (single peer, direct key posting), this
  * policy reads keys, sessions, and routes from QSBR snapshots published
- * by the control plane — exactly mirroring how kernel DCO operates.
+ * by the control plane — mirroring how kernel DCO operates.
  *
  * TX: TUN read → route lookup → per-session encrypt → sendmmsg.
  * RX: recvmmsg → endpoint lookup → per-session decrypt → TUN write.
@@ -19,6 +19,7 @@
 #include "openvpn/crypto_context.h"
 #include "openvpn/data_v2_wire.h"
 #include "openvpn/packet.h"
+#include "peer_slot_table.h"
 #include "routing_table.h"
 #include "udp_engine_types.h"
 #include "openvpn/connection.h"
@@ -27,8 +28,10 @@
 
 #include <not_null.h>
 #include <net/ipv6_utils.h>
+#include <rate_limiter.h>
 #include <util/byte_packer.h>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -67,7 +70,11 @@ struct MultiPeerPolicy
     }
 
     // ---- Borrowed state (must be set before Start) ----
-    UdpEngineContext *ctx = nullptr;
+    DataPlaneContext *ctx = nullptr;
+    /// Peer-id → session demux and float destination. Immortal; outlives RX/TX.
+    PeerSlotTable *slots = nullptr;
+    /// Notified once per float so the control plane can follow the endpoint.
+    PeerFloatSink *float_sink = nullptr;
     int socket_fd = -1;
 
     // ---- TX-thread-local mutable state ----
@@ -88,16 +95,26 @@ struct MultiPeerPolicy
     };
     std::unordered_map<std::uint64_t, TxSessionState> tx_states;
 
+    /// Per-peer minimum interval between control-plane float catch-ups.
+    static constexpr std::chrono::seconds kFloatCatchupInterval{1};
+
     // Per-session RX-local decrypt state.  Keyed by session_id value.
     struct RxSessionState
     {
         RxDecryptState decrypt;
         Connection *last_conn = nullptr;
+        /// Throttles the O(N) session republish; the data path follows the slot, not this.
+        clv::RateLimiter<> float_catchup_limiter{kFloatCatchupInterval};
     };
     std::unordered_map<std::uint64_t, RxSessionState> rx_states;
 
     // Policy-local counter (not in UdpCore's tx_counters_)
     std::uint64_t route_lookup_misses = 0;
+
+    // Rate-limits the log for decrypt attempts whose source does not match the
+    // slot endpoint: a spoofed peer-id now costs one AEAD attempt, so this is
+    // the one path an off-path attacker can drive.
+    clv::RateLimiter<> float_reject_limiter{std::chrono::seconds{1}};
 
     // ---- Thread lifecycle hooks ----
 
@@ -144,27 +161,45 @@ struct MultiPeerPolicy
     // ---- RX hooks ----
 
     /**
-     * @brief Endpoint → session → per-session decrypt.
+     * @brief Wire peer-id → session → per-session decrypt, with peer float.
      *
-     * Mirrors VpnServer::UdpReceiveLoop::onData.  QSBR snapshot is acquired
-     * once (valid until OnPostRecvBatch at the end of the batch).
+     * Demuxes on the authenticated-later peer-id rather than the source
+     * address, so a client that changes address keeps decrypting. The float
+     * itself is gated on a non-empty decrypt: AEAD alone would let a captured
+     * datagram replayed from an attacker's address redirect server egress, so
+     * the anti-replay verdict is part of the gate.
+     *
+     * QSBR snapshot is acquired once (valid until OnPostRecvBatch).
      */
     std::span<std::uint8_t> DecryptInPlace(transport::IncomingSlot &slot)
     {
-        const auto &snap = *ctx->sessions_rx.read_quiesced();
+        if (!slots || slot.len < openvpn::kDataV2HeaderLen)
+            return {};
+        if (openvpn::GetOpcode(slot.buf[0]) != openvpn::Opcode::P_DATA_V2)
+            return {}; // P_DATA_V1 carries no peer-id; control keeps its endpoint index
 
-        const auto *entry = snap.FindByEndpoint(slot.sender);
+        const std::uint32_t peer_id = clv::netcore::read_uint<3>(
+            std::span<const std::uint8_t>(slot.buf + 1, 3));
+
+        // Anything but an Occupied slot (unknown, reserved, retiring) is a drop.
+        auto session_id = slots->LookupSession(peer_id);
+        if (!session_id)
+            return {};
+
+        const auto &snap = *ctx->sessions_rx.read_quiesced();
+        const auto *entry = snap.Find(openvpn::SessionId{*session_id});
         if (!entry || !entry->conn)
             return {};
 
         entry->conn->UpdateLastActivity();
 
         // Per-session RX decrypt state (lazy init from QSBR snapshot)
-        auto &rxs = rx_states[entry->conn->GetSessionId().value];
+        auto &rxs = rx_states[*session_id];
         if (rxs.last_conn != entry->conn)
         {
             rxs.decrypt = RxDecryptState{*logger_};
             rxs.last_conn = entry->conn;
+            rxs.float_catchup_limiter = clv::RateLimiter<>{kFloatCatchupInterval};
         }
         if (rxs.decrypt.NeedsReinit(entry->key_id))
         {
@@ -176,8 +211,11 @@ struct MultiPeerPolicy
             rxs.decrypt.ApplySnapshot(snap_key);
         }
 
-        return rxs.decrypt.DecryptPacketInPlace(
+        auto plaintext = rxs.decrypt.DecryptPacketInPlace(
             std::span<std::uint8_t>(slot.buf, slot.len));
+
+        MaybeFloat(peer_id, *session_id, slot.sender, !plaintext.empty(), rxs);
+        return plaintext;
     }
 
     /** @brief Post-RX-batch QSBR quiescent-state report. */
@@ -192,8 +230,9 @@ struct MultiPeerPolicy
     /**
      * @brief Acquire per-batch QSBR snapshots and report quiescent state.
      *
-     * Called by TxLoop after ReadBatchInto, before the encrypt loop.
-     * Returns false only if the QSBR context is not yet set.
+     * Called by TxLoop after the TUN fill pass (`::read` into arena slots),
+     * before the encrypt loop. Returns false only if the QSBR context is not
+     * yet set.
      */
     bool TxReady() noexcept
     {
@@ -270,6 +309,12 @@ struct MultiPeerPolicy
         if (!conn->HasTransport() || !conn->GetTransport().IsBatchingSupported())
             return 0; // TCP peers handled by the control-plane path
 
+        // Destination comes from the slot, not the Connection: RX may have
+        // floated the peer since this snapshot was published.
+        transport::PeerEndpoint dest;
+        if (!slots || !slots->ReadEndpoint(entry->peer_id, dest))
+            return 0;
+
         // ---- Per-session encrypt (lazy init from QSBR snapshot) ----
         auto &txs = tx_states[session_id.value];
         if (txs.last_conn != conn)
@@ -291,12 +336,12 @@ struct MultiPeerPolicy
                                                                 entry->encrypt_key.cipher_algorithm))
             return 0;
         auto wire_len = txs.encrypt.EncryptInPlace(
-            slot_span, payload_len, session_id, *packet_id);
+            slot_span, payload_len, entry->peer_id, *packet_id);
         if (wire_len == 0)
             return 0;
 
         out.data = slot_span.first(wire_len);
-        out.dest = conn->GetTransport().GetPeer();
+        out.dest = dest;
         out_conn = conn;
         return wire_len;
     }
@@ -312,7 +357,7 @@ struct MultiPeerPolicy
     {
     }
     /** @brief No-op; peer endpoints are resolved from QSBR session index. */
-    void SetPeer(transport::PeerEndpoint /*peer*/, openvpn::SessionId /*sid*/, int /*fd*/)
+    void SetPeer(transport::PeerEndpoint /*peer*/, std::uint32_t /*peer_id*/, int /*fd*/)
     {
     }
 
@@ -328,6 +373,63 @@ struct MultiPeerPolicy
     }
 
   private:
+    /**
+     * @brief Move a live slot's egress endpoint after an authenticated packet.
+     *
+     * The whole float (slot move + control-plane catch-up) is gated by the
+     * per-peer @c float_catchup_limiter. Throttling them together keeps the
+     * slot and the control endpoint index in sync: a suppressed float leaves
+     * the slot on the old endpoint, so a client that settles on a new source
+     * is caught up within one interval instead of being stranded. This bounds
+     * the O(N) session republish an authenticated peer can drive to one per
+     * interval, per peer.
+     *
+     * @param peer_id Wire peer-id whose slot is being updated
+     * @param session_id Session the slot resolves to
+     * @param sender Source endpoint of the packet just processed
+     * @param authenticated True when decrypt (AEAD + anti-replay) accepted
+     * @param rxs Per-peer RX state holding the float throttle
+     */
+    void MaybeFloat(std::uint32_t peer_id,
+                    std::uint64_t session_id,
+                    const transport::PeerEndpoint &sender,
+                    bool authenticated,
+                    RxSessionState &rxs)
+    {
+        transport::PeerEndpoint current;
+        if (!slots->ReadEndpoint(peer_id, current) || current == sender)
+            return;
+
+        if (!authenticated)
+        {
+            // Security-relevant: a valid peer-id whose datagram fails AEAD from
+            // a new source is a spoof attempt or a corrupt path. 
+            if (float_reject_limiter.Due())
+            {
+                logger_->warn("Peer {} float REJECTED: decrypt failed for datagram from {}:{} ({} more suppressed)",
+                              peer_id,
+                              sender.addr.to_string(),
+                              sender.port,
+                              float_reject_limiter.SuppressedCount());
+            }
+            return;
+        }
+
+        if (!rxs.float_catchup_limiter.Due())
+            return;
+
+        slots->PublishEndpoint(peer_id, sender);
+        if (float_sink)
+            float_sink->OnPeerFloat(session_id, sender);
+
+        logger_->info("Peer {} floated {}:{} -> {}:{}",
+                      peer_id,
+                      current.addr.to_string(),
+                      current.port,
+                      sender.addr.to_string(),
+                      sender.port);
+    }
+
     not_null<spdlog::logger *> logger_;
 };
 

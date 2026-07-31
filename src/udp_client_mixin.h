@@ -70,16 +70,16 @@ class UdpClientMixin : public UdpCore<Derived, P2PPolicy>
     }
 
     /**
-     * @brief Configure the single peer endpoint and session.
+     * @brief Configure the single peer endpoint and wire peer-id.
      * @param peer Remote UDP endpoint
-     * @param session_id OpenVPN session identifier
+     * @param peer_id Server-assigned DATA_V2 peer id
      */
-    void SetPeer(transport::PeerEndpoint peer, openvpn::SessionId session_id)
+    void SetPeer(transport::PeerEndpoint peer, std::uint32_t peer_id)
     {
         pending_peer_ = peer;
-        pending_session_id_ = session_id;
+        pending_peer_id_ = peer_id;
         if (Core::CoreRunning())
-            Core::CoreSetPeer(peer, session_id);
+            Core::CoreSetPeer(peer, peer_id);
     }
 
     /**
@@ -113,7 +113,7 @@ class UdpClientMixin : public UdpCore<Derived, P2PPolicy>
 
         // Apply pending configuration stored before engine creation
         if (pending_peer_.port != 0)
-            Core::CoreSetPeer(pending_peer_, pending_session_id_);
+            Core::CoreSetPeer(pending_peer_, pending_peer_id_);
         if (pending_encrypt_.is_valid)
             Core::CoreInstallKeys(pending_encrypt_, pending_decrypt_, pending_key_id_);
 
@@ -198,7 +198,7 @@ class UdpClientMixin : public UdpCore<Derived, P2PPolicy>
 
     // Pending state — stored before engine creation, applied in StartTunReceiver
     transport::PeerEndpoint pending_peer_;
-    openvpn::SessionId pending_session_id_{};
+    std::uint32_t pending_peer_id_ = 0;
     openvpn::EncryptionKey pending_encrypt_;
     openvpn::EncryptionKey pending_decrypt_;
     std::uint8_t pending_key_id_ = 0;

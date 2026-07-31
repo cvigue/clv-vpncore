@@ -83,6 +83,7 @@ class ServerDcoTransport : public ServerControlBase<ServerDcoTransport>
     void Start()
     {
         ConfigureDataPlane();
+        channel_.SetPeerSlots(peer_slots_.get());
         asio::co_spawn(*io_context_, channel_.StartDataPath(), asio::detached);
         logger_->info("DCO mode active — kernel handles data path");
         StartBase();
@@ -97,6 +98,21 @@ class ServerDcoTransport : public ServerControlBase<ServerDcoTransport>
 
     using ServerControlBase::HandleTcpDisconnect;
     using ServerControlBase::OnControlPacketFromDataPath;
+
+    /**
+     * @brief Re-point a session's control transport after a peer float.
+     *
+     * Kernel DCO floats peers internally and the out-of-tree ABI has no float
+     * notification, so this only fires if userspace ever observes one.
+     *
+     * @param session Session that floated
+     * @param endpoint New remote endpoint
+     */
+    void RebindPeerTransport(Connection *session, const transport::PeerEndpoint &endpoint)
+    {
+        if (listener_)
+            session->SetTransport(transport::TransportHandle(listener_->TransportFor(endpoint)));
+    }
 
     /**
      * @brief Log periodic DCO data-path stats.

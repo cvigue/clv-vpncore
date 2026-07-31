@@ -232,11 +232,11 @@ class CryptoContext
      * and wraps in OpenVpnPacket with opcode P_DATA_V2.
      *
      * @param plaintext IP packet data to encrypt
-     * @param session_id Session ID for the connection
+     * @param peer_id Wire peer-id for the P_DATA_V2 header
      * @return Serialized encrypted packet ready for transmission, or empty on error
      */
     [[nodiscard]] std::vector<std::uint8_t> EncryptPacket(std::span<const std::uint8_t> plaintext,
-                                                          SessionId session_id);
+                                                          std::uint32_t peer_id);
 
     /**
      * @brief Encrypt a data packet using an externally-supplied packet ID.
@@ -248,12 +248,12 @@ class CryptoContext
      * maintaining two independent counters that would produce duplicate IDs.
      *
      * @param plaintext  Payload bytes to encrypt.
-     * @param session_id Session ID for the P_DATA_V2 peer-id field.
+     * @param peer_id    Wire peer-id for the P_DATA_V2 header.
      * @param packet_id  Pre-allocated outbound packet ID.
      * @return Serialized encrypted packet, or empty on error.
      */
     [[nodiscard]] std::vector<std::uint8_t> EncryptPacketWithId(std::span<const std::uint8_t> plaintext,
-                                                                SessionId session_id,
+                                                                std::uint32_t peer_id,
                                                                 std::uint32_t packet_id);
 
     /**
@@ -309,13 +309,13 @@ class CryptoContext
      * @param buf Buffer with at least (kDataV2Overhead + payload_len) bytes.
      *            Plaintext must already be at offset kDataV2Overhead.
      * @param payload_len Length of plaintext at buf[kDataV2Overhead..]
-     * @param session_id Session ID for P_DATA_V2 peer_id field
+     * @param peer_id Wire peer-id for the P_DATA_V2 header
      * @return Total wire packet length (kDataV2Overhead + payload_len), or 0 on error
      * @note Zero heap allocations on the hot path.
      */
     [[nodiscard]] std::size_t EncryptPacketInPlace(std::span<std::uint8_t> buf,
                                                    std::size_t payload_len,
-                                                   SessionId session_id);
+                                                   std::uint32_t peer_id);
 
     /**
      * @brief Encrypt in-place using a pre-allocated packet ID.
@@ -326,7 +326,7 @@ class CryptoContext
      */
     [[nodiscard]] std::size_t EncryptPacketInPlaceWithId(std::span<std::uint8_t> buf,
                                                          std::size_t payload_len,
-                                                         SessionId session_id,
+                                                         std::uint32_t peer_id,
                                                          std::uint32_t packet_id);
 
     /**
@@ -434,6 +434,17 @@ class CryptoContext
     void SetDcoKeysInstalled(bool installed)
     {
         dco_keys_installed_ = installed;
+    }
+
+    /**
+     * @brief Whether DCO keys have been pushed to the kernel for this session.
+     *
+     * Distinguishes the first install (PRIMARY slot) from a renegotiation
+     * (SECONDARY slot then swap).
+     */
+    bool HasDcoKeysInstalled() const
+    {
+        return dco_keys_installed_;
     }
 
     /**

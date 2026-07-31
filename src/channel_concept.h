@@ -70,6 +70,7 @@ template <typename C>
 concept ServerChannel = Channel<C> && requires(C &ch, const VpnConfig::ServerConfig &srv, asio::io_context &ioc, TunnelZone *zone, Connection *session, const openvpn::OpenVpnPacket &packet, std::span<std::uint8_t> datagram, const std::vector<std::uint8_t> &key_material, openvpn::CipherAlgorithm cipher, openvpn::HmacAlgorithm hmac, std::uint8_t key_id) {
     { ch.ConfigureDataPlane(srv, ioc, zone) } -> std::convertible_to<std::string>;
     { ch.InstallKeys(session, key_material, cipher, hmac, key_id) } -> std::same_as<bool>;
+    { ch.RemovePeer(session) };
     { ch.ProcessIncomingDataPacket(session, packet) };
     { ch.DecryptAndStripInPlace(session, datagram) } -> std::same_as<std::span<std::uint8_t>>;
     { ch.SendKeepAlivePing(session) };
@@ -114,6 +115,7 @@ concept ServerControlForAdapter = requires(
     { c.OnControlPacketFromDataPath(std::move(data), ep) };
     { c.OnControlPacketFromDataPath(std::move(data), ep, std::move(th)) };
     { c.HandleDeadPeer(sid) };
+    { c.HandlePeerFloat(sid, ep) };
     { c.HandleTcpDisconnect(ep) };
 };
 

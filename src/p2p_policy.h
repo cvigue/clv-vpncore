@@ -167,7 +167,7 @@ struct P2PPolicy
             return 0;
 
         auto wire_len = tx_encrypt.EncryptInPlace(
-            slot_span, payload_len, tx_snapshot.session_id, *packet_id);
+            slot_span, payload_len, tx_snapshot.peer_id, *packet_id);
         if (wire_len == 0)
             return 0;
 
@@ -249,17 +249,17 @@ struct P2PPolicy
     }
 
     /**
-     * @brief Configure the single peer endpoint and session for TX.
+     * @brief Configure the single peer endpoint and wire peer-id for TX.
      * @param peer Remote UDP endpoint
-     * @param session_id Local session identifier
+     * @param peer_id Server-assigned DATA_V2 peer id
      * @param socket_fd Outbound socket file descriptor
      */
     void SetPeer(transport::PeerEndpoint peer,
-                 openvpn::SessionId session_id,
+                 std::uint32_t peer_id,
                  int socket_fd)
     {
         tx_snapshot.peer = peer;
-        tx_snapshot.session_id = session_id;
+        tx_snapshot.peer_id = peer_id;
         tx_snapshot.socket_fd = socket_fd;
         tx_snapshot.valid = socket_fd >= 0;
     }

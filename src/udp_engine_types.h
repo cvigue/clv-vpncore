@@ -45,7 +45,30 @@ struct SessionEntry
     openvpn::EncryptionKey encrypt_key{}; ///< Encrypt-side key material
     openvpn::EncryptionKey decrypt_key{}; ///< Decrypt-side key material (for RX thread)
     std::uint8_t key_id = 0;              ///< P_DATA_V2 key_id for outbound packets
+    std::uint32_t peer_id = 0;            ///< Wire peer-id for P_DATA_V2 / DCO
     transport::PeerEndpoint endpoint{};   ///< Remote peer endpoint (for RX endpoint lookup)
+};
+
+/**
+ * @brief Control-plane sink for an RX-observed peer float.
+ *
+ * RX publishes the new endpoint into the peer slot itself, so egress follows
+ * immediately; this only asks the control plane to catch its own endpoint
+ * index up and to resolve a collision it alone can see. Called once per float,
+ * never per packet.
+ */
+class PeerFloatSink
+{
+  public:
+    virtual ~PeerFloatSink() = default;
+
+    /**
+     * @brief Report that a session's authenticated source endpoint changed.
+     * @param session_id Session that floated
+     * @param endpoint Newly observed source endpoint
+     */
+    virtual void OnPeerFloat(std::uint64_t session_id,
+                             const transport::PeerEndpoint &endpoint) = 0;
 };
 
 /**
@@ -116,13 +139,13 @@ struct TxEncryptState
      * @param buf   Buffer with at least (kDataV2Overhead + payload_len) bytes.
      *              Plaintext must already be at offset kDataV2Overhead.
      * @param payload_len  Length of plaintext at buf[kDataV2Overhead..]
-     * @param session_id   Session ID for P_DATA_V2 peer_id field
+     * @param peer_id      Wire peer-id for the P_DATA_V2 header
      * @param packet_id    Pre-allocated outbound packet ID
      * @return Total wire packet length (kDataV2Overhead + payload_len), or 0 on error.
      */
     [[nodiscard]] std::size_t EncryptInPlace(std::span<std::uint8_t> buf,
                                              std::size_t payload_len,
-                                             openvpn::SessionId session_id,
+                                             std::uint32_t peer_id,
                                              std::uint32_t packet_id);
 };
 
@@ -152,21 +175,25 @@ struct DeferredConnection
 };
 
 // ============================================================================
-// UdpEngineContext — QSBR-protected shared state bundle
+// DataPlaneContext — QSBR-protected shared state bundle
 // ============================================================================
 
 /**
- * @brief Bundle of all QSBR-protected shared state for split-datapath mode.
+ * @brief Bundle of all QSBR-protected shared state for a server data plane.
  *
- * Owned by VpnServer / VpnClient.  The control plane (RX + control thread)
- * mutates the canonical SessionManager / RoutingTable and then publishes
- * new snapshots here.  The TX thread reads via read_quiesced() with zero
- * synchronization overhead and reports quiescent state between batches.
+ * Owned by the control plane, which mutates the canonical SessionManager /
+ * RoutingTable and then publishes new snapshots here. Data-path threads read
+ * via read_quiesced() with zero synchronization overhead and report quiescent
+ * state between batches.
+ *
+ * Transport-neutral: userspace UDP reads it from dedicated RX/TX threads, TCP
+ * from its internal thread. Any transport whose data path holds a
+ * @c Connection pointer must route removals through @ref DeferDestruction.
  *
  * All QsbrType instances share a single QsbrCore so that one
  * quiescent_state() call advances epochs for all of them.
  */
-struct UdpEngineContext
+struct DataPlaneContext
 {
     std::shared_ptr<QsbrCore> core;
 
@@ -183,14 +210,14 @@ struct UdpEngineContext
     bool cp_registered_ = false;
 
     /// Construct with empty routing tables and session index.
-    UdpEngineContext();
-    ~UdpEngineContext();
+    DataPlaneContext();
+    ~DataPlaneContext();
 
     /// Non-copyable, non-movable (contains QsbrType members).
-    UdpEngineContext(const UdpEngineContext &) = delete;
-    UdpEngineContext &operator=(const UdpEngineContext &) = delete;
-    UdpEngineContext(UdpEngineContext &&) = delete;
-    UdpEngineContext &operator=(UdpEngineContext &&) = delete;
+    DataPlaneContext(const DataPlaneContext &) = delete;
+    DataPlaneContext &operator=(const DataPlaneContext &) = delete;
+    DataPlaneContext(DataPlaneContext &&) = delete;
+    DataPlaneContext &operator=(DataPlaneContext &&) = delete;
 
     /// Publish updated routing tables (call after any route mutation).
     void PublishRoutes(const RoutingTableIpv4 &v4, const RoutingTableIpv6 &v6);
@@ -216,7 +243,7 @@ struct UdpEngineContext
     /// Force-free all retired QSBR pointers and unregister this thread.
     /// Must be called from the same thread that performed write() / ReclaimDeferred()
     /// (i.e. the control-plane IO thread), after all data-path readers have stopped.
-    /// This must be called before the UdpEngineContext is destroyed from a different
+    /// This must be called before the DataPlaneContext is destroyed from a different
     /// thread, otherwise the thread-local retired lists will be unreachable.
     void ForceReclaimAll();
 };
@@ -236,7 +263,8 @@ struct ClientTxSnapshot
 {
     int socket_fd = -1;              ///< UDP socket native handle
     transport::PeerEndpoint peer{};  ///< Server endpoint for sendmmsg
-    openvpn::SessionId session_id{}; ///< Server-assigned peer ID (P_DATA_V2)
+    openvpn::SessionId session_id{}; ///< Unused for peer-id; retained for snapshot shape
+    std::uint32_t peer_id = 0;       ///< Server-assigned peer ID (P_DATA_V2)
     std::uint8_t key_id = 0;         ///< P_DATA_V2 key_id for outbound (kept in sync with key_slots_)
     bool valid = false;              ///< True once the session is ready for data
 };

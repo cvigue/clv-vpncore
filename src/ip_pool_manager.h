@@ -69,6 +69,12 @@ class IpPoolManager
     bool ReleaseIpv4(uint64_t session_id);
 
     /**
+     * @brief Return an IPv4 address to the free list (lease / RAII path).
+     * @param ipv4 Previously allocated address in host byte order
+     */
+    void Release(uint32_t ipv4);
+
+    /**
      * @brief Get IPv4 address assigned to a session
      * @param session_id Session to query
      * @return Assigned IPv4, or nullopt if none
@@ -99,6 +105,12 @@ class IpPoolManager
      * @return true if IPv6 was released, false if session had no IPv6
      */
     bool ReleaseIpv6(uint64_t session_id);
+
+    /**
+     * @brief Return an IPv6 address to the free list (lease / RAII path).
+     * @param ipv6 Previously allocated address
+     */
+    void Release(const Ipv6Address &ipv6);
 
     /**
      * @brief Get IPv6 address assigned to a session

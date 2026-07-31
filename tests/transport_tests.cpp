@@ -4,9 +4,16 @@
 
 #include <gtest/gtest.h>
 
+#include <asio/co_spawn.hpp>
+#include <asio/detached.hpp>
+#include <asio/io_context.hpp>
 #include <asio/ip/address.hpp>
 #include <asio/ip/tcp.hpp>
 #include <asio/ip/udp.hpp>
+#include <asio/use_awaitable.hpp>
+
+#include <cstdint>
+#include <vector>
 
 using namespace clv::vpn::transport;
 
@@ -165,6 +172,94 @@ TEST(TransportEndpointTest, PeerEndpointEquality)
 
     EXPECT_EQ(a, b);
     EXPECT_NE(a, c);
+}
+
+// ---------------------------------------------------------------------------
+// TcpTransport stream peel (multi-frame per kernel read)
+// ---------------------------------------------------------------------------
+
+TEST(TcpTransportFramingTest, PeelsMultipleFramesFromOneWrite)
+{
+    asio::io_context io;
+    asio::ip::tcp::acceptor acceptor(io, {asio::ip::tcp::v4(), 0});
+    const auto port = acceptor.local_endpoint().port();
+
+    asio::ip::tcp::socket client_sock(io);
+    client_sock.connect({asio::ip::make_address_v4("127.0.0.1"), port});
+    auto server_sock = acceptor.accept();
+    server_sock.set_option(asio::ip::tcp::no_delay(true));
+    client_sock.set_option(asio::ip::tcp::no_delay(true));
+
+    TcpTransport server(std::move(server_sock));
+    TcpTransport client(std::move(client_sock));
+
+    const std::vector<std::uint8_t> f1{0x01, 0x02, 0x03};
+    const std::vector<std::uint8_t> f2{0xaa, 0xbb};
+    const std::vector<std::uint8_t> f3{0x10};
+
+    bool ok = false;
+    asio::co_spawn(
+        io,
+        [&]() -> asio::awaitable<void>
+    {
+        co_await client.Send(f1);
+        co_await client.Send(f2);
+        co_await client.Send(f3);
+
+        auto r1 = co_await server.ReceiveInPlace();
+        auto r2 = co_await server.ReceiveInPlace();
+        auto r3 = co_await server.ReceiveInPlace();
+        EXPECT_EQ(std::vector(r1.begin(), r1.end()), f1);
+        EXPECT_EQ(std::vector(r2.begin(), r2.end()), f2);
+        EXPECT_EQ(std::vector(r3.begin(), r3.end()), f3);
+        ok = true;
+    },
+        asio::detached);
+
+    io.run();
+    EXPECT_TRUE(ok);
+}
+
+TEST(TcpTransportFramingTest, TryPeelDrainsWithoutRefill)
+{
+    asio::io_context io;
+    asio::ip::tcp::acceptor acceptor(io, {asio::ip::tcp::v4(), 0});
+    const auto port = acceptor.local_endpoint().port();
+
+    asio::ip::tcp::socket client_sock(io);
+    client_sock.connect({asio::ip::make_address_v4("127.0.0.1"), port});
+    auto server_sock = acceptor.accept();
+
+    TcpTransport server(std::move(server_sock));
+    TcpTransport client(std::move(client_sock));
+
+    const std::vector<std::uint8_t> f1{0x01};
+    const std::vector<std::uint8_t> f2{0x02, 0x03};
+
+    std::vector<std::uint8_t> batch;
+    AppendLengthPrefixedFrame(batch, f1);
+    AppendLengthPrefixedFrame(batch, f2);
+
+    bool ok = false;
+    asio::co_spawn(
+        io,
+        [&]() -> asio::awaitable<void>
+    {
+        co_await client.SendRaw(batch);
+
+        auto r1 = co_await server.ReceiveInPlace();
+        EXPECT_EQ(std::vector(r1.begin(), r1.end()), f1);
+        auto r2 = server.TryPeelInPlace();
+        EXPECT_TRUE(r2.has_value());
+        if (r2)
+            EXPECT_EQ(std::vector(r2->begin(), r2->end()), f2);
+        EXPECT_FALSE(server.TryPeelInPlace().has_value());
+        ok = true;
+    },
+        asio::detached);
+
+    io.run();
+    EXPECT_TRUE(ok);
 }
 
 } // namespace

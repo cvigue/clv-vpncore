@@ -214,7 +214,7 @@ bool CryptoContext::IsOutboundEncryptBlocked() const noexcept
 // ============================================================================
 
 std::vector<std::uint8_t> CryptoContext::EncryptPacket(std::span<const std::uint8_t> plaintext,
-                                                       SessionId session_id)
+                                                       std::uint32_t peer_id)
 {
     if (!primary_encrypt_.is_valid || IsOutboundEncryptBlocked())
         return {};
@@ -223,11 +223,11 @@ std::vector<std::uint8_t> CryptoContext::EncryptPacket(std::span<const std::uint
     if (!packet_id)
         return {};
 
-    return EncryptPacketWithId(plaintext, session_id, *packet_id);
+    return EncryptPacketWithId(plaintext, peer_id, *packet_id);
 }
 
 std::vector<std::uint8_t> CryptoContext::EncryptPacketWithId(std::span<const std::uint8_t> plaintext,
-                                                             SessionId session_id,
+                                                             std::uint32_t peer_id,
                                                              std::uint32_t packet_id)
 {
     if (!primary_encrypt_.is_valid || IsOutboundEncryptBlocked())
@@ -238,8 +238,7 @@ std::vector<std::uint8_t> CryptoContext::EncryptPacketWithId(std::span<const std
 
     const auto &key = primary_encrypt_;
 
-    std::uint32_t peer_id = session_id.value & PEER_ID_MASK;
-    OpenVpnPacket encrypted_packet = OpenVpnPacket::DataV2(current_key_id_, peer_id, packet_id);
+    OpenVpnPacket encrypted_packet = OpenVpnPacket::DataV2(current_key_id_, peer_id & PEER_ID_MASK, packet_id);
 
     if (!IsSupportedAead(key.cipher_algorithm))
     {
@@ -294,7 +293,7 @@ std::vector<std::uint8_t> CryptoContext::EncryptPacketWithId(std::span<const std
 
 std::size_t CryptoContext::EncryptPacketInPlaceWithId(std::span<std::uint8_t> buf,
                                                       std::size_t payload_len,
-                                                      SessionId session_id,
+                                                      std::uint32_t peer_id,
                                                       std::uint32_t packet_id)
 {
     if (!primary_encrypt_.is_valid || IsOutboundEncryptBlocked())
@@ -313,7 +312,7 @@ std::size_t CryptoContext::EncryptPacketInPlaceWithId(std::span<std::uint8_t> bu
     const auto wire_len = EncryptDataV2InPlace(
         buf,
         payload_len,
-        session_id,
+        peer_id,
         packet_id,
         current_key_id_,
         primary_encrypt_.cipher_iv,
@@ -326,7 +325,7 @@ std::size_t CryptoContext::EncryptPacketInPlaceWithId(std::span<std::uint8_t> bu
 
 std::size_t CryptoContext::EncryptPacketInPlace(std::span<std::uint8_t> buf,
                                                 std::size_t payload_len,
-                                                SessionId session_id)
+                                                std::uint32_t peer_id)
 {
     if (!primary_encrypt_.is_valid || IsOutboundEncryptBlocked())
         return 0;
@@ -339,7 +338,7 @@ std::size_t CryptoContext::EncryptPacketInPlace(std::span<std::uint8_t> buf,
     if (!packet_id)
         return 0;
 
-    return EncryptPacketInPlaceWithId(buf, payload_len, session_id, *packet_id);
+    return EncryptPacketInPlaceWithId(buf, payload_len, peer_id, *packet_id);
 }
 
 std::span<std::uint8_t> CryptoContext::DecryptPacketInPlace(std::span<std::uint8_t> buf)

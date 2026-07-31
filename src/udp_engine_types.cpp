@@ -66,6 +66,10 @@ SessionIndex SessionIndex::BuildFrom(const SessionManager &sm)
             continue;
         if (!conn->HasTransport())
             continue;
+        // No slot means no valid P_DATA_V2 header: 0 is a real peer-id, not "none".
+        auto peer_id = conn->GetWirePeerId();
+        if (!peer_id)
+            continue;
 
         const auto &ekey = dc.GetPrimaryEncryptKey();
         const auto &dkey = dc.GetPrimaryDecryptKey();
@@ -82,6 +86,7 @@ SessionIndex SessionIndex::BuildFrom(const SessionManager &sm)
             .encrypt_key = ekey,
             .decrypt_key = dkey,
             .key_id = key_id,
+            .peer_id = *peer_id,
             .endpoint = peer,
         };
         idx.by_endpoint[peer] = sid.value;
@@ -123,7 +128,7 @@ void TxEncryptState::ApplySnapshot(const openvpn::EncryptionKey &key, std::uint8
 
 std::size_t TxEncryptState::EncryptInPlace(std::span<std::uint8_t> buf,
                                            std::size_t payload_len,
-                                           openvpn::SessionId session_id,
+                                           std::uint32_t peer_id,
                                            std::uint32_t packet_id)
 {
     if (!valid || !encrypt_ctx)
@@ -136,7 +141,7 @@ std::size_t TxEncryptState::EncryptInPlace(std::span<std::uint8_t> buf,
     return openvpn::EncryptDataV2InPlace(
         buf,
         payload_len,
-        session_id,
+        peer_id,
         packet_id,
         current_key_id,
         cipher_iv,
@@ -220,51 +225,51 @@ DeferredConnection::DeferredConnection(DeferredConnection &&) noexcept = default
 DeferredConnection &DeferredConnection::operator=(DeferredConnection &&) noexcept = default;
 
 // ============================================================================
-// UdpEngineContext
+// DataPlaneContext
 // ============================================================================
 
-UdpEngineContext::UdpEngineContext()
+DataPlaneContext::DataPlaneContext()
     : core(std::make_shared<QsbrCore>()), routes_v4(core, RoutingTableIpv4{}), routes_v6(core, RoutingTableIpv6{}), sessions(core, SessionIndex{}), sessions_rx(core, SessionIndex{})
 {
 }
 
-UdpEngineContext::~UdpEngineContext() = default;
+DataPlaneContext::~DataPlaneContext() = default;
 
-void UdpEngineContext::PublishRoutes(const RoutingTableIpv4 &v4,
+void DataPlaneContext::PublishRoutes(const RoutingTableIpv4 &v4,
                                      const RoutingTableIpv6 &v6)
 {
     routes_v4.write(v4);
     routes_v6.write(v6);
 }
 
-void UdpEngineContext::PublishSessions(const SessionIndex &idx)
+void DataPlaneContext::PublishSessions(const SessionIndex &idx)
 {
     sessions.write(idx);
     sessions_rx.write(idx); // keep in sync with TX snapshot
 }
 
-void UdpEngineContext::PublishSessions(const SessionManager &sm)
+void DataPlaneContext::PublishSessions(const SessionManager &sm)
 {
     auto idx = SessionIndex::BuildFrom(sm);
     sessions.write(idx);
     sessions_rx.write(idx); // keep in sync with TX snapshot
 }
 
-void UdpEngineContext::PublishSessionsRx(const SessionManager &sm)
+void DataPlaneContext::PublishSessionsRx(const SessionManager &sm)
 {
     // Publish decrypt keys to RX thread immediately (before ACK).
     // TX snapshot (sessions) is not touched here — TX stays on the old key
-    // until SplitPublishSessions() is called after the client ACKs KEY_METHOD_2.
+    // until PublishSessions() is called after the client ACKs KEY_METHOD_2.
     sessions_rx.write(SessionIndex::BuildFrom(sm));
 }
 
-void UdpEngineContext::DeferDestruction(std::unique_ptr<Connection> conn)
+void DataPlaneContext::DeferDestruction(std::unique_ptr<Connection> conn)
 {
     auto epoch = core->begin_grace_period();
     deferred.emplace_back(std::move(conn), epoch);
 }
 
-void UdpEngineContext::ReclaimDeferred()
+void DataPlaneContext::ReclaimDeferred()
 {
     if (!cp_registered_)
     {
@@ -282,7 +287,7 @@ void UdpEngineContext::ReclaimDeferred()
     });
 }
 
-void UdpEngineContext::ForceReclaimAll()
+void DataPlaneContext::ForceReclaimAll()
 {
     // Force-delete all retired pointers for this QsbrCore that are sitting in
     // this thread's retired_list.  Safe because all data-path readers have

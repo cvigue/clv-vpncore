@@ -5,11 +5,15 @@
 
 /**
  * @file tcp_data_channel.h
- * @brief Server-side TCP data channel (TUN-based, single-packet coroutine path).
+ * @brief Server-side TCP data channel (TUN-based, stream-framed coroutine path).
  *
  * Owns a dedicated io_context and background thread for all TCP networking:
  * the accept loop, per-client receive loops, and the TUN→TCP transmit loop
  * all run on internal_ctx_ / internal_thread_.
+ *
+ * Wire I/O uses TcpTransport's stream peel buffer (multi-frame drain after each
+ * fill) and length-prefixed TX frames built in-place in the coalesce buffer;
+ * RX decrypts a short burst then flushes TUN writes. Not a UDP-style packet arena.
  *
  * Templated on the DataAdapter type for fully static dispatch —
  * no function pointers, no type erasure.  Control packets, disconnect
@@ -23,6 +27,7 @@
 #include "openvpn/connection.h"
 #include "keepalive_loop.h"
 #include "openvpn/crypto_context.h"
+#include "openvpn/data_v2_wire.h"
 #include "openvpn/session_key_install.h"
 #include "openvpn/packet.h"
 #include "openvpn/protocol_constants.h"
@@ -31,13 +36,16 @@
 #include "routing_table.h"
 #include "server_keepalive.h"
 #include "traffic_policy.h"
+#include "transport/batch_constants.h"
 #include "transport/listener.h"
 #include "transport/transport.h"
 #include "tunnel_zone.h"
 #include "tunnel_zone_attachment_guard.h"
+#include "udp_engine_types.h"
 
 #include <not_null.h>
 #include <optional>
+#include <qsbr_type.h>
 #include <string>
 #include "platform/linux/tun/tun_device.h"
 #include "platform/linux/tun/tun_setup.h"
@@ -53,12 +61,14 @@
 
 #include <spdlog/logger.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <limits>
 #include <memory>
 #include <span>
 #include <thread>
@@ -75,7 +85,7 @@ enum class HmacAlgorithm;
 } // namespace openvpn
 
 /**
- * @brief Server-side TCP data channel — coroutine, single-packet path.
+ * @brief Server-side TCP data channel — coroutine stream-framed path.
  *
  * @tparam Adapter  DataAdapter CRTP base type.
  */
@@ -87,9 +97,7 @@ class TcpDataChannel
      * @brief Construct the server TCP data channel.
      * @param host Listen address
      * @param port Listen port
-     * @param routing_table IPv4 client routing table
-     * @param routing_table_v6 IPv6 client routing table
-     * @param session_manager Active session table
+     * @param session_manager Active session table (control-thread use only)
      * @param logger Data-path logger
      * @param rx_counters Shared RX counter storage
      * @param tx_counters Shared TX counter storage
@@ -97,11 +105,10 @@ class TcpDataChannel
      * @param keepalive_timeout Dead-peer timeout in seconds
      * @param running_flag Shared stop flag
      * @param adapter Data→control adapter
+     * @param perf Socket buffers + TX/RX coalesce knobs (shared with UDP)
      */
     TcpDataChannel(const std::string &host,
                    std::uint16_t port,
-                   RoutingTableIpv4 &routing_table,
-                   RoutingTableIpv6 &routing_table_v6,
                    SessionManager &session_manager,
                    spdlog::logger &logger,
                    DataPathStats::RxCounters &rx_counters,
@@ -109,11 +116,10 @@ class TcpDataChannel
                    int keepalive_interval,
                    int keepalive_timeout,
                    const std::atomic<bool> &running_flag,
-                   Adapter &adapter)
+                   Adapter &adapter,
+                   const VpnConfig::PerformanceConfig &perf = {})
         : internal_ctx_{},
           tcp_listener_(internal_ctx_, host, port),
-          routing_table_(routing_table),
-          routing_table_v6_(routing_table_v6),
           session_manager_(session_manager),
           logger_(&logger),
           rx_counters_(rx_counters),
@@ -122,8 +128,20 @@ class TcpDataChannel
           keepalive_timeout_(keepalive_timeout > 0 ? keepalive_timeout : 120),
           running_(running_flag),
           keepalive_timer_(internal_ctx_),
-          adapter_(&adapter)
+          adapter_(&adapter),
+          socket_recv_buffer_(perf.socket_recv_buffer),
+          socket_send_buffer_(perf.socket_send_buffer),
+          tx_send_batch_(transport::EffectivePositiveCount(perf.tx_send_batch,
+                                                           transport::kDefaultTcpSendBatch)),
+          tx_small_pkt_flush_(transport::EffectivePositiveCount(
+              perf.tx_small_pkt_flush, transport::kDefaultTcpSmallPktFlush)),
+          rx_process_batch_(transport::EffectivePositiveCount(
+              perf.rx_process_batch, transport::kDefaultTcpRxProcessBatch))
     {
+        logger_->info("TCP channel: tx_send_batch={} tx_small_pkt_flush={} rx_process_batch={}",
+                      tx_send_batch_,
+                      tx_small_pkt_flush_,
+                      rx_process_batch_);
     }
 
     /** @brief Destroy the channel and stop the internal thread. */
@@ -139,6 +157,21 @@ class TcpDataChannel
     asio::io_context &InternalContext()
     {
         return internal_ctx_;
+    }
+
+    /**
+     * @brief Wire QSBR publication context before StartDataPath.
+     *
+     * The TUN and per-client receive loops run on @c internal_thread_, so they
+     * must read sessions and routes from published snapshots rather than the
+     * live control-plane maps, and removed connections must outlive the
+     * snapshot they appear in.
+     *
+     * @param ctx Data-plane snapshot context owned by the control plane
+     */
+    void SetDataPlaneContext(DataPlaneContext *ctx)
+    {
+        data_plane_ = ctx;
     }
 
     // -- Data plane setup (called from ServerControlBase::ConfigureDataPlane) ---
@@ -171,8 +204,6 @@ class TcpDataChannel
     {
         auto plaintext = session->GetCryptoContext().DecryptPacket(packet);
 
-        logger_->debug("DecryptPacket returned {} bytes", plaintext.size());
-
         switch (openvpn::ClassifyDecryptedPayload(plaintext))
         {
         case openvpn::DecryptedPayloadDisposition::Drop:
@@ -181,18 +212,12 @@ class TcpDataChannel
                 rx_counters_.decryptFailures++;
                 logger_->warn("DecryptPacket returned empty (decryption failed)");
             }
-            else
-            {
-                logger_->debug("Ignoring packet too small to be valid IP (size={})", plaintext.size());
-            }
             co_return;
         case openvpn::DecryptedPayloadDisposition::Keepalive:
             rx_counters_.packetsDecrypted++;
-            logger_->debug("Received OpenVPN keepalive ping from client");
             co_return;
         case openvpn::DecryptedPayloadDisposition::Forward:
             rx_counters_.packetsDecrypted++;
-            logger_->debug("Forwarding {} decrypted bytes to TUN device", plaintext.size());
             rx_counters_.tunWrites++;
             {
                 tun::IpPacket ip_packet;
@@ -228,12 +253,22 @@ class TcpDataChannel
             co_return;
         }
 
+        if (!data_plane_)
+        {
+            logger_->error("StartDataPath: data-plane context not wired");
+            co_return;
+        }
+
         asio::co_spawn(internal_ctx_, TunTransmitLoop(), asio::detached);
         asio::co_spawn(internal_ctx_, AcceptLoop(), asio::detached);
 
+        // Register once for the thread, not once per coroutine: every loop here
+        // is multiplexed onto this one thread, so they share its QSBR identity.
         internal_thread_ = std::jthread([this]
         {
+            data_plane_->core->register_thread();
             internal_ctx_.run();
+            data_plane_->core->unregister_thread();
         });
 
         logger_->info("TCP data channel started: accept loop + TUN receiver on dedicated thread (port {})",
@@ -241,8 +276,13 @@ class TcpDataChannel
         co_return;
     }
 
-    /** @brief Stop internal thread and release hub attachment. */
-    /** @brief Stop internal thread and release hub attachment. */
+    /**
+     * @brief Stop the internal thread and release hub attachment.
+     *
+     * Joins @c internal_thread_ before returning: the TUN and per-client loops
+     * hold Connection pointers from published snapshots, so the control plane
+     * must not start destroying sessions while they are still running.
+     */
     void StopDataPath()
     {
         hub_attachment_.Release();
@@ -250,6 +290,15 @@ class TcpDataChannel
         tcp_listener_.Close();
         if (tun_device_)
             tun_device_->Close();
+
+        internal_ctx_.stop();
+        if (internal_thread_.joinable())
+            internal_thread_.join();
+    }
+
+    /** @brief No-op; TCP holds no per-peer kernel state. */
+    void RemovePeer(Connection * /*session*/)
+    {
     }
 
     /**
@@ -279,6 +328,10 @@ class TcpDataChannel
             co_return;
         }
 
+        auto peer_id = session->GetWirePeerId();
+        if (!peer_id)
+            co_return;
+
         try
         {
             std::vector<std::uint8_t> ping_payload(
@@ -289,7 +342,7 @@ class TcpDataChannel
             if (!packet_id)
                 co_return;
             auto encrypted = session->GetCryptoContext().EncryptPacketWithId(
-                ping_payload, session->GetSessionId(), *packet_id);
+                ping_payload, *peer_id, *packet_id);
 
             if (encrypted.empty())
             {
@@ -298,7 +351,6 @@ class TcpDataChannel
             }
 
             co_await session->GetTransport().Send(encrypted);
-            logger_->debug("SendKeepAlivePing: sent {} encrypted bytes", encrypted.size());
         }
         catch (const std::exception &e)
         {
@@ -330,11 +382,11 @@ class TcpDataChannel
         keepalive_timer_.cancel();
     }
 
-    /** @brief No-op; TCP path processes one packet at a time. */
+    /** @brief No-op; TCP has no recvmmsg-style batch_size knob. */
     void SetBatchSize(std::size_t)
     { /* no-op for TCP */
     }
-    /** @brief Always 1 for the single-packet TCP path. */
+    /** @brief Always 1; TCP has no recvmmsg-style batch_size knob. */
     std::size_t GetBatchSize() const
     {
         return 1;
@@ -347,6 +399,28 @@ class TcpDataChannel
     }
 
   private:
+    /**
+     * @brief Published routing snapshots for one lookup.
+     *
+     * Held only across straight-line code. Every coroutine on
+     * @c internal_thread_ shares that thread's QSBR identity, so a snapshot
+     * pointer kept across a suspension point could be reclaimed while another
+     * coroutine reports a quiescent state.
+     */
+    struct RouteSnapshots
+    {
+        const RoutingTableIpv4 *v4;
+        const RoutingTableIpv6 *v6;
+    };
+
+    RouteSnapshots ReadRouteSnapshots() const
+    {
+        return RouteSnapshots{
+            .v4 = &*data_plane_->routes_v4.read_quiesced(),
+            .v6 = &*data_plane_->routes_v6.read_quiesced(),
+        };
+    }
+
     asio::awaitable<void> TunTransmitLoop()
     {
         if (!tun_device_)
@@ -355,92 +429,165 @@ class TcpDataChannel
             co_return;
         }
 
+        if (!data_plane_)
+        {
+            logger_->error("TunTransmitLoop: data-plane context not wired");
+            co_return;
+        }
+
         logger_->info("TCP TUN→client forwarding started");
+
+        constexpr std::size_t kOff = openvpn::kDataV2Overhead;
+        constexpr std::size_t kIpCap = tun::TunDevice::MAX_PACKET_SIZE;
+        constexpr std::size_t kOvpnCap = kOff + kIpCap;
+        constexpr std::size_t kMaxBatchBytes = 64 * 1024;
+        tx_batch_.clear();
+        tx_batch_.reserve(kMaxBatchBytes);
+        std::array<std::uint8_t, kIpCap> ip_hold{};
 
         while (running_ && tun_running_)
         {
-            tun::IpPacket ip_packet;
+            // Batch owner is held as a copied transport handle, not a
+            // Connection*: the flush below suspends, and snapshot-derived
+            // pointers must not survive a suspension point (see TxSnapshot).
+            std::optional<transport::TransportHandle> batch_transport;
+            std::uint64_t batch_session_id = 0;
+            tx_batch_.clear();
+            std::size_t batch_frames = 0;
+
+            data_plane_->core->quiescent_state();
+
+            auto slot = transport::BeginTcpTxFrame(tx_batch_, kOvpnCap);
+            std::size_t ip_len = 0;
             try
             {
-                ip_packet = co_await tun_device_->ReadPacket();
+                ip_len = co_await tun_device_->ReadPacketInto(slot.second.subspan(kOff));
             }
             catch (const asio::system_error &e)
             {
+                transport::AbortTcpTxFrame(tx_batch_, slot.first);
                 if (e.code() == asio::error::operation_aborted)
                     break;
                 logger_->error("TUN read error: {}", e.what());
                 break;
             }
 
-            if (ip_packet.data.empty())
-                continue;
-
-            auto *ip_data = ip_packet.data.data();
-            const std::size_t ip_len = ip_packet.data.size();
-
-            std::optional<std::uint64_t> session_id_opt;
-            const std::uint8_t ip_ver = ip_data[0] >> 4;
-
-            if (ip_ver == 4 && ip_len >= openvpn::IPV4_MIN_HEADER_SIZE)
+            for (;;)
             {
-                const auto dst = clv::netcore::read_uint<4>(
-                    std::span<const std::uint8_t>(ip_data + 16, 4));
-                session_id_opt = routing_table_.Lookup(dst);
+                if (ip_len == 0)
+                {
+                    transport::AbortTcpTxFrame(tx_batch_, slot.first);
+                    break;
+                }
+
+                auto *ip_data = slot.second.data() + kOff;
+                std::optional<std::uint64_t> session_id_opt;
+                const std::uint8_t ip_ver = ip_data[0] >> 4;
+
+                {
+                    const auto routes = ReadRouteSnapshots();
+                    if (ip_ver == 4 && ip_len >= openvpn::IPV4_MIN_HEADER_SIZE)
+                    {
+                        const auto dst = clv::netcore::read_uint<4>(
+                            std::span<const std::uint8_t>(ip_data + 16, 4));
+                        session_id_opt = routes.v4->Lookup(dst);
+                    }
+                    else if (ip_ver == 6 && ip_len >= 40)
+                    {
+                        ipv6::Ipv6Address dst_v6;
+                        std::memcpy(dst_v6.data(), ip_data + 24, 16);
+                        session_id_opt = routes.v6->Lookup(dst_v6);
+                    }
+                }
+
+                // Flush before resolving the session: the flush suspends, and
+                // the resolved entry must not outlive that.
+                if (session_id_opt && batch_transport && batch_session_id != *session_id_opt)
+                {
+                    std::memcpy(ip_hold.data(), ip_data, ip_len);
+                    transport::AbortTcpTxFrame(tx_batch_, slot.first);
+                    try
+                    {
+                        co_await batch_transport->SendRaw(tx_batch_);
+                    }
+                    catch (const std::exception &e)
+                    {
+                        logger_->warn("TUN→TCP: send failed: {}", e.what());
+                    }
+                    tx_batch_.clear();
+                    batch_frames = 0;
+                    batch_transport.reset();
+                    slot = transport::BeginTcpTxFrame(tx_batch_, kOvpnCap);
+                    std::memcpy(slot.second.data() + kOff, ip_hold.data(), ip_len);
+                    ip_data = slot.second.data() + kOff;
+                }
+
+                bool encrypted = false;
+                if (session_id_opt)
+                {
+                    openvpn::SessionId session_id{*session_id_opt};
+                    const auto &snap_sessions = *data_plane_->sessions.read_quiesced();
+                    const auto *entry = snap_sessions.Find(session_id);
+                    Connection *session = entry ? entry->conn : nullptr;
+                    if (session && session->HasTransport())
+                    {
+                        if (auto packet_id = session->TryAllocateOutboundPacketId())
+                        {
+                            const auto wire_len = session->GetCryptoContext().EncryptPacketInPlaceWithId(
+                                slot.second, ip_len, entry->peer_id, *packet_id);
+                            if (wire_len == 0)
+                            {
+                                logger_->warn("TUN→TCP: encryption failed for session {}",
+                                              session_id);
+                            }
+                            else
+                            {
+                                transport::FinishTcpTxFrame(tx_batch_, slot.first, wire_len);
+                                batch_transport = session->GetTransport();
+                                batch_session_id = session_id.value;
+                                encrypted = true;
+                                ++batch_frames;
+                                tx_counters_.tunReads++;
+                                tx_counters_.packetsSent++;
+                                tx_counters_.bytesSent += wire_len;
+                                session->UpdateLastOutbound();
+                            }
+                        }
+                    }
+                }
+
+                if (!encrypted)
+                    transport::AbortTcpTxFrame(tx_batch_, slot.first);
+
+                if ((tx_small_pkt_flush_ > 0 && ip_len < tx_small_pkt_flush_)
+                    || batch_frames >= tx_send_batch_ || tx_batch_.size() >= kMaxBatchBytes)
+                    break;
+
+                slot = transport::BeginTcpTxFrame(tx_batch_, kOvpnCap);
+                try
+                {
+                    ip_len = tun_device_->TryReadPacketInto(slot.second.subspan(kOff));
+                }
+                catch (const std::exception &e)
+                {
+                    transport::AbortTcpTxFrame(tx_batch_, slot.first);
+                    logger_->error("TUN read error: {}", e.what());
+                    ip_len = 0;
+                    break;
+                }
             }
-            else if (ip_ver == 6 && ip_len >= 40)
-            {
-                ipv6::Ipv6Address dst_v6;
-                std::memcpy(dst_v6.data(), ip_data + 24, 16);
-                session_id_opt = routing_table_v6_.Lookup(dst_v6);
-            }
-            else
-            {
-                continue;
-            }
 
-            if (!session_id_opt)
+            if (!tx_batch_.empty() && batch_transport)
             {
-                logger_->debug("TUN→TCP: no route for packet (ip_ver={})", ip_ver);
-                continue;
-            }
-
-            openvpn::SessionId session_id{*session_id_opt};
-            Connection *session = session_manager_.FindSession(session_id);
-            if (!session || !session->HasTransport())
-            {
-                logger_->debug("TUN→TCP: session {} not found or has no transport", session_id);
-                continue;
-            }
-
-            if (!session->GetCryptoContext().HasValidKeys())
-            {
-                logger_->debug("TUN→TCP: session {} has no valid data channel keys", session_id);
-                continue;
-            }
-
-            auto packet_id = session->TryAllocateOutboundPacketId();
-            if (!packet_id)
-                continue;
-            auto encrypted = session->GetCryptoContext().EncryptPacketWithId(
-                std::span<const std::uint8_t>(ip_packet.data), session_id, *packet_id);
-
-            if (encrypted.empty())
-            {
-                logger_->warn("TUN→TCP: encryption failed for session {}", session_id);
-                continue;
-            }
-
-            try
-            {
-                co_await session->GetTransport().Send(encrypted);
-                tx_counters_.tunReads++;
-                tx_counters_.packetsSent++;
-                tx_counters_.bytesSent += encrypted.size();
-                session->UpdateLastOutbound();
-            }
-            catch (const std::exception &e)
-            {
-                logger_->warn("TUN→TCP: send failed for session {}: {}", session_id, e.what());
+                try
+                {
+                    co_await batch_transport->SendRaw(tx_batch_);
+                }
+                catch (const std::exception &e)
+                {
+                    logger_->warn("TUN→TCP: send failed: {}", e.what());
+                }
+                tx_batch_.clear();
             }
         }
 
@@ -456,6 +603,7 @@ class TcpDataChannel
             try
             {
                 auto tcpTransport = co_await tcp_listener_.AcceptNext();
+                tcpTransport.ApplySocketBuffers(socket_recv_buffer_, socket_send_buffer_, *logger_);
                 auto peer = tcpTransport.GetPeer();
                 logger_->info("Accepted TCP connection from {}:{}",
                               peer.addr.to_string(),
@@ -475,6 +623,8 @@ class TcpDataChannel
 
     // Demux like UDP/DCO: data opcodes with installed session crypto decrypt +
     // TUN on internal_ctx_; control (or pre-key data) → OnControlPacket only.
+    // After each socket fill, drain every complete frame already in the link
+    // buffer before awaiting the next read.
     asio::awaitable<void> ClientReceiveLoop(transport::TcpTransport tcpTransport)
     {
         auto peer = tcpTransport.GetPeer();
@@ -482,13 +632,23 @@ class TcpDataChannel
                        peer.addr.to_string(),
                        peer.port);
 
-        const Connection::Endpoint endpoint{.addr = peer.addr, .port = peer.port};
+        if (!data_plane_)
+        {
+            logger_->error("ClientReceiveLoop: data-plane context not wired");
+            co_return;
+        }
 
-        while (running_ && tun_running_)
+        bool disconnected = false;
+        const std::size_t max_tun_burst = rx_process_batch_ > 0 ? rx_process_batch_ : std::numeric_limits<std::size_t>::max();
+        // Local: concurrent receive loops must not share pending plaintext spans.
+        std::vector<std::span<const std::uint8_t>> tun_pending;
+        tun_pending.reserve(rx_process_batch_ > 0 ? rx_process_batch_ : 32);
+
+        while (running_ && tun_running_ && !disconnected)
         {
             try
             {
-                auto data = co_await tcpTransport.Receive();
+                auto data = co_await tcpTransport.ReceiveInPlace();
                 if (data.empty())
                 {
                     logger_->info("TCP client disconnected (empty read): {}:{}",
@@ -497,48 +657,98 @@ class TcpDataChannel
                     break;
                 }
 
-                logger_->debug("Received TCP packet: {} bytes from {}:{}",
-                               data.size(),
-                               peer.addr.to_string(),
-                               peer.port);
+                data_plane_->core->quiescent_state();
 
-                const auto opcode = openvpn::GetOpcode(data[0]);
-                if (openvpn::IsDataPacket(opcode))
+                for (;;)
                 {
-                    Connection *session = session_manager_.FindSessionByEndpoint(endpoint);
-                    if (session && session->GetCryptoContext().HasValidKeys())
+                    const auto opcode = openvpn::GetOpcode(data[0]);
+                    if (openvpn::IsDataPacket(opcode))
                     {
-                        session->UpdateLastActivity();
-                        auto plaintext = session->GetCryptoContext().DecryptPacketInPlace(data);
-                        if (plaintext.empty())
+                        // Snapshot-derived pointers live only inside this
+                        // non-suspending block. A TCP connection keeps one
+                        // endpoint for its lifetime, so by_endpoint is an exact
+                        // demux here (no float).
+                        bool keyed = false;
+                        std::span<std::uint8_t> plaintext;
                         {
-                            rx_counters_.decryptFailures++;
-                            continue;
-                        }
-
-                        rx_counters_.packetsDecrypted++;
-                        switch (openvpn::ClassifyDecryptedPayload(plaintext))
-                        {
-                        case openvpn::DecryptedPayloadDisposition::Keepalive:
-                            logger_->debug("Received OpenVPN keepalive ping from client");
-                            continue;
-                        case openvpn::DecryptedPayloadDisposition::Drop:
-                            continue;
-                        case openvpn::DecryptedPayloadDisposition::Forward:
+                            const auto &snap = *data_plane_->sessions_rx.read_quiesced();
+                            const auto *entry = snap.FindByEndpoint(peer);
+                            if (entry && entry->conn)
                             {
-                                tun::IpPacket ip_packet;
-                                ip_packet.data.assign(plaintext.begin(), plaintext.end());
-                                rx_counters_.tunWrites++;
-                                co_await SendToTun(ip_packet);
-                                continue;
+                                keyed = true;
+                                entry->conn->UpdateLastActivity();
+                                plaintext = entry->conn->GetCryptoContext().DecryptPacketInPlace(data);
                             }
                         }
+
+                        if (keyed)
+                        {
+                            if (plaintext.empty())
+                            {
+                                rx_counters_.decryptFailures++;
+                            }
+                            else
+                            {
+                                rx_counters_.packetsDecrypted++;
+                                switch (openvpn::ClassifyDecryptedPayload(plaintext))
+                                {
+                                case openvpn::DecryptedPayloadDisposition::Keepalive:
+                                case openvpn::DecryptedPayloadDisposition::Drop:
+                                    break;
+                                case openvpn::DecryptedPayloadDisposition::Forward:
+                                    // Plaintext aliases the link buffer until the next fill.
+                                    tun_pending.push_back(plaintext);
+                                    if ((tx_small_pkt_flush_ > 0
+                                         && plaintext.size() < tx_small_pkt_flush_)
+                                        || tun_pending.size() >= max_tun_burst)
+                                    {
+                                        if (!co_await FlushPendingTun(tun_pending))
+                                            disconnected = true;
+                                    }
+                                    break;
+                                }
+                            }
+
+                            if (disconnected)
+                                break;
+
+                            if (auto next = tcpTransport.TryPeelInPlace())
+                            {
+                                data = *next;
+                                if (data.empty())
+                                    disconnected = true;
+                                else
+                                    continue;
+                            }
+                            break;
+                        }
                     }
+
+                    if (!co_await FlushPendingTun(tun_pending))
+                    {
+                        disconnected = true;
+                        break;
+                    }
+
+                    // Control (or pre-key data) needs an owning buffer for the
+                    // control-plane post.
+                    adapter_->OnControlPacket(std::vector<std::uint8_t>(data.begin(), data.end()),
+                                              peer,
+                                              transport::TransportHandle(tcpTransport));
+
+                    if (auto next = tcpTransport.TryPeelInPlace())
+                    {
+                        data = *next;
+                        if (data.empty())
+                            disconnected = true;
+                        else
+                            continue;
+                    }
+                    break;
                 }
 
-                adapter_->OnControlPacket(std::move(data),
-                                          peer,
-                                          transport::TransportHandle(tcpTransport));
+                if (!co_await FlushPendingTun(tun_pending))
+                    disconnected = true;
             }
             catch (const asio::system_error &e)
             {
@@ -574,7 +784,28 @@ class TcpDataChannel
         adapter_->OnDisconnect(peer);
     }
 
-    asio::awaitable<void> SendToTun(const tun::IpPacket &packet)
+    /** @brief Write queued plaintext spans to TUN; clears @p pending. @return false on write failure. */
+    asio::awaitable<bool> FlushPendingTun(std::vector<std::span<const std::uint8_t>> &pending)
+    {
+        for (auto plaintext : pending)
+        {
+            try
+            {
+                co_await tun_device_->WritePacket(plaintext);
+                rx_counters_.tunWrites++;
+            }
+            catch (const std::exception &e)
+            {
+                logger_->error("Error writing to TUN: {}", e.what());
+                pending.clear();
+                co_return false;
+            }
+        }
+        pending.clear();
+        co_return true;
+    }
+
+    asio::awaitable<void> SendToTun(std::span<const std::uint8_t> packet)
     {
         try
         {
@@ -586,14 +817,18 @@ class TcpDataChannel
         }
     }
 
+    asio::awaitable<void> SendToTun(const tun::IpPacket &packet)
+    {
+        co_await SendToTun(std::span<const std::uint8_t>(packet.data));
+    }
+
     asio::io_context internal_ctx_;
     transport::TcpListener tcp_listener_;
     std::jthread internal_thread_;
 
     std::unique_ptr<tun::TunDevice> tun_device_;
     TunnelZoneAttachmentGuard hub_attachment_;
-    RoutingTableIpv4 &routing_table_;
-    RoutingTableIpv6 &routing_table_v6_;
+    /// Control-thread only (keepalive collection); the data path uses snapshots.
     SessionManager &session_manager_;
     clv::not_null<spdlog::logger *> logger_;
     DataPathStats::RxCounters &rx_counters_;
@@ -605,6 +840,13 @@ class TcpDataChannel
     asio::steady_timer keepalive_timer_;
 
     Adapter *adapter_;
+    DataPlaneContext *data_plane_ = nullptr;
+    int socket_recv_buffer_ = 0;
+    int socket_send_buffer_ = 0;
+    std::size_t tx_send_batch_ = transport::kDefaultTcpSendBatch;
+    std::size_t tx_small_pkt_flush_ = transport::kDefaultTcpSmallPktFlush;
+    std::size_t rx_process_batch_ = transport::kDefaultTcpRxProcessBatch;
+    std::vector<std::uint8_t> tx_batch_;
 };
 
 } // namespace clv::vpn

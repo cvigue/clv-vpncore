@@ -89,7 +89,8 @@ class DcoDataChannel : public DcoServerDataMixin<DcoDataChannel<Adapter>>
     using DcoServerMixinBase::InstallKeys;
     using DcoServerMixinBase::ProcessIncomingDataPacket;
     using DcoServerMixinBase::ProcessOutgoingTunPacket;
-    using DcoServerMixinBase::RemoveDcoPeer;
+    using DcoServerMixinBase::RemovePeer;
+    using DcoServerMixinBase::SetPeerSlots;
 
     /** @brief No-op; kernel handles keepalives via netlink. */
     asio::awaitable<void> SendKeepalivePing()

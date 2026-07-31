@@ -17,6 +17,8 @@ Key capabilities:
 
 Measured on two virtual machines connected via virtio adapters and a host network bridge. Simulated latency is applied with `tc netem` on the underlay NIC. Each row is a single iperf3 TCP run (20 s) through the VPN tunnel. `ovpn` = OpenVPN 2.6.x; `clv` = this project.
 
+VM host is an R640 with dual Xeon Gold 6242
+
 **Column key:**
 
 | Column | Meaning |
@@ -119,6 +121,7 @@ clv-vpncore/
 │   ├── vpn_server              Multi-client server orchestration
 │   ├── vpn_client              Single-connection client with reconnect
 │   ├── ip_pool_manager         Dual-stack IPv4/IPv6 address allocation
+│   ├── peer_slot_table         Wire peer-id slots (demux key, occupancy, float endpoint)
 │   ├── routing_table           Longest-prefix-match routing (IPv4 + IPv6)
 │   ├── log_subsystems          Per-subsystem structured logging
 │   ├── crypto_context          Per-session symmetric crypto (AEAD encrypt/decrypt, rekey)
@@ -196,9 +199,14 @@ cleanup.
 
 - Userspace UDP uses dedicated RX and TX worker threads in `UdpCore`.
 - The TX path is a single drain coroutine that reads up to `tx_drain_depth` TUN packets, encrypts them, and sends in `tx_send_batch` windows.
-- Server UDP publishes routing/session snapshots to workers through `UdpEngineContext` and QSBR so RX/TX can run without control-plane locks.
+- Server UDP and TCP publish routing/session snapshots to their data-path threads through `DataPlaneContext` and QSBR so those threads run without control-plane locks.
+- Server UDP demuxes inbound `P_DATA_V2` on the wire peer-id via `PeerSlotTable`, so a client that changes source address keeps working (peer float). The endpoint moves only after the packet decrypts, which includes the anti-replay check.
 - DCO mode delegates packet encryption/decryption to the kernel `ovpn-dco` module while the process still owns session, key, and policy orchestration.
-- TCP mode uses a TCP-specific channel that owns its listener/threading model separately from the server control plane.
+- TCP mode uses stream-framed channels with `tx_send_batch` /
+  `tx_small_pkt_flush` / `rx_process_batch` coalesce (TCP lab default
+  **16 / 256 / 32**; shared struct defaults remain UDP-oriented **64 / 384 / 64**).
+  The TCP channel owns its listener/threading model separately from the server
+  control plane.
 
 ### Binary Structure
 
@@ -341,12 +349,12 @@ Shared tuning — inherited by clients in the `"clients"` array unless overridde
 | `enable_dco` | `true` | Use kernel DCO data path instead of userspace |
 | `batch_size` | `0` | recvmmsg/sendmmsg RX batch depth (0 = auto) |
 | `tx_drain_depth` | `1024` | Max TUN reads per TX drain cycle |
-| `tx_send_batch` | `64` | Max packets per `sendmmsg` call (`0` = `tx_drain_depth`) |
-| `tx_small_pkt_flush` | `384` | Early flush trigger when a small packet is seen mid-drain (`0` = disabled) |
+| `tx_send_batch` | `64` | Max packets per `sendmmsg` / TCP `SendRaw` coalesce (`0` = path default) |
+| `tx_small_pkt_flush` | `384` | Early flush when a short payload is seen mid-batch (`0` = disabled); applies to UDP TUN drain and TCP TX/RX |
 | `rx_thread_affinity` | `"auto"` | RX worker thread CPU pin (`"off"`, `"auto"`, or core index) |
 | `tx_thread_affinity` | `"auto"` | TX drain worker thread CPU pin (`"off"`, `"auto"`, or core index) |
 | `max_recv` | `0` | Arena/ring size for recvmmsg (0 = same as `batch_size`) |
-| `rx_process_batch` | `64` | Mini-batch size for two-pass decrypt+write (0 = process all at once) |
+| `rx_process_batch` | `64` | UDP decrypt mini-batch / TCP pending TUN writes before flush (`0` = no count cap) |
 | `socket_recv_buffer` | `0` (OS default) | UDP `SO_RCVBUF` size in bytes |
 | `socket_send_buffer` | `0` (OS default) | UDP `SO_SNDBUF` size in bytes |
 | `stats_interval_seconds` | `0` (disabled) | Periodic stats report interval |

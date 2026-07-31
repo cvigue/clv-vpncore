@@ -515,6 +515,58 @@ TEST_F(SessionManagerTest, ExtractSession_MissingId_ReturnsNullptr)
     EXPECT_EQ(extracted, nullptr);
 }
 
+// ============================================================================
+// RebindEndpoint — control-plane side of peer float
+// ============================================================================
+
+TEST_F(SessionManagerTest, RebindEndpoint_MovesSessionAndEndpointIndex)
+{
+    auto id = openvpn::SessionId::Generate();
+    auto old_ep = CreateEndpoint(0xC0A80001, 1194);
+    auto new_ep = CreateEndpoint(0x0A000005, 5555);
+    manager.GetOrCreateSession(id, old_ep, true, std::nullopt, *logger_);
+
+    EXPECT_TRUE(manager.RebindEndpoint(id, new_ep));
+
+    EXPECT_EQ(manager.FindSessionByEndpoint(old_ep), nullptr);
+    auto *found = manager.FindSessionByEndpoint(new_ep);
+    ASSERT_NE(found, nullptr);
+    EXPECT_EQ(found->GetSessionId().value, id.value);
+    EXPECT_EQ(found->GetEndpoint(), new_ep);
+}
+
+TEST_F(SessionManagerTest, RebindEndpoint_RefusesEndpointOwnedByAnotherSession)
+{
+    auto id1 = openvpn::SessionId::Generate();
+    auto id2 = openvpn::SessionId::Generate();
+    auto ep1 = CreateEndpoint(0xC0A80001, 1194);
+    auto ep2 = CreateEndpoint(0xC0A80002, 1195);
+    manager.GetOrCreateSession(id1, ep1, true, std::nullopt, *logger_);
+    manager.GetOrCreateSession(id2, ep2, true, std::nullopt, *logger_);
+
+    EXPECT_FALSE(manager.RebindEndpoint(id1, ep2));
+
+    // Neither session moved; one endpoint never maps to two sessions.
+    EXPECT_EQ(manager.FindSessionByEndpoint(ep1)->GetSessionId().value, id1.value);
+    EXPECT_EQ(manager.FindSessionByEndpoint(ep2)->GetSessionId().value, id2.value);
+}
+
+TEST_F(SessionManagerTest, RebindEndpoint_SameEndpointIsIdempotent)
+{
+    auto id = openvpn::SessionId::Generate();
+    auto ep = CreateEndpoint(0xC0A80001, 1194);
+    manager.GetOrCreateSession(id, ep, true, std::nullopt, *logger_);
+
+    EXPECT_TRUE(manager.RebindEndpoint(id, ep));
+    EXPECT_EQ(manager.FindSessionByEndpoint(ep)->GetSessionId().value, id.value);
+}
+
+TEST_F(SessionManagerTest, RebindEndpoint_UnknownSessionFails)
+{
+    auto id = openvpn::SessionId::Generate();
+    EXPECT_FALSE(manager.RebindEndpoint(id, CreateEndpoint(0x0A000005, 5555)));
+}
+
 // ---------------------------------------------------------------------------
 // Connection rekey timer tests
 // ---------------------------------------------------------------------------

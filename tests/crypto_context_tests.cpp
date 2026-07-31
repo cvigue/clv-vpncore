@@ -49,7 +49,7 @@ class CryptoContextTest : public ::testing::Test
         const std::vector<std::uint8_t> &plaintext,
         SessionId session = SessionId::Generate())
     {
-        auto encrypted = channel.EncryptPacket(plaintext, session);
+        auto encrypted = channel.EncryptPacket(plaintext, static_cast<std::uint32_t>(session.value));
         if (encrypted.empty())
             return std::nullopt;
         return OpenVpnPacket::Parse(encrypted);
@@ -223,7 +223,7 @@ TEST_F(CryptoContextTest, EncryptPacketRequiresValidKey)
 {
     std::vector<std::uint8_t> plaintext = {0x45, 0x00};
 
-    auto encrypted = channel().EncryptPacket(plaintext, SessionId::Generate());
+    auto encrypted = channel().EncryptPacket(plaintext, 1u);
 
     EXPECT_TRUE(encrypted.empty());
 }
@@ -235,7 +235,7 @@ TEST_F(CryptoContextTest, EncryptPacketWithValidKey)
 
     std::vector<std::uint8_t> plaintext = {0x45, 0x00, 0x00, 0x20};
 
-    auto encrypted = channel().EncryptPacket(plaintext, SessionId::Generate());
+    auto encrypted = channel().EncryptPacket(plaintext, 1u);
 
     EXPECT_FALSE(encrypted.empty());
 }
@@ -250,10 +250,10 @@ TEST_F(CryptoContextTest, EncryptPacketIncrementPacketId)
 
     uint32_t initial_id = channel().GetOutboundPacketId();
 
-    auto encrypted1 = channel().EncryptPacket(plaintext, session);
+    auto encrypted1 = channel().EncryptPacket(plaintext, static_cast<std::uint32_t>(session.value));
     uint32_t after_first = channel().GetOutboundPacketId();
 
-    auto encrypted2 = channel().EncryptPacket(plaintext, session);
+    auto encrypted2 = channel().EncryptPacket(plaintext, static_cast<std::uint32_t>(session.value));
     uint32_t after_second = channel().GetOutboundPacketId();
 
     EXPECT_EQ(initial_id + 1, after_first);
@@ -342,7 +342,7 @@ TEST_F(CryptoContextTest, SequentialEncryptionDecryption)
     auto session = SessionId::Generate();
 
     // Encrypt
-    auto encrypted = channel().EncryptPacket(plaintext, session);
+    auto encrypted = channel().EncryptPacket(plaintext, static_cast<std::uint32_t>(session.value));
     EXPECT_FALSE(encrypted.empty());
 
     // Parse encrypted data
@@ -385,8 +385,8 @@ TEST_F(CryptoContextTest, MultipleKeySlotIndependentEncryption)
     std::vector<std::uint8_t> plaintext = {0x45, 0x00};
     auto session = SessionId::Generate();
 
-    auto encrypted0 = channel().EncryptPacket(plaintext, session);
-    auto encrypted1 = channel().EncryptPacket(plaintext, session);
+    auto encrypted0 = channel().EncryptPacket(plaintext, static_cast<std::uint32_t>(session.value));
+    auto encrypted1 = channel().EncryptPacket(plaintext, static_cast<std::uint32_t>(session.value));
 
     EXPECT_NE(encrypted0, encrypted1);
 }
@@ -405,7 +405,7 @@ TEST_F(CryptoContextTest, DecryptPacketDifferentKeySlots)
     std::vector<std::uint8_t> plaintext = {0x45, 0x00};
 
     // Encrypt and decrypt with key slot 0
-    auto encrypted1 = channel().EncryptPacket(plaintext, session);
+    auto encrypted1 = channel().EncryptPacket(plaintext, static_cast<std::uint32_t>(session.value));
     ASSERT_FALSE(encrypted1.empty());
     auto packet1 = OpenVpnPacket::Parse(encrypted1);
     ASSERT_TRUE(packet1);
@@ -417,7 +417,7 @@ TEST_F(CryptoContextTest, DecryptPacketDifferentKeySlots)
     channel().InstallNewKeys(key1, key1, 1);
 
     // Encrypt with new primary key (slot 1)
-    auto encrypted2 = channel().EncryptPacket(plaintext, session);
+    auto encrypted2 = channel().EncryptPacket(plaintext, static_cast<std::uint32_t>(session.value));
     ASSERT_FALSE(encrypted2.empty());
     auto packet2 = OpenVpnPacket::Parse(encrypted2);
     ASSERT_TRUE(packet2);
@@ -440,7 +440,7 @@ TEST_F(CryptoContextTest, EncryptDecryptWithAes128Gcm)
     std::vector<std::uint8_t> plaintext = {0x45, 0x00, 0x00, 0x54}; // IPv4 header start
 
     // Encrypt
-    auto encrypted = channel().EncryptPacket(plaintext, session);
+    auto encrypted = channel().EncryptPacket(plaintext, static_cast<std::uint32_t>(session.value));
     ASSERT_FALSE(encrypted.empty());
 
     // Decrypt
@@ -470,7 +470,7 @@ TEST_F(CryptoContextTest, EncryptDecryptWithAes256Gcm)
     std::vector<std::uint8_t> plaintext = {0x45, 0x00, 0x00, 0x54, 0x12, 0x34};
 
     // Encrypt
-    auto encrypted = channel().EncryptPacket(plaintext, session);
+    auto encrypted = channel().EncryptPacket(plaintext, static_cast<std::uint32_t>(session.value));
     ASSERT_FALSE(encrypted.empty());
 
     // Decrypt
@@ -500,7 +500,7 @@ TEST_F(CryptoContextTest, EncryptDecryptWithChaCha20Poly1305)
     std::vector<std::uint8_t> plaintext = {0x45, 0x00, 0x00, 0x54, 0xAB, 0xCD, 0xEF};
 
     // Encrypt
-    auto encrypted = channel().EncryptPacket(plaintext, session);
+    auto encrypted = channel().EncryptPacket(plaintext, static_cast<std::uint32_t>(session.value));
     ASSERT_FALSE(encrypted.empty());
 
     // Decrypt
@@ -528,7 +528,7 @@ TEST_F(CryptoContextTest, AllCiphersProduceDifferentCiphertext)
 
     CryptoContext chan128(*logger_);
     chan128.InstallNewKeys(key128, key128, 0);
-    auto encrypted128 = chan128.EncryptPacket(plaintext, session);
+    auto encrypted128 = chan128.EncryptPacket(plaintext, static_cast<std::uint32_t>(session.value));
 
     // Encrypt with AES-256-GCM
     EncryptionKey key256;
@@ -542,7 +542,7 @@ TEST_F(CryptoContextTest, AllCiphersProduceDifferentCiphertext)
 
     CryptoContext chan256(*logger_);
     chan256.InstallNewKeys(key256, key256, 0);
-    auto encrypted256 = chan256.EncryptPacket(plaintext, session);
+    auto encrypted256 = chan256.EncryptPacket(plaintext, static_cast<std::uint32_t>(session.value));
 
     // Encrypt with ChaCha20-Poly1305
     EncryptionKey keyChacha;
@@ -556,7 +556,7 @@ TEST_F(CryptoContextTest, AllCiphersProduceDifferentCiphertext)
 
     CryptoContext chanChacha(*logger_);
     chanChacha.InstallNewKeys(keyChacha, keyChacha, 0);
-    auto encryptedChacha = chanChacha.EncryptPacket(plaintext, session);
+    auto encryptedChacha = chanChacha.EncryptPacket(plaintext, static_cast<std::uint32_t>(session.value));
 
     // All should succeed
     ASSERT_FALSE(encrypted128.empty());
@@ -584,7 +584,7 @@ TEST_F(CryptoContextTest, CiphertextCannotBeDecryptedWithWrongAlgorithm)
 
     CryptoContext encryptChan(*logger_);
     encryptChan.InstallNewKeys(key256, key256, 0);
-    auto encrypted = encryptChan.EncryptPacket(plaintext, session);
+    auto encrypted = encryptChan.EncryptPacket(plaintext, static_cast<std::uint32_t>(session.value));
     ASSERT_FALSE(encrypted.empty());
 
     // Try to decrypt with ChaCha20-Poly1305
@@ -622,7 +622,7 @@ TEST_F(CryptoContextTest, EncryptDecryptInPlace_Aes128Gcm)
     std::vector<std::uint8_t> buf(kDataV2Overhead + plaintext.size());
     std::memcpy(buf.data() + kDataV2Overhead, plaintext.data(), plaintext.size());
 
-    auto wire_len = channel().EncryptPacketInPlace(buf, plaintext.size(), session);
+    auto wire_len = channel().EncryptPacketInPlace(buf, plaintext.size(), static_cast<std::uint32_t>(session.value));
     ASSERT_GT(wire_len, 0u);
     EXPECT_EQ(kDataV2Overhead + plaintext.size(), wire_len);
 
@@ -654,7 +654,7 @@ TEST_F(CryptoContextTest, EncryptDecryptInPlace_Aes256Gcm)
     std::vector<std::uint8_t> buf(kDataV2Overhead + plaintext.size());
     std::memcpy(buf.data() + kDataV2Overhead, plaintext.data(), plaintext.size());
 
-    auto wire_len = channel().EncryptPacketInPlace(buf, plaintext.size(), session);
+    auto wire_len = channel().EncryptPacketInPlace(buf, plaintext.size(), static_cast<std::uint32_t>(session.value));
     ASSERT_GT(wire_len, 0u);
 
     CryptoContext decrypt_chan(*logger_);
@@ -683,7 +683,7 @@ TEST_F(CryptoContextTest, EncryptDecryptInPlace_ChaCha20Poly1305)
     std::vector<std::uint8_t> buf(kDataV2Overhead + plaintext.size());
     std::memcpy(buf.data() + kDataV2Overhead, plaintext.data(), plaintext.size());
 
-    auto wire_len = channel().EncryptPacketInPlace(buf, plaintext.size(), session);
+    auto wire_len = channel().EncryptPacketInPlace(buf, plaintext.size(), static_cast<std::uint32_t>(session.value));
     ASSERT_GT(wire_len, 0u);
 
     CryptoContext decrypt_chan(*logger_);
@@ -702,7 +702,7 @@ TEST_F(CryptoContextTest, CrossCompat_OldEncrypt_NewDecryptInPlace)
     auto session = SessionId::Generate();
     std::vector<std::uint8_t> plaintext = {0x45, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06};
 
-    auto encrypted = channel().EncryptPacket(plaintext, session);
+    auto encrypted = channel().EncryptPacket(plaintext, static_cast<std::uint32_t>(session.value));
     ASSERT_FALSE(encrypted.empty());
 
     // Decrypt with in-place method
@@ -724,7 +724,7 @@ TEST_F(CryptoContextTest, CrossCompat_NewEncryptInPlace_OldDecrypt)
     std::vector<std::uint8_t> buf(kDataV2Overhead + plaintext.size());
     std::memcpy(buf.data() + kDataV2Overhead, plaintext.data(), plaintext.size());
 
-    auto wire_len = channel().EncryptPacketInPlace(buf, plaintext.size(), session);
+    auto wire_len = channel().EncryptPacketInPlace(buf, plaintext.size(), static_cast<std::uint32_t>(session.value));
     ASSERT_GT(wire_len, 0u);
 
     // Parse and decrypt with old method
@@ -748,7 +748,7 @@ TEST_F(CryptoContextTest, DecryptPacketInPlace_RejectsReplay)
     std::vector<std::uint8_t> buf(kDataV2Overhead + plaintext.size());
     std::memcpy(buf.data() + kDataV2Overhead, plaintext.data(), plaintext.size());
 
-    auto wire_len = channel().EncryptPacketInPlace(buf, plaintext.size(), session);
+    auto wire_len = channel().EncryptPacketInPlace(buf, plaintext.size(), static_cast<std::uint32_t>(session.value));
     ASSERT_GT(wire_len, 0u);
 
     // First decrypt succeeds
@@ -765,7 +765,7 @@ TEST_F(CryptoContextTest, EncryptPacketInPlace_FailsWithoutKeys)
 {
     auto session = SessionId::Generate();
     std::vector<std::uint8_t> buf(kDataV2Overhead + 10);
-    auto wire_len = channel().EncryptPacketInPlace(buf, 10, session);
+    auto wire_len = channel().EncryptPacketInPlace(buf, 10, static_cast<std::uint32_t>(session.value));
     EXPECT_EQ(0u, wire_len);
 }
 
@@ -793,7 +793,7 @@ TEST_F(CryptoContextTest, EncryptDecryptInPlace_MultipleSequentialPackets)
         std::vector<std::uint8_t> buf(kDataV2Overhead + plaintext.size());
         std::memcpy(buf.data() + kDataV2Overhead, plaintext.data(), plaintext.size());
 
-        auto wire_len = channel().EncryptPacketInPlace(buf, plaintext.size(), session);
+        auto wire_len = channel().EncryptPacketInPlace(buf, plaintext.size(), static_cast<std::uint32_t>(session.value));
         ASSERT_GT(wire_len, 0u) << "Packet " << i;
 
         auto decrypted = decrypt_chan.DecryptPacketInPlace(std::span<std::uint8_t>(buf.data(), wire_len));
@@ -821,7 +821,7 @@ TEST_F(CryptoContextTest, InboundArena_DirectIpNoCompress)
 
     std::vector<std::uint8_t> buf(kDataV2Overhead + ip_data.size());
     std::memcpy(buf.data() + kDataV2Overhead, ip_data.data(), ip_data.size());
-    auto wire_len = channel().EncryptPacketInPlace(buf, ip_data.size(), session);
+    auto wire_len = channel().EncryptPacketInPlace(buf, ip_data.size(), static_cast<std::uint32_t>(session.value));
     ASSERT_GT(wire_len, 0u);
 
     CryptoContext inbound_chan(*logger_);
@@ -852,7 +852,7 @@ TEST_F(CryptoContextTest, InboundArena_KeepaliveDetected)
 
     std::vector<std::uint8_t> buf(kDataV2Overhead + payload.size());
     std::memcpy(buf.data() + kDataV2Overhead, payload.data(), payload.size());
-    auto wire_len = channel().EncryptPacketInPlace(buf, payload.size(), session);
+    auto wire_len = channel().EncryptPacketInPlace(buf, payload.size(), static_cast<std::uint32_t>(session.value));
     ASSERT_GT(wire_len, 0u);
 
     CryptoContext inbound_chan(*logger_);
@@ -998,7 +998,7 @@ TEST_F(CryptoContextTest, EncryptPacket_UnsupportedCipherReturnsEmpty)
     channel().InstallNewKeys(MakeNoneCipherKey(), MakeNoneCipherKey(), 0);
 
     std::vector<std::uint8_t> plaintext = {0x45, 0x00, 0x01, 0x02};
-    auto encrypted = channel().EncryptPacket(plaintext, SessionId::Generate());
+    auto encrypted = channel().EncryptPacket(plaintext, 1u);
     EXPECT_TRUE(encrypted.empty());
 }
 
@@ -1010,7 +1010,7 @@ TEST_F(CryptoContextTest, EncryptPacketInPlace_BufferTooSmall)
     constexpr std::size_t payload_len = 10;
     // Allocate (kDataV2Overhead + payload_len - 1) — exactly one byte short.
     std::vector<std::uint8_t> buf(kDataV2Overhead + payload_len - 1, 0x00);
-    auto wire_len = channel().EncryptPacketInPlace(buf, payload_len, SessionId::Generate());
+    auto wire_len = channel().EncryptPacketInPlace(buf, payload_len, 1u);
     EXPECT_EQ(0u, wire_len);
 }
 
@@ -1022,7 +1022,7 @@ TEST_F(CryptoContextTest, EncryptPacketInPlace_UnsupportedCipherReturnsZero)
 
     constexpr std::size_t payload_len = 10;
     std::vector<std::uint8_t> buf(kDataV2Overhead + payload_len, 0x00);
-    auto wire_len = channel().EncryptPacketInPlace(buf, payload_len, SessionId::Generate());
+    auto wire_len = channel().EncryptPacketInPlace(buf, payload_len, 1u);
     EXPECT_EQ(0u, wire_len);
 }
 
@@ -1074,7 +1074,7 @@ TEST_F(CryptoContextTest, DecryptPacketInPlace_AuthenticationFailureReturnsEmpty
     std::vector<std::uint8_t> buf(kDataV2Overhead + plaintext.size());
     std::memcpy(buf.data() + kDataV2Overhead, plaintext.data(), plaintext.size());
 
-    auto wire_len = channel().EncryptPacketInPlace(buf, plaintext.size(), session);
+    auto wire_len = channel().EncryptPacketInPlace(buf, plaintext.size(), static_cast<std::uint32_t>(session.value));
     ASSERT_GT(wire_len, 0u);
 
     // Corrupt the first byte of the AEAD tag.

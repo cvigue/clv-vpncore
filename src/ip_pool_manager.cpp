@@ -62,6 +62,20 @@ bool IpPoolManager::ReleaseIpv4(uint64_t session_id)
     return false;
 }
 
+void IpPoolManager::Release(uint32_t ipv4)
+{
+    auto pool = pool_data_.Lock();
+
+    auto it = pool->ipv4_to_session.find(ipv4);
+    if (it == pool->ipv4_to_session.end())
+        return;
+
+    const uint64_t session_id = it->second;
+    pool->ipv4_to_session.erase(it);
+    pool->session_to_ipv4.erase(session_id);
+    pool->available_ipv4s.push_back(ipv4);
+}
+
 std::optional<uint32_t> IpPoolManager::GetAssignedIpv4(uint64_t session_id) const
 {
     auto pool = pool_data_.Lock();
@@ -246,6 +260,20 @@ bool IpPoolManager::ReleaseIpv6(uint64_t session_id)
         return true;
     }
     return false;
+}
+
+void IpPoolManager::Release(const Ipv6Address &ipv6)
+{
+    auto pool = pool_data_.Lock();
+
+    auto it = pool->ipv6_to_session.find(ipv6);
+    if (it == pool->ipv6_to_session.end())
+        return;
+
+    const uint64_t session_id = it->second;
+    pool->ipv6_to_session.erase(it);
+    pool->session_to_ipv6.erase(session_id);
+    pool->available_ipv6s.push_back(ipv6);
 }
 
 std::optional<IpPoolManager::Ipv6Address> IpPoolManager::GetAssignedIpv6(uint64_t session_id) const

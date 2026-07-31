@@ -111,6 +111,7 @@ class UdpDataChannel
     using UdpServerMixinBase::GetTxBurstAvgWindow;
     using UdpServerMixinBase::InstallKeys;
     using UdpServerMixinBase::ProcessIncomingDataPacket;
+    using UdpServerMixinBase::RemovePeer;
 
     // Client-side keepalive interface (no-arg): called by the generic KeepaliveLoop
     // via derived().SendKeepalivePing().  Injects the raw ping payload into the TUN
@@ -133,8 +134,9 @@ class UdpDataChannel
     // Different name casing (capital A) is intentional — different call sites, different roles.
     using UdpServerMixinBase::SendKeepAlivePing;
     using UdpServerMixinBase::SetBatchSize;
+    using UdpServerMixinBase::SetPeerSlots;
     using UdpServerMixinBase::SetSocketFd;
-    using UdpServerMixinBase::SetSplitContext;
+    using UdpServerMixinBase::SetDataPlaneContext;
     using UdpServerMixinBase::SnapshotStats;
     using UdpServerMixinBase::StartDataPath;
     using UdpServerMixinBase::StopDataPath;
@@ -158,6 +160,12 @@ class UdpDataChannel
     void OnPeerDead(openvpn::SessionId sid)
     {
         adapter_->OnPeerDead(sid);
+    }
+
+    // Called by UdpServerMixin::StartDataPath via this->derived()
+    PeerFloatSink *FloatSink()
+    {
+        return adapter_;
     }
 
     // Called by UdpServerMixin::SendKeepAlivePing via this->derived()

@@ -82,8 +82,9 @@ class ServerUdpTransport : public ServerControlBase<ServerUdpTransport>
     void Start()
     {
         ConfigureDataPlane();
-        split_ctx_ = std::make_unique<UdpEngineContext>();
-        channel_.SetSplitContext(split_ctx_.get());
+        data_plane_ = std::make_unique<DataPlaneContext>();
+        channel_.SetDataPlaneContext(data_plane_.get());
+        channel_.SetPeerSlots(peer_slots_.get());
         channel_.SetSocketFd(listener_->RawSocket().native_handle());
         asio::co_spawn(*io_context_, channel_.StartDataPath(), asio::detached);
         logger_->info("Split-datapath enabled: TX + RX on dedicated threads");
@@ -99,6 +100,17 @@ class ServerUdpTransport : public ServerControlBase<ServerUdpTransport>
 
     using ServerControlBase::HandleTcpDisconnect;
     using ServerControlBase::OnControlPacketFromDataPath;
+
+    /**
+     * @brief Re-point a session's control transport after a peer float.
+     * @param session Session that floated
+     * @param endpoint New remote endpoint
+     */
+    void RebindPeerTransport(Connection *session, const transport::PeerEndpoint &endpoint)
+    {
+        if (listener_)
+            session->SetTransport(transport::TransportHandle(listener_->TransportFor(endpoint)));
+    }
 
     /**
      * @brief Log periodic data-path stats with batch histograms.

@@ -9,8 +9,11 @@
 #include "openvpn/data_v2_wire.h"
 #include "openvpn/session_manager.h"
 #include "p2p_policy.h"
+#include "peer_slot_table.h"
+#include "transport/transport.h"
 
 #include <asio/co_spawn.hpp>
+#include <asio/ip/udp.hpp>
 #include <asio/detached.hpp>
 #include <asio/io_context.hpp>
 #include <asio/post.hpp>
@@ -426,7 +429,7 @@ TEST(TxEncryptState, EncryptInPlaceProducesValidWirePacket)
     auto key = MakeTestKey();
     tx.ApplySnapshot(key, 2);
 
-    SessionId session{0x00ABCDEF};
+    std::uint32_t peer_id = 0x00ABCDEF;
 
     // Set up buffer: plaintext at offset kDataV2Overhead
     std::vector<std::uint8_t> buf(kDataV2Overhead + 64, 0);
@@ -434,7 +437,7 @@ TEST(TxEncryptState, EncryptInPlaceProducesValidWirePacket)
     buf[kDataV2Overhead] = 0x45; // IPv4 header
     buf[kDataV2Overhead + 1] = 0x00;
 
-    auto wire_len = tx.EncryptInPlace(buf, 64, session, 1u);
+    auto wire_len = tx.EncryptInPlace(buf, 64, peer_id, 1u);
     ASSERT_GT(wire_len, 0u);
     EXPECT_EQ(wire_len, kDataV2Overhead + 64);
 
@@ -443,18 +446,18 @@ TEST(TxEncryptState, EncryptInPlaceProducesValidWirePacket)
     EXPECT_EQ(GetOpcode(opcode_byte), Opcode::P_DATA_V2);
     EXPECT_EQ(GetKeyId(opcode_byte), 2);
 
-    // Verify peer_id (lower 24 bits of session)
-    uint32_t peer_id = (static_cast<uint32_t>(buf[1]) << 16)
-                       | (static_cast<uint32_t>(buf[2]) << 8)
-                       | static_cast<uint32_t>(buf[3]);
-    EXPECT_EQ(peer_id, 0x00ABCDEFu & PEER_ID_MASK);
+    // Verify peer_id on the wire
+    uint32_t wire_peer = (static_cast<uint32_t>(buf[1]) << 16)
+                         | (static_cast<uint32_t>(buf[2]) << 8)
+                         | static_cast<uint32_t>(buf[3]);
+    EXPECT_EQ(wire_peer, 0x00ABCDEFu & PEER_ID_MASK);
 }
 
 TEST(TxEncryptState, EncryptInPlaceReturnsZeroWhenInvalid)
 {
     TxEncryptState tx;
     std::vector<std::uint8_t> buf(kDataV2Overhead + 16, 0);
-    EXPECT_EQ(tx.EncryptInPlace(buf, 16, SessionId{1}, 1u), 0u);
+    EXPECT_EQ(tx.EncryptInPlace(buf, 16, static_cast<std::uint32_t>(1), 1u), 0u);
 }
 
 TEST(TxEncryptState, EncryptInPlaceReturnsZeroForSmallBuffer)
@@ -464,7 +467,7 @@ TEST(TxEncryptState, EncryptInPlaceReturnsZeroForSmallBuffer)
     tx.ApplySnapshot(key, 0);
 
     std::vector<std::uint8_t> buf(10); // too small
-    EXPECT_EQ(tx.EncryptInPlace(buf, 64, SessionId{1}, 1u), 0u);
+    EXPECT_EQ(tx.EncryptInPlace(buf, 64, static_cast<std::uint32_t>(1), 1u), 0u);
 }
 
 TEST(TxEncryptState, EncryptInPlaceDecryptibleByCryptoContext)
@@ -489,7 +492,7 @@ TEST(TxEncryptState, EncryptInPlaceDecryptibleByCryptoContext)
     for (std::size_t i = 0; i < pt_len; ++i)
         buf[kDataV2Overhead + i] = static_cast<uint8_t>(i + 1);
 
-    auto wire_len = tx.EncryptInPlace(buf, pt_len, session, 1u);
+    auto wire_len = tx.EncryptInPlace(buf, pt_len, static_cast<std::uint32_t>(session.value), 1u);
     ASSERT_EQ(wire_len, kDataV2Overhead + pt_len);
 
     // Decrypt with CryptoContext
@@ -501,12 +504,12 @@ TEST(TxEncryptState, EncryptInPlaceDecryptibleByCryptoContext)
 }
 
 // ============================================================================
-// UdpEngineContext tests
+// DataPlaneContext tests
 // ============================================================================
 
-TEST(UdpEngineContext, ConstructsWithEmptyState)
+TEST(DataPlaneContext, ConstructsWithEmptyState)
 {
-    UdpEngineContext ctx;
+    DataPlaneContext ctx;
     EXPECT_NE(ctx.core, nullptr);
 
     auto rv4 = ctx.routes_v4.read();
@@ -516,9 +519,9 @@ TEST(UdpEngineContext, ConstructsWithEmptyState)
     EXPECT_EQ(sv->size(), 0u);
 }
 
-TEST(UdpEngineContext, PublishRoutesUpdatesSnapshot)
+TEST(DataPlaneContext, PublishRoutesUpdatesSnapshot)
 {
-    UdpEngineContext ctx;
+    DataPlaneContext ctx;
 
     RoutingTableIpv4 v4;
     v4.AddRoute(0x0A000100, 24, 42); // 10.0.1.0/24 → session 42
@@ -534,9 +537,9 @@ TEST(UdpEngineContext, PublishRoutesUpdatesSnapshot)
     EXPECT_EQ(*sid, 42u);
 }
 
-TEST(UdpEngineContext, PublishSessionsUpdatesSnapshot)
+TEST(DataPlaneContext, PublishSessionsUpdatesSnapshot)
 {
-    UdpEngineContext ctx;
+    DataPlaneContext ctx;
 
     SessionIndex idx;
     idx.entries[100] = SessionEntry{.key_id = 5};
@@ -551,9 +554,9 @@ TEST(UdpEngineContext, PublishSessionsUpdatesSnapshot)
     EXPECT_EQ(e->key_id, 5);
 }
 
-TEST(UdpEngineContext, QuiescedViewReadsCurrentSnapshot)
+TEST(DataPlaneContext, QuiescedViewReadsCurrentSnapshot)
 {
-    UdpEngineContext ctx;
+    DataPlaneContext ctx;
 
     // Register thread for QSBR
     ctx.core->register_thread();
@@ -570,17 +573,17 @@ TEST(UdpEngineContext, QuiescedViewReadsCurrentSnapshot)
     ctx.core->unregister_thread();
 }
 
-TEST(UdpEngineContext, ReclaimDeferredEmptyIsNoOp)
+TEST(DataPlaneContext, ReclaimDeferredEmptyIsNoOp)
 {
-    UdpEngineContext ctx;
+    DataPlaneContext ctx;
     ctx.ReclaimDeferred(); // should not crash
     EXPECT_TRUE(ctx.deferred.empty());
     ctx.ForceReclaimAll(); // clean up qsbr_register allocation
 }
 
-TEST(UdpEngineContext, SharedCoreAdvancesAllEpochs)
+TEST(DataPlaneContext, SharedCoreAdvancesAllEpochs)
 {
-    UdpEngineContext ctx;
+    DataPlaneContext ctx;
 
     // All QsbrType members share the same core
     EXPECT_EQ(ctx.routes_v4.core(), ctx.core);
@@ -697,7 +700,7 @@ TEST(P2PPolicy, SetPeer_ValidFd_TxReadyTrue)
 {
     P2PPolicy policy{TestLogger()};
     auto ep = MakeEndpoint("10.0.0.1", 1194);
-    policy.SetPeer(ep, SessionId{1}, /*socket_fd=*/5);
+    policy.SetPeer(ep, static_cast<std::uint32_t>(1), /*socket_fd=*/5);
     EXPECT_TRUE(policy.TxReady());
     EXPECT_EQ(policy.TxSocketFd(), 5);
 }
@@ -706,7 +709,7 @@ TEST(P2PPolicy, SetPeer_InvalidFd_TxReadyFalse)
 {
     P2PPolicy policy{TestLogger()};
     auto ep = MakeEndpoint("10.0.0.1", 1194);
-    policy.SetPeer(ep, SessionId{1}, /*socket_fd=*/-1);
+    policy.SetPeer(ep, static_cast<std::uint32_t>(1), /*socket_fd=*/-1);
     EXPECT_FALSE(policy.TxReady());
 }
 
@@ -714,7 +717,7 @@ TEST(P2PPolicy, ApplyEncryptKey_AfterSetPeer_TxReadyTrue)
 {
     P2PPolicy policy{TestLogger()};
     auto ep = MakeEndpoint("10.0.0.1", 1194);
-    policy.SetPeer(ep, SessionId{1}, 5);
+    policy.SetPeer(ep, static_cast<std::uint32_t>(1), 5);
 
     auto key = MakeTestKey();
     policy.ApplyEncryptKey(key, 3);
@@ -736,7 +739,7 @@ TEST(P2PPolicy, Reset_ClearsAllState)
 {
     P2PPolicy policy{TestLogger()};
     auto ep = MakeEndpoint("10.0.0.1", 1194);
-    policy.SetPeer(ep, SessionId{1}, 5);
+    policy.SetPeer(ep, static_cast<std::uint32_t>(1), 5);
     policy.ApplyEncryptKey(MakeTestKey(), 1);
     EXPECT_TRUE(policy.TxReady());
 
@@ -751,11 +754,11 @@ TEST(P2PPolicy, SetPeer_UpdatesDestAndSession)
 {
     P2PPolicy policy{TestLogger()};
     auto ep = MakeEndpoint("172.16.0.1", 4242);
-    SessionId sid{0xDEAD};
-    policy.SetPeer(ep, sid, 7);
+    std::uint32_t peer_id = 0xDEAD;
+    policy.SetPeer(ep, peer_id, 7);
 
     EXPECT_EQ(policy.tx_snapshot.peer, ep);
-    EXPECT_EQ(policy.tx_snapshot.session_id.value, sid.value);
+    EXPECT_EQ(policy.tx_snapshot.peer_id, peer_id);
     EXPECT_EQ(policy.tx_snapshot.socket_fd, 7);
 }
 
@@ -765,7 +768,7 @@ TEST(P2PPolicy, EncryptSlot_ReturnsWireLen)
     CryptoContext dc{TestLogger()};
     auto ep = MakeEndpoint("10.0.0.1", 1194);
     SessionId sid{42};
-    policy.SetPeer(ep, sid, 5);
+    policy.SetPeer(ep, static_cast<std::uint32_t>(sid.value), 5);
     policy.ApplyEncryptKey(MakeTestKey(), 3);
     WireOutboundLimits(policy, dc, 3);
 
@@ -783,7 +786,7 @@ TEST(P2PPolicy, EncryptSlot_IncrementsPacketIdEachCall)
 {
     P2PPolicy policy{TestLogger()};
     CryptoContext dc{TestLogger()};
-    policy.SetPeer(MakeEndpoint("10.0.0.1", 1194), SessionId{1}, 5);
+    policy.SetPeer(MakeEndpoint("10.0.0.1", 1194), static_cast<std::uint32_t>(1), 5);
     policy.ApplyEncryptKey(MakeTestKey(), 0);
     WireOutboundLimits(policy, dc, 0);
 
@@ -985,7 +988,7 @@ TEST(TxEncryptState, EncryptInPlace_WithExplicitPacketId)
         buf[kDataV2Overhead + i] = static_cast<uint8_t>(i + 0x10);
 
     // 4-param overload with an explicit packet_id
-    auto wire_len = tx.EncryptInPlace(buf, pt_len, session, /*packet_id=*/42u);
+    auto wire_len = tx.EncryptInPlace(buf, pt_len, static_cast<std::uint32_t>(session.value), /*packet_id=*/42u);
     ASSERT_EQ(wire_len, kDataV2Overhead + pt_len);
 
     // packet_id must appear at bytes [4..8) (big-endian)
@@ -1085,7 +1088,7 @@ TEST(RxDecryptState, DecryptPacketInPlace_NoKeyInstalledReturnsEmpty)
     TxEncryptState tx;
     tx.ApplySnapshot(MakeTestKey(), 1);
     std::vector<uint8_t> buf(kDataV2Overhead + 16, 0);
-    auto wire_len = tx.EncryptInPlace(buf, 16, SessionId{1}, 1u);
+    auto wire_len = tx.EncryptInPlace(buf, 16, static_cast<std::uint32_t>(1), 1u);
     ASSERT_GT(wire_len, 0u);
     EXPECT_TRUE(rx.DecryptPacketInPlace(std::span<uint8_t>(buf.data(), wire_len)).empty());
 }
@@ -1106,7 +1109,7 @@ TEST(RxDecryptState, DecryptPacketInPlace_UnsupportedCipherReturnsEmpty)
     TxEncryptState tx;
     tx.ApplySnapshot(MakeTestKey(), 1); // valid AEAD encryption
     std::vector<uint8_t> buf(kDataV2Overhead + 16, 0);
-    auto wire_len = tx.EncryptInPlace(buf, 16, SessionId{1}, 1u);
+    auto wire_len = tx.EncryptInPlace(buf, 16, static_cast<std::uint32_t>(1), 1u);
     ASSERT_GT(wire_len, 0u);
 
     // RxDecryptState saw key_id=1 but cipher is NONE → empty
@@ -1127,7 +1130,7 @@ TEST(RxDecryptState, DecryptPacketInPlace_RoundtripWithTxEncrypt)
     for (std::size_t i = 0; i < pt_len; ++i)
         buf[kDataV2Overhead + i] = static_cast<uint8_t>(i + 1);
 
-    auto wire_len = tx.EncryptInPlace(buf, pt_len, session, 1u);
+    auto wire_len = tx.EncryptInPlace(buf, pt_len, static_cast<std::uint32_t>(session.value), 1u);
     ASSERT_GT(wire_len, 0u);
 
     auto plaintext = rx.DecryptPacketInPlace(std::span<uint8_t>(buf.data(), wire_len));
@@ -1147,7 +1150,7 @@ TEST(RxDecryptState, DecryptPacketInPlace_LameDuckKeyDecrypts)
     constexpr std::size_t pt_len = 16;
     std::vector<uint8_t> wire(kDataV2Overhead + pt_len, 0);
     wire[kDataV2Overhead] = 0x45; // IPv4 first byte as canary
-    auto wire_len = tx.EncryptInPlace(wire, pt_len, SessionId{0x1234}, /*packet_id=*/10u);
+    auto wire_len = tx.EncryptInPlace(wire, pt_len, static_cast<std::uint32_t>(0x1234), /*packet_id=*/10u);
     ASSERT_GT(wire_len, 0u);
     std::vector<uint8_t> saved(wire.begin(), wire.begin() + wire_len);
 
@@ -1176,7 +1179,7 @@ TEST(RxDecryptState, DecryptPacketInPlace_AuthFailureReturnsEmpty)
     rx.ApplySnapshot(MakeRxSnapshot(1));
 
     std::vector<uint8_t> buf(kDataV2Overhead + 16, 0);
-    auto wire_len = tx.EncryptInPlace(buf, 16, SessionId{0x1}, 1u);
+    auto wire_len = tx.EncryptInPlace(buf, 16, static_cast<std::uint32_t>(0x1), 1u);
     ASSERT_GT(wire_len, 0u);
 
     buf[8] ^= 0xFF; // corrupt tag byte at offset 8
@@ -1199,7 +1202,7 @@ TEST(RxDecryptState, DecryptPacketInPlace_TooOldPacketIdReturnsEmpty)
     auto tryDecrypt = [&](uint32_t pkt_id) -> bool
     {
         std::vector<uint8_t> buf(kDataV2Overhead + pt_len, 0);
-        auto w = tx.EncryptInPlace(buf, pt_len, session, pkt_id);
+        auto w = tx.EncryptInPlace(buf, pt_len, static_cast<std::uint32_t>(session.value), pkt_id);
         if (w == 0)
             return false;
         return !rx.DecryptPacketInPlace(std::span<uint8_t>(buf.data(), w)).empty();
@@ -1223,7 +1226,7 @@ TEST(RxDecryptState, DecryptPacketInPlace_DuplicatePacketIdReturnsEmpty)
 
     // Encrypt once, save wire bytes
     std::vector<uint8_t> wire(kDataV2Overhead + pt_len, 0);
-    auto wire_len = tx.EncryptInPlace(wire, pt_len, SessionId{0x1}, /*packet_id=*/100u);
+    auto wire_len = tx.EncryptInPlace(wire, pt_len, static_cast<std::uint32_t>(0x1), /*packet_id=*/100u);
     ASSERT_GT(wire_len, 0u);
     std::vector<uint8_t> saved(wire.begin(), wire.begin() + wire_len);
 
@@ -1422,7 +1425,7 @@ TEST(BatchHistWindow, RecordAndSnapshot)
 TEST(P2PPolicy, EncryptSlot_NoLimitsChannel_ReturnsZero)
 {
     P2PPolicy policy{TestLogger()};
-    policy.SetPeer(MakeEndpoint("10.0.0.1", 1194), SessionId{1}, 5);
+    policy.SetPeer(MakeEndpoint("10.0.0.1", 1194), static_cast<std::uint32_t>(1), 5);
     policy.ApplyEncryptKey(MakeTestKey(), 1);
 
     std::vector<uint8_t> slot_buf(kDataV2Overhead + 64, 0);
@@ -1438,7 +1441,7 @@ TEST(P2PPolicy, EncryptSlot_ProducesWirePacket)
     CryptoContext dc{TestLogger()};
     auto ep = MakeEndpoint("10.0.0.1", 1194);
     SessionId sid{0xABCD};
-    policy.SetPeer(ep, sid, 5);
+    policy.SetPeer(ep, static_cast<std::uint32_t>(sid.value), 5);
     policy.ApplyEncryptKey(MakeTestKey(), 1);
     WireOutboundLimits(policy, dc, 1);
 
@@ -1478,7 +1481,7 @@ TEST(P2PPolicy, ApplyDecryptSnapshot_InstallsKey)
     constexpr std::size_t pt_len = 16;
     std::vector<uint8_t> backing(kDataV2Overhead + pt_len, 0);
     backing[kDataV2Overhead] = 0xBB; // canary
-    auto wire_len = tx.EncryptInPlace(backing, pt_len, SessionId{0x1}, 1u);
+    auto wire_len = tx.EncryptInPlace(backing, pt_len, static_cast<std::uint32_t>(0x1), 1u);
     ASSERT_GT(wire_len, 0u);
 
     transport::IncomingSlot slot;
@@ -1505,7 +1508,7 @@ TEST(P2PPolicy, DecryptInPlace_RoundtripWithTxEncryptState)
     transport::IncomingSlot slot;
     std::vector<uint8_t> backing(kDataV2Overhead + pt_len, 0);
     backing[kDataV2Overhead] = 0x99; // canary
-    auto wire_len = tx.EncryptInPlace(backing, pt_len, SessionId{0x1}, 1u);
+    auto wire_len = tx.EncryptInPlace(backing, pt_len, static_cast<std::uint32_t>(0x1), 1u);
     ASSERT_GT(wire_len, 0u);
     slot.buf = backing.data();
     slot.capacity = backing.size();
@@ -1536,15 +1539,15 @@ TEST(P2PPolicy, LifecycleCallbacks_AreNoOps)
 }
 
 // ============================================================================
-// UdpEngineContext – DeferDestruction and non-empty ReclaimDeferred
+// DataPlaneContext – DeferDestruction and non-empty ReclaimDeferred
 // ============================================================================
 
-TEST(UdpEngineContext, DeferDestructionAddsToQueue)
+TEST(DataPlaneContext, DeferDestructionAddsToQueue)
 {
     auto null_sink = std::make_shared<spdlog::sinks::null_sink_mt>();
     auto log = std::make_unique<spdlog::logger>("ue_test", null_sink);
 
-    UdpEngineContext ctx;
+    DataPlaneContext ctx;
     Connection::Endpoint ep{asio::ip::address_v4(0xC0A80001), 1194};
     auto conn = std::make_unique<Connection>(
         openvpn::SessionId::Generate(), ep, true, std::nullopt, *log);
@@ -1553,12 +1556,12 @@ TEST(UdpEngineContext, DeferDestructionAddsToQueue)
     EXPECT_EQ(ctx.deferred.size(), 1u);
 }
 
-TEST(UdpEngineContext, ReclaimDeferred_NonEmpty_RegistrationAndReclaim)
+TEST(DataPlaneContext, ReclaimDeferred_NonEmpty_RegistrationAndReclaim)
 {
     auto null_sink = std::make_shared<spdlog::sinks::null_sink_mt>();
     auto log = std::make_unique<spdlog::logger>("ue_test2", null_sink);
 
-    UdpEngineContext ctx;
+    DataPlaneContext ctx;
     Connection::Endpoint ep{asio::ip::address_v4(0xC0A80002), 1194};
     auto conn = std::make_unique<Connection>(
         openvpn::SessionId::Generate(), ep, false, std::nullopt, *log);
@@ -1597,13 +1600,118 @@ TEST(SessionIndex, BuildFrom_SkipsSessionsWithoutKeys)
     EXPECT_EQ(idx.size(), 0u); // skipped because no valid keys
 }
 
-TEST(UdpEngineContext, PublishSessions_FromManager_EmptyManagerPublishesEmptyIndex)
+TEST(DataPlaneContext, PublishSessions_FromManager_EmptyManagerPublishesEmptyIndex)
 {
-    UdpEngineContext ctx;
+    DataPlaneContext ctx;
     SessionManager sm; // no sessions
 
     ctx.PublishSessions(sm); // exercises PublishSessions(const SessionManager&)
 
     auto view = ctx.sessions.read();
     EXPECT_EQ(view->size(), 0u);
+}
+
+namespace {
+
+struct LiveUdpSocket
+{
+    asio::io_context io;
+    std::shared_ptr<asio::ip::udp::socket> sock =
+        std::make_shared<asio::ip::udp::socket>(io);
+
+    LiveUdpSocket()
+    {
+        sock->open(asio::ip::udp::v4());
+    }
+
+    transport::TransportHandle MakeHandle(const char *ip, std::uint16_t port)
+    {
+        return transport::UdpTransport{
+            sock, asio::ip::udp::endpoint(asio::ip::make_address(ip), port)};
+    }
+};
+
+} // namespace
+
+TEST(SessionIndex, BuildFrom_SkipsSessionsWithoutPeerId)
+{
+    LiveUdpSocket udp;
+    auto null_sink = std::make_shared<spdlog::sinks::null_sink_mt>();
+    auto log = std::make_unique<spdlog::logger>("buildtest_noid", null_sink);
+
+    Connection::Endpoint ep{asio::ip::make_address("192.0.2.1"), 1194};
+    auto sid = openvpn::SessionId::Generate();
+
+    SessionManager sm;
+    auto &conn = sm.GetOrCreateSession(sid, ep, true, std::nullopt, *log);
+    auto key = MakeTestKey();
+    conn.GetCryptoContext().InstallNewKeys(key, key, 0);
+    conn.SetTransport(udp.MakeHandle("192.0.2.1", 1194));
+    ASSERT_TRUE(conn.GetCryptoContext().HasValidKeys());
+    ASSERT_TRUE(conn.HasTransport());
+    ASSERT_FALSE(conn.GetWirePeerId().has_value());
+
+    auto idx = SessionIndex::BuildFrom(sm);
+    EXPECT_EQ(idx.size(), 0u);
+}
+
+TEST(SessionIndex, BuildFrom_IncludesPeerIdZero)
+{
+    LiveUdpSocket udp;
+    PeerSlotTable table(2);
+    auto lease = table.Reserve();
+    ASSERT_TRUE(lease);
+    ASSERT_EQ(lease->value(), 0u);
+
+    auto null_sink = std::make_shared<spdlog::sinks::null_sink_mt>();
+    auto log = std::make_unique<spdlog::logger>("buildtest_pid0", null_sink);
+
+    Connection::Endpoint ep{asio::ip::make_address("192.0.2.1"), 1194};
+    auto sid = openvpn::SessionId::Generate();
+
+    SessionManager sm;
+    auto &conn = sm.GetOrCreateSession(sid, ep, true, std::nullopt, *log);
+    auto key = MakeTestKey();
+    conn.GetCryptoContext().InstallNewKeys(key, key, 0);
+    conn.SetTransport(udp.MakeHandle("192.0.2.1", 1194));
+    conn.TakePeerIdLease(std::move(*lease));
+
+    auto idx = SessionIndex::BuildFrom(sm);
+    ASSERT_EQ(idx.size(), 1u);
+    const auto *entry = idx.Find(sid);
+    ASSERT_NE(entry, nullptr);
+    EXPECT_EQ(entry->peer_id, 0u);
+    const auto *by_ep = idx.FindByEndpoint(
+        transport::PeerEndpoint{.addr = ep.addr, .port = ep.port});
+    ASSERT_NE(by_ep, nullptr);
+    EXPECT_EQ(by_ep->peer_id, 0u);
+}
+
+TEST(DataPlaneContext, QuiescedReadersSeePublishedPeerIdAndEndpoint)
+{
+    DataPlaneContext ctx;
+    ctx.core->register_thread();
+
+    const openvpn::SessionId sid{42};
+    const auto ep = transport::PeerEndpoint{
+        .addr = asio::ip::make_address("192.0.2.9"), .port = 1194};
+
+    SessionIndex idx;
+    idx.entries[sid.value] = SessionEntry{
+        .conn = nullptr,
+        .peer_id = 0,
+        .endpoint = ep,
+    };
+    idx.by_endpoint[ep] = sid.value;
+    ctx.PublishSessions(idx);
+
+    ctx.core->quiescent_state();
+    const auto &tx = *ctx.sessions.read_quiesced();
+    const auto &rx = *ctx.sessions_rx.read_quiesced();
+    ASSERT_NE(tx.Find(sid), nullptr);
+    EXPECT_EQ(tx.Find(sid)->peer_id, 0u);
+    ASSERT_NE(rx.FindByEndpoint(ep), nullptr);
+    EXPECT_EQ(rx.FindByEndpoint(ep)->peer_id, 0u);
+
+    ctx.core->unregister_thread();
 }

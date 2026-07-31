@@ -63,6 +63,7 @@ add_library(clv_vpncore STATIC
     src/vpn_server.cpp
     src/log_subsystems.cpp
     src/ip_pool_manager.cpp
+    src/peer_slot_table.cpp
     src/platform/linux/nftables/nftables_client.cpp
     src/platform/linux/tun/tun_device.cpp
     src/routing_table.cpp

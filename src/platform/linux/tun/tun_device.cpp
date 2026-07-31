@@ -19,11 +19,12 @@
 #include <memory>
 #include <net/if.h>
 #include <netinet/in.h>
+#include <poll.h>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
-#include <sys/uio.h> // writev, struct iovec
 #include <system_error>
 #include <unistd.h>
 #include <unique_fd.h>
@@ -303,15 +304,58 @@ bool TunDevice::IsOpen() const
     return stream_ && stream_->is_open();
 }
 
-asio::awaitable<IpPacket> TunDevice::ReadPacket()
+asio::awaitable<std::size_t> TunDevice::ReadPacketInto(std::span<std::uint8_t> dest)
 {
     if (!IsOpen())
     {
         throw std::logic_error("TUN device not open");
     }
+    if (dest.empty())
+    {
+        throw std::invalid_argument("ReadPacketInto destination is empty");
+    }
 
-    // Read one packet from TUN device
-    std::size_t bytes_read = co_await stream_->async_read_some(asio::buffer(read_buffer_), asio::use_awaitable);
+    co_return co_await stream_->async_read_some(
+        asio::buffer(dest.data(), dest.size()), asio::use_awaitable);
+}
+
+std::size_t TunDevice::TryReadPacketInto(std::span<std::uint8_t> dest)
+{
+    if (!IsOpen())
+    {
+        throw std::logic_error("TUN device not open");
+    }
+    if (dest.empty())
+    {
+        throw std::invalid_argument("TryReadPacketInto destination is empty");
+    }
+
+    // poll(0) + ::read avoids flipping the descriptor to non-blocking (which
+    // would stick for the lifetime of the TunDevice and surprise other paths).
+    // Caller must not have an outstanding async_read on this device.
+    const int fd = stream_->native_handle();
+    pollfd pfd{};
+    pfd.fd = fd;
+    pfd.events = POLLIN;
+    const int pr = ::poll(&pfd, 1, 0);
+    if (pr == 0)
+        return 0;
+    if (pr < 0)
+        throw std::system_error(errno, std::generic_category(), "poll(TUN)");
+
+    const ssize_t n = ::read(fd, dest.data(), dest.size());
+    if (n < 0)
+    {
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+            return 0;
+        throw std::system_error(errno, std::generic_category(), "read(TUN)");
+    }
+    return static_cast<std::size_t>(n);
+}
+
+asio::awaitable<IpPacket> TunDevice::ReadPacket()
+{
+    const std::size_t bytes_read = co_await ReadPacketInto(read_buffer_);
 
     IpPacket packet;
     packet.data.assign(read_buffer_.begin(), read_buffer_.begin() + bytes_read);
@@ -319,83 +363,14 @@ asio::awaitable<IpPacket> TunDevice::ReadPacket()
     co_return packet;
 }
 
-asio::awaitable<std::vector<IpPacket>> TunDevice::ReadBatch(std::size_t max_batch)
+asio::awaitable<void> TunDevice::WritePacket(std::span<const std::uint8_t> data)
 {
     if (!IsOpen())
     {
         throw std::logic_error("TUN device not open");
     }
 
-    std::vector<IpPacket> batch;
-    batch.reserve(max_batch);
-
-    // First packet: use ASIO async_read_some which properly integrates
-    // with epoll and guarantees we block until data arrives.
-    std::size_t bytes_read = co_await stream_->async_read_some(
-        asio::buffer(read_buffer_), asio::use_awaitable);
-
-    IpPacket first;
-    first.data.assign(read_buffer_.begin(), read_buffer_.begin() + bytes_read);
-    batch.push_back(std::move(first));
-
-    // Drain remaining queued packets with non-blocking reads.
-    // The fd is O_NONBLOCK (set by ASIO stream_descriptor), so read()
-    // returns -1/EAGAIN immediately when the queue is empty.
-    int fd = stream_->native_handle();
-    for (std::size_t i = 1; i < max_batch; ++i)
-    {
-        ssize_t n = ::read(fd, read_buffer_.data(), read_buffer_.size());
-        if (n <= 0)
-        {
-            break;
-        }
-
-        IpPacket pkt;
-        pkt.data.assign(read_buffer_.begin(), read_buffer_.begin() + n);
-        batch.push_back(std::move(pkt));
-    }
-
-    co_return batch;
-}
-
-asio::awaitable<std::size_t> TunDevice::ReadBatchInto(std::span<SlotBuffer> slots)
-{
-    if (!IsOpen())
-        throw std::logic_error("TUN device not open");
-
-    if (slots.empty())
-        co_return 0;
-
-    // First packet: async_read_some integrates with epoll (blocks until data arrives)
-    std::size_t bytes_read = co_await stream_->async_read_some(
-        asio::buffer(slots[0].buf, slots[0].capacity), asio::use_awaitable);
-
-    slots[0].len = bytes_read;
-    std::size_t count = 1;
-
-    // Drain remaining queued packets with non-blocking reads
-    int fd = stream_->native_handle();
-    for (std::size_t i = 1; i < slots.size(); ++i)
-    {
-        ssize_t n = ::read(fd, slots[i].buf, slots[i].capacity);
-        if (n <= 0)
-            break;
-
-        slots[i].len = static_cast<std::size_t>(n);
-        ++count;
-    }
-
-    co_return count;
-}
-
-asio::awaitable<void> TunDevice::WritePacket(const IpPacket &pkt)
-{
-    if (!IsOpen())
-    {
-        throw std::logic_error("TUN device not open");
-    }
-
-    if (pkt.data.empty())
+    if (data.empty())
     {
         throw std::invalid_argument("Cannot write empty packet");
     }
@@ -404,33 +379,12 @@ asio::awaitable<void> TunDevice::WritePacket(const IpPacket &pkt)
     // Oversized packets trigger ICMP "fragmentation needed" responses which
     // propagate path MTU discovery to the sender.
 
-    // Write packet to TUN device
-    co_await asio::async_write(*stream_, asio::buffer(pkt.data), asio::use_awaitable);
+    co_await asio::async_write(*stream_, asio::buffer(data.data(), data.size()), asio::use_awaitable);
 }
 
-std::size_t TunDevice::WriteBatchRaw(const struct iovec *iovecs, std::size_t count)
+asio::awaitable<void> TunDevice::WritePacket(const IpPacket &pkt)
 {
-    if (!IsOpen())
-        return 0;
-
-    int fd = stream_->native_handle();
-    std::size_t total_bytes = 0;
-
-    // TUN devices accept exactly one IP packet per write() call.
-    // We cannot use writev() with multiple iovecs as that would concatenate
-    // into a single (malformed) packet. Instead, iterate and write() each.
-    for (std::size_t i = 0; i < count; ++i)
-    {
-        if (iovecs[i].iov_len == 0)
-            continue;
-
-        ssize_t written = ::write(fd, iovecs[i].iov_base, iovecs[i].iov_len);
-        if (written > 0)
-            total_bytes += static_cast<std::size_t>(written);
-        // On EAGAIN / error we skip — best-effort for high-throughput path
-    }
-
-    return total_bytes;
+    co_await WritePacket(std::span<const std::uint8_t>(pkt.data));
 }
 
 int TunDevice::NativeHandle() const

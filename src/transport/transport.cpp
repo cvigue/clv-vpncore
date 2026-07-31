@@ -6,7 +6,6 @@
 #include "socket_utils.h"
 
 #include <asio/buffer.hpp>
-#include <asio/read.hpp>
 #include <asio/use_awaitable.hpp>
 #include <asio/write.hpp>
 
@@ -16,6 +15,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <span>
 #include <stdexcept>
@@ -129,8 +129,10 @@ std::pair<int, int> UdpTransport::GetSocketBufferSizes() const
 // ---------------------------------------------------------------------------
 
 TcpTransport::TcpTransport(asio::ip::tcp::socket socket)
-    : socket_(std::make_shared<asio::ip::tcp::socket>(std::move(socket)))
+    : socket_(std::make_shared<asio::ip::tcp::socket>(std::move(socket))),
+      rx_(std::make_shared<RxBuffer>())
 {
+    rx_->data.resize(kRxSize);
 }
 
 asio::awaitable<void> TcpTransport::Send(std::span<const std::uint8_t> data)
@@ -148,25 +150,92 @@ asio::awaitable<void> TcpTransport::Send(std::span<const std::uint8_t> data)
     co_await asio::async_write(*socket_, bufs, asio::use_awaitable);
 }
 
-asio::awaitable<std::vector<std::uint8_t>> TcpTransport::Receive()
+asio::awaitable<void> TcpTransport::SendRaw(std::span<const std::uint8_t> framed)
 {
-    // Read 2-byte big-endian length prefix
-    std::array<std::uint8_t, 2> lengthPrefix{};
-    co_await asio::async_read(*socket_, asio::buffer(lengthPrefix), asio::use_awaitable);
+    if (framed.empty())
+        co_return;
+    co_await asio::async_write(*socket_,
+                               asio::buffer(framed.data(), framed.size()),
+                               asio::use_awaitable);
+}
 
-    auto payloadLen = clv::netcore::read_uint<2>(lengthPrefix);
+void TcpTransport::CompactRx()
+{
+    if (rx_->begin == 0)
+        return;
+    const std::size_t avail = rx_->end - rx_->begin;
+    if (avail > 0)
+        std::memmove(rx_->data.data(), rx_->data.data() + rx_->begin, avail);
+    rx_->begin = 0;
+    rx_->end = avail;
+}
+
+asio::awaitable<bool> TcpTransport::FillRx()
+{
+    // Slide any unconsumed tail (usually a partial frame) to the front, then
+    // read as much as the kernel will give into the free space.
+    CompactRx();
+    const std::size_t space = rx_->data.size() - rx_->end;
+    if (space == 0)
+    {
+        // Fixed buffer is full with incomplete data — frame length exceeds
+        // remaining capacity (should be impossible: max frame << kRxSize).
+        throw std::runtime_error("TCP RX buffer full with incomplete frame");
+    }
+
+    const std::size_t n = co_await socket_->async_read_some(
+        asio::buffer(rx_->data.data() + rx_->end, space),
+        asio::use_awaitable);
+    if (n == 0)
+        co_return false;
+    rx_->end += n;
+    co_return true;
+}
+
+std::optional<std::span<std::uint8_t>> TcpTransport::TryPeelInPlace()
+{
+    const std::size_t avail = rx_->end - rx_->begin;
+    if (avail < 2)
+        return std::nullopt;
+
+    const auto payloadLen = clv::netcore::read_uint<2>(
+        std::span<const std::uint8_t>(rx_->data.data() + rx_->begin, 2));
 
     if (payloadLen == 0)
-        co_return std::vector<std::uint8_t>{};
+    {
+        rx_->begin += 2;
+        return std::span<std::uint8_t>{};
+    }
 
     if (payloadLen > openvpn::MAX_TCP_FRAME_SIZE)
         throw std::runtime_error("TCP frame size " + std::to_string(payloadLen)
-                                 + " exceeds maximum " + std::to_string(openvpn::MAX_TCP_FRAME_SIZE));
+                                 + " exceeds maximum "
+                                 + std::to_string(openvpn::MAX_TCP_FRAME_SIZE));
 
-    // Read exact payload
-    std::vector<std::uint8_t> payload(payloadLen);
-    co_await asio::async_read(*socket_, asio::buffer(payload), asio::use_awaitable);
-    co_return payload;
+    if (avail < 2 + payloadLen)
+        return std::nullopt;
+
+    auto *payload = rx_->data.data() + rx_->begin + 2;
+    rx_->begin += 2 + payloadLen;
+    return std::span<std::uint8_t>(payload, payloadLen);
+}
+
+asio::awaitable<std::span<std::uint8_t>> TcpTransport::ReceiveInPlace()
+{
+    for (;;)
+    {
+        if (auto frame = TryPeelInPlace())
+            co_return *frame;
+
+        if (!co_await FillRx())
+            co_return std::span<std::uint8_t>{};
+    }
+}
+
+asio::awaitable<std::vector<std::uint8_t>> TcpTransport::Receive()
+{
+    auto frame = co_await ReceiveInPlace();
+    co_return std::vector<std::uint8_t>(frame.begin(), frame.end());
 }
 
 PeerEndpoint TcpTransport::GetPeer() const
@@ -190,6 +259,54 @@ void TcpTransport::Close()
     }
 }
 
+void TcpTransport::ApplySocketBuffers(int recv_buf, int send_buf, spdlog::logger &logger)
+{
+    int fd = socket_->native_handle();
+    clv::vpn::ApplySocketBuffer(fd, SO_RCVBUFFORCE, SO_RCVBUF, recv_buf, "SO_RCVBUF", logger);
+    clv::vpn::ApplySocketBuffer(fd, SO_SNDBUFFORCE, SO_SNDBUF, send_buf, "SO_SNDBUF", logger);
+}
+
+void AppendLengthPrefixedFrame(std::vector<std::uint8_t> &out,
+                               std::span<const std::uint8_t> payload)
+{
+    if (payload.size() > 0xFFFF)
+        throw std::overflow_error("TCP frame payload exceeds 65535 bytes");
+    const auto prefix = clv::netcore::uint_to_bytes(static_cast<std::uint16_t>(payload.size()));
+    const std::size_t start = out.size();
+    out.resize(start + 2 + payload.size());
+    out[start] = prefix[0];
+    out[start + 1] = prefix[1];
+    std::memcpy(out.data() + start + 2, payload.data(), payload.size());
+}
+
+std::pair<std::size_t, std::span<std::uint8_t>>
+BeginTcpTxFrame(std::vector<std::uint8_t> &out, std::size_t ovpn_cap)
+{
+    const std::size_t prefix_index = out.size();
+    out.resize(prefix_index + 2 + ovpn_cap);
+    return {prefix_index,
+            std::span<std::uint8_t>(out.data() + prefix_index + 2, ovpn_cap)};
+}
+
+void FinishTcpTxFrame(std::vector<std::uint8_t> &out,
+                      std::size_t prefix_index,
+                      std::size_t wire_len)
+{
+    if (wire_len > 0xFFFF)
+        throw std::overflow_error("TCP frame payload exceeds 65535 bytes");
+    if (prefix_index + 2 + wire_len > out.size())
+        throw std::logic_error("FinishTcpTxFrame: wire_len exceeds reserved room");
+    const auto prefix = clv::netcore::uint_to_bytes(static_cast<std::uint16_t>(wire_len));
+    out[prefix_index] = prefix[0];
+    out[prefix_index + 1] = prefix[1];
+    out.resize(prefix_index + 2 + wire_len);
+}
+
+void AbortTcpTxFrame(std::vector<std::uint8_t> &out, std::size_t prefix_index)
+{
+    out.resize(prefix_index);
+}
+
 // ---------------------------------------------------------------------------
 // TransportHandle
 // ---------------------------------------------------------------------------
@@ -199,6 +316,16 @@ asio::awaitable<void> TransportHandle::Send(std::span<const std::uint8_t> data)
     return std::visit([data](auto &t)
     { return t.Send(data); },
                       *this);
+}
+
+asio::awaitable<void> TransportHandle::SendRaw(std::span<const std::uint8_t> framed)
+{
+    if (auto *tcp = std::get_if<TcpTransport>(this))
+    {
+        co_await tcp->SendRaw(framed);
+        co_return;
+    }
+    throw std::logic_error("TransportHandle::SendRaw is TCP-only");
 }
 
 asio::awaitable<std::vector<std::uint8_t>> TransportHandle::Receive()

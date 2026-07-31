@@ -186,7 +186,7 @@ TEST_F(CryptoContextLimitsTest, GcmHardLimitBlocksEncrypt)
     EXPECT_FALSE(channel_->AllocateOutboundPacketId().has_value());
 
     std::vector<std::uint8_t> buf(kDataV2Overhead + 16, 0);
-    EXPECT_EQ(channel_->EncryptPacketInPlace(buf, 16, SessionId{1}), 0u);
+    EXPECT_EQ(channel_->EncryptPacketInPlace(buf, 16, 1u), 0u);
 }
 
 TEST_F(CryptoContextLimitsTest, RekeyClearsBlockAndPreservesCounterBelowWrap)

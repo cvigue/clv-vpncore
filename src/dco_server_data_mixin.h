@@ -28,9 +28,9 @@
 #include "openvpn/key_derivation.h"
 #include "openvpn/ovpn_dco.h"
 #include "openvpn/packet.h"
-#include "openvpn/protocol_constants.h"
 #include "openvpn/session_manager.h"
 #include "openvpn/vpn_config.h"
+#include "peer_slot_table.h"
 #include "traffic_policy.h"
 #include "transport/transport.h"
 #include "tunnel_zone.h"
@@ -76,8 +76,6 @@
 #include <optional>
 #include <span>
 #include <string>
-#include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -143,6 +141,19 @@ class DcoServerDataMixin : public DcoCore<Derived>
 
   public:
     // -- Data plane setup (called from ServerControlBase::ConfigureDataPlane) ---
+
+    /**
+     * @brief Wire the peer-id slot table before StartDataPath.
+     *
+     * The table carries both peer-id occupancy and kernel-peer existence, so
+     * it must be set before any peer is created.
+     *
+     * @param slots Immortal slot table owned by the control plane
+     */
+    void SetPeerSlots(PeerSlotTable *slots)
+    {
+        peer_slots_ = slots;
+    }
 
     /**
      * @brief Register hub attachment with the tunnel zone.
@@ -212,10 +223,16 @@ class DcoServerDataMixin : public DcoCore<Derived>
             return false;
         }
 
-        uint32_t peer_id = GetPeerId(session);
+        const uint32_t peer_id = GetPeerId(session);
+        if (peer_id == kPeerIdUndef)
+        {
+            this->logger_->error("DCO: Cannot install keys — no peer-id slot held");
+            return false;
+        }
 
-        auto it = peer_primary_key_.find(peer_id);
-        bool is_renegotiation = (it != peer_primary_key_.end() && it->second != key_id);
+        auto &crypto = session->GetCryptoContext();
+        const bool is_renegotiation = crypto.HasDcoKeysInstalled()
+                                      && crypto.GetCurrentKeyId() != key_id;
         uint8_t key_slot = is_renegotiation ? OVPN_KEY_SLOT_SECONDARY
                                             : OVPN_KEY_SLOT_PRIMARY;
 
@@ -239,8 +256,6 @@ class DcoServerDataMixin : public DcoCore<Derived>
             }
         }
 
-        peer_primary_key_[peer_id] = key_id;
-
         // Configure kernel keepalive on first key install
         if (!is_renegotiation)
         {
@@ -256,8 +271,8 @@ class DcoServerDataMixin : public DcoCore<Derived>
             }
         }
 
-        session->GetCryptoContext().SetCurrentKeyId(key_id);
-        session->GetCryptoContext().SetDcoKeysInstalled(true);
+        crypto.SetCurrentKeyId(key_id);
+        crypto.SetDcoKeysInstalled(true);
 
         this->logger_->info("DCO: Keys installed successfully in kernel (key_id={})", key_id);
         return true;
@@ -266,30 +281,41 @@ class DcoServerDataMixin : public DcoCore<Derived>
     // -- Peer management ----------------------------------------------------
 
     /**
-     * @brief Extract the DCO peer_id from a session identifier.
-     * @param session Connection whose session ID encodes the peer_id
-     * @return Low 24 bits of the session ID
+     * @brief Wire / DCO peer id for a session (slot lease; never derived from session id).
+     * @param session Connection whose peer-id lease is read
+     * @return 24-bit peer id, or @c kPeerIdUndef when no slot is held
      */
     uint32_t GetPeerId(Connection *session) const
     {
-        return static_cast<uint32_t>(session->GetSessionId().value & openvpn::PEER_ID_MASK);
+        return session->GetWirePeerId().value_or(kPeerIdUndef);
     }
 
     /**
-     * @brief Remove a peer from the kernel and local tracking maps.
+     * @brief Remove a peer from the kernel.
+     *
+     * Must run before the session's peer-id can be reallocated: the kernel
+     * indexes peers by that id, so a surviving kernel peer would collide with
+     * the next client to receive the same id. Skips netlink when the peer was
+     * already reaped (kernel expiry), so a DEL_PEER echo is not answered with
+     * another DEL_PEER.
+     *
      * @param session Connection being torn down
      */
-    void RemoveDcoPeer(Connection *session)
+    void RemovePeer(Connection *session)
     {
-        if (!this->dco_initialized_)
+        if (!this->dco_initialized_ || !session || !peer_slots_)
             return;
 
-        uint32_t peer_id = GetPeerId(session);
-        this->RemovePeerImpl(peer_id);
+        auto peer_id_opt = session->GetWirePeerId();
+        if (!peer_id_opt)
+            return;
 
-        created_peers_.erase(peer_id);
-        peer_primary_key_.erase(peer_id);
-        peer_to_session_.erase(peer_id);
+        const uint32_t peer_id = *peer_id_opt;
+        if (!peer_slots_->HasKernelPeer(peer_id))
+            return;
+
+        this->RemovePeerImpl(peer_id);
+        peer_slots_->SetKernelPeer(peer_id, false);
     }
 
     // -- Receive loop (CRTP — no std::function) -----------------------------
@@ -481,24 +507,22 @@ class DcoServerDataMixin : public DcoCore<Derived>
                                         dead_peer_id,
                                         reason_str);
 
+                    // Echoes of our own DEL_PEER; the slot is already retiring.
                     if (reason == OVPN_DEL_PEER_REASON_USERSPACE || reason == OVPN_DEL_PEER_REASON_TEARDOWN)
                         break;
 
-                    auto sit = peer_to_session_.find(dead_peer_id);
-                    if (sit != peer_to_session_.end())
+                    auto sid = peer_slots_ ? peer_slots_->LookupSession(dead_peer_id)
+                                           : std::nullopt;
+                    if (!sid)
                     {
-                        auto sid = sit->second;
-                        created_peers_.erase(dead_peer_id);
-                        peer_primary_key_.erase(dead_peer_id);
-                        peer_to_session_.erase(sit);
+                        this->logger_->warn("DCO: DEL_PEER for unknown peer {}", dead_peer_id);
+                        break;
+                    }
 
-                        this->derived().OnPeerDead(sid);
-                    }
-                    else
-                    {
-                        this->logger_->warn("DCO: DEL_PEER for unknown peer {}",
-                                            dead_peer_id);
-                    }
+                    // The kernel already reaped the peer: teardown must not
+                    // send a second DEL_PEER for this id.
+                    peer_slots_->SetKernelPeer(dead_peer_id, false);
+                    this->derived().OnPeerDead(openvpn::SessionId{*sid});
 
                     break;
                 }
@@ -617,11 +641,25 @@ class DcoServerDataMixin : public DcoCore<Derived>
 
     bool CreateDcoPeer(Connection *session)
     {
-        uint32_t peer_id = GetPeerId(session);
-
-        if (created_peers_.count(peer_id) > 0)
+        if (!peer_slots_)
         {
-            this->logger_->debug("DCO: Peer {} already exists, skipping creation", peer_id);
+            this->logger_->error("DCO: peer slot table not wired");
+            return false;
+        }
+
+        const uint32_t peer_id = GetPeerId(session);
+        if (peer_id == kPeerIdUndef)
+        {
+            this->logger_->error("DCO: No wire peer-id allocated for session {:016x}",
+                                 session->GetSessionId().value);
+            return false;
+        }
+
+        if (peer_slots_->HasKernelPeer(peer_id))
+        {
+            // The slot lease is per-session, so a live kernel peer on this id
+            // can only be this session's.
+            this->logger_->debug("DCO: Peer {} already exists for this session, skipping", peer_id);
             return true;
         }
 
@@ -650,8 +688,8 @@ class DcoServerDataMixin : public DcoCore<Derived>
         if (!this->CreatePeerImpl(peer_id, peer_ep, static_cast<int>(socket_.native_handle()), vpn_ipv4, vpn_ipv6))
             return false;
 
-        created_peers_.insert(peer_id);
-        peer_to_session_[peer_id] = session->GetSessionId();
+        peer_slots_->SetKernelPeer(peer_id, true);
+        peer_slots_->Occupy(peer_id, session->GetSessionId().value, peer_ep);
         return true;
     }
 
@@ -659,9 +697,7 @@ class DcoServerDataMixin : public DcoCore<Derived>
     asio::ip::udp::socket &socket_;
     NetworkConfig network_config_;
     TunnelZoneAttachmentGuard hub_attachment_;
-    std::unordered_set<uint32_t> created_peers_;
-    std::unordered_map<uint32_t, uint8_t> peer_primary_key_;
-    std::unordered_map<uint32_t, openvpn::SessionId> peer_to_session_;
+    PeerSlotTable *peer_slots_ = nullptr;
     std::optional<asio::posix::stream_descriptor> nl_stream_;
 };
 

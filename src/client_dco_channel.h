@@ -28,7 +28,6 @@
 #include "openvpn/config_exchange.h"
 #include "openvpn/crypto_algorithms.h"
 #include "openvpn/crypto_context.h"
-#include "openvpn/packet.h"
 #include "openvpn/vpn_config.h"
 #include "transport/transport.h"
 #include <net/ipv4_utils.h>
@@ -36,7 +35,6 @@
 #include <asio/io_context.hpp>
 
 #include <chrono>
-#include <exception>
 #include <spdlog/logger.h>
 
 #include <atomic>
@@ -132,7 +130,7 @@ class ClientDcoChannel : public DcoClientDataMixin<ClientDcoChannel<Adapter>>
     {
         auto &udp = std::get<transport::UdpTransport>(handle);
         DataMixinBase::BindSocket(udp.SharedSocket());
-        DataMixinBase::SetPeer(peer, openvpn::SessionId{static_cast<std::uint64_t>(peer_id)});
+        DataMixinBase::SetPeer(peer, peer_id);
 
         if (!pending_key_material_.empty())
         {

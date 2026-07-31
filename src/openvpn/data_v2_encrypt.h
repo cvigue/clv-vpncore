@@ -33,7 +33,7 @@ namespace clv::vpn::openvpn {
 [[nodiscard]] inline std::size_t EncryptDataV2InPlace(
     std::span<std::uint8_t> buf,
     std::size_t payload_len,
-    SessionId session_id,
+    std::uint32_t peer_id,
     std::uint32_t packet_id,
     std::uint8_t key_id,
     std::span<const std::uint8_t> cipher_iv,
@@ -43,8 +43,8 @@ namespace clv::vpn::openvpn {
     if (buf.size() < total_len)
         return 0;
 
-    const std::uint32_t peer_id = session_id.value & PEER_ID_MASK;
-    const std::uint32_t opcode_peer_id = (MakeOpcodeByte(Opcode::P_DATA_V2, key_id) << 24) | peer_id;
+    const std::uint32_t wire_peer_id = peer_id & PEER_ID_MASK;
+    const std::uint32_t opcode_peer_id = (MakeOpcodeByte(Opcode::P_DATA_V2, key_id) << 24) | wire_peer_id;
     auto hdr_bytes = clv::netcore::uint_to_bytes(opcode_peer_id);
     std::memcpy(buf.data(), hdr_bytes.data(), kDataV2HeaderLen);
 

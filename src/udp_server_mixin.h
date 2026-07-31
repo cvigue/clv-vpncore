@@ -36,6 +36,7 @@
 #include "openvpn/protocol_constants.h"
 #include "openvpn/session_manager.h"
 #include "openvpn/vpn_config.h"
+#include "peer_slot_table.h"
 #include "routing_table.h"
 #include "udp_engine_types.h"
 #include "transport/batch_constants.h"
@@ -98,11 +99,20 @@ class UdpServerMixin : public UdpCore<Derived, MultiPeerPolicy>
 
     /**
      * @brief Wire QSBR publication context before StartDataPath.
-     * @param ctx Split-datapath engine context
+     * @param ctx Data-plane snapshot context owned by the control plane
      */
-    void SetSplitContext(UdpEngineContext *ctx)
+    void SetDataPlaneContext(DataPlaneContext *ctx)
     {
-        split_ctx_ = ctx;
+        data_plane_ = ctx;
+    }
+
+    /**
+     * @brief Wire the peer-id slot table before StartDataPath.
+     * @param slots Immortal slot table owned by the control plane
+     */
+    void SetPeerSlots(PeerSlotTable *slots)
+    {
+        peer_slots_ = slots;
     }
 
     /**
@@ -119,18 +129,20 @@ class UdpServerMixin : public UdpCore<Derived, MultiPeerPolicy>
     /** @brief Start multi-peer RX/TX worker threads. */
     asio::awaitable<void> StartDataPath()
     {
-        if (!split_ctx_ || !tun_device_ || socket_fd_ < 0)
+        if (!data_plane_ || !peer_slots_ || !tun_device_ || socket_fd_ < 0)
         {
             Core::logger().error("UdpServerMixin::StartDataPath: "
-                                 "missing split context, TUN device, or socket fd");
+                                 "missing data-plane context, peer slots, TUN device, or socket fd");
             co_return;
         }
 
         Core::CoreBind(socket_fd_, *tun_device_);
 
-        // Wire QSBR context and socket into the multi-peer policy
+        // Wire QSBR context, slot table, and socket into the multi-peer policy
         auto &pol = Core::policy();
-        pol.ctx = split_ctx_;
+        pol.ctx = data_plane_;
+        pol.slots = peer_slots_;
+        pol.float_sink = this->derived().FloatSink();
         pol.socket_fd = socket_fd_;
 
         Core::CoreStart();
@@ -201,6 +213,11 @@ class UdpServerMixin : public UdpCore<Derived, MultiPeerPolicy>
     }
 
     // -- Key management ------------------------------------------------------
+
+    /** @brief No-op; userspace UDP holds no per-peer kernel state. */
+    void RemovePeer(Connection * /*session*/)
+    {
+    }
 
     /**
      * @brief Derive and install session keys on a connection.
@@ -350,7 +367,8 @@ class UdpServerMixin : public UdpCore<Derived, MultiPeerPolicy>
     std::chrono::seconds keepalive_interval_;
     std::chrono::seconds keepalive_timeout_;
     const std::atomic<bool> &running_;
-    UdpEngineContext *split_ctx_ = nullptr;
+    DataPlaneContext *data_plane_ = nullptr;
+    PeerSlotTable *peer_slots_ = nullptr;
     int socket_fd_ = -1;
     asio::steady_timer keepalive_timer_;
 };

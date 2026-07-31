@@ -160,13 +160,13 @@ struct VpnConfig
         int socket_recv_buffer = 0;     ///< SO_RCVBUF size in bytes (0 = OS default)
         int socket_send_buffer = 0;     ///< SO_SNDBUF size in bytes (0 = OS default)
         int batch_size = 0;             ///< recvmmsg/sendmmsg batch depth (0 = default)
-        int tx_drain_depth = 1024;      ///< Max TUN reads per TX drain cycle
-        int tx_send_batch = 64;         ///< Max packets per sendmmsg call (0 = tx_drain_depth)
-        int tx_small_pkt_flush = 384;   ///< Payload (bytes) triggering early drain flush (0 = disabled)
+        int tx_drain_depth = 1024;      ///< Max TUN reads per TX drain cycle (UDP)
+        int tx_send_batch = 64;         ///< Max pkts per sendmmsg / TCP SendRaw coalesce (0 = path default)
+        int tx_small_pkt_flush = 384;   ///< Payload bytes triggering early TX/RX flush (0 = disabled)
         int rx_thread_affinity = -2;    ///< RX worker thread CPU pin (-1=off, -2=auto, ≥0=core)
         int tx_thread_affinity = -2;    ///< TX drain thread CPU pin (-1=off, -2=auto, ≥0=core)
         int max_recv = 0;               ///< Arena/ring size for recvmmsg (0 = same as batch_size)
-        int rx_process_batch = 64;      ///< Mini-batch size for two-pass decrypt+write (0 = all at once)
+        int rx_process_batch = 64;      ///< UDP decrypt mini-batch / TCP pending TUN writes before flush (0 = no count cap)
     } performance;
 
     // ---- Shared logging settings ----

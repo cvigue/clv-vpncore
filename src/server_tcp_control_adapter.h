@@ -15,11 +15,13 @@
 #include "server_control_base.h"
 #include "server_data_adapter.h"
 #include "transport/transport.h"
+#include "udp_engine_types.h"
 
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
 
 #include <cstdint>
+#include <memory>
 #include <utility>
 #include <vector>
 
@@ -42,8 +44,6 @@ class ServerTcpTransport : public ServerControlBase<ServerTcpTransport>
     explicit ServerTcpTransport(ServerControlConfig cfg)
         : ServerControlBase(std::move(cfg)), data_adapter_(*this), channel_(config_->server->host,
                                                                             config_->server->port,
-                                                                            routing_table_,
-                                                                            routing_table_v6_,
                                                                             session_manager_,
                                                                             logger_manager_->GetLogger(logging::Subsystem::dataio),
                                                                             rx_counters_,
@@ -51,7 +51,8 @@ class ServerTcpTransport : public ServerControlBase<ServerTcpTransport>
                                                                             config_->server->keepalive.first,
                                                                             config_->server->keepalive.second,
                                                                             *running_,
-                                                                            data_adapter_)
+                                                                            data_adapter_,
+                                                                            config_->performance)
     {
     }
 
@@ -70,6 +71,8 @@ class ServerTcpTransport : public ServerControlBase<ServerTcpTransport>
     void Start()
     {
         ConfigureDataPlane();
+        data_plane_ = std::make_unique<DataPlaneContext>();
+        channel_.SetDataPlaneContext(data_plane_.get());
         asio::co_spawn(*io_context_, channel_.StartDataPath(), asio::detached);
         logger_->info("TCP mode active — per-client coroutines on internal thread");
         StartBase();

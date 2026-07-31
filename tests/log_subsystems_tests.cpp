@@ -3,6 +3,7 @@
 #include "log_subsystems.h"
 
 #include <gtest/gtest.h>
+#include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
 
 #include <string>
@@ -23,6 +24,8 @@ class SubsystemLoggerManagerTest : public ::testing::Test
     void TearDown() override
     {
         spdlog::drop_all();
+        // drop_all() also removes the process default logger.
+        spdlog::set_default_logger(spdlog::stdout_color_mt("stdout"));
     }
 };
 
