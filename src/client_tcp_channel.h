@@ -5,11 +5,12 @@
 
 /**
  * @file client_tcp_channel.h
- * @brief Client-side TCP data channel (single-packet coroutine path).
+ * @brief Client-side TCP data channel (stream-framed coroutine path).
  *
- * Coroutine-based single-packet encrypt/decrypt on the main io_context.
- * No batching, no raw FD, no extra threads — just TCP recv → decrypt →
- * TUN write and TUN read → encrypt → TCP send.
+ * Coroutine-based encrypt/decrypt on the main io_context. TcpTransport peels
+ * multi-frame reads; TX encrypts length-prefixed frames in-place into the
+ * coalesce buffer; RX decrypts a short burst then flushes TUN writes.
+ * No UDP-style batch arena or extra threads.
  *
  * Lifecycle: construct → SetTransport (provides TcpTransport*)
  * → EngineInstallKeys → StartTunReceiver (launches coroutine loops)
@@ -26,11 +27,13 @@
 #include "openvpn/config_exchange.h"
 #include "openvpn/crypto_algorithms.h"
 #include "openvpn/crypto_context.h"
+#include "openvpn/data_v2_wire.h"
 #include "openvpn/session_key_install.h"
 #include "openvpn/packet.h"
 #include "openvpn/protocol_constants.h"
 #include "openvpn/vpn_config.h"
 #include "platform/linux/tun/tun_device.h"
+#include "transport/batch_constants.h"
 #include "transport/transport.h"
 
 #include <chrono>
@@ -49,17 +52,18 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <exception>
+#include <limits>
 #include <memory>
 #include <span>
 #include <utility>
-#include <variant>
 #include <vector>
 
 namespace clv::vpn {
 
 /**
- * @brief Client P2P TCP data channel — coroutine single-packet path.
+ * @brief Client P2P TCP data channel — coroutine stream-framed path.
  *
  * Templated on the DataAdapter type for fully static dispatch —
  * no function pointers, no type erasure.  The compiler can inline
@@ -75,22 +79,32 @@ class ClientTcpChannel
      * @brief Construct the client TCP data channel.
      * @param io_context ASIO context for coroutine loops
      * @param logger Logger for data-path events
-     * @param config Client configuration (unused at construction)
+     * @param config Client configuration (performance coalesce knobs)
      * @param running Shared stop flag
      * @param adapter Data→control adapter
      */
     ClientTcpChannel(asio::io_context &io_context,
                      spdlog::logger &logger,
-                     const VpnConfig & /*config*/,
+                     const VpnConfig &config,
                      const std::atomic<bool> &running,
                      Adapter &adapter)
         : io_context_(io_context),
           logger_(&logger),
           running_(running),
           crypto_context_(logger),
-          adapter_(&adapter)
+          adapter_(&adapter),
+          tx_send_batch_(transport::EffectivePositiveCount(config.performance.tx_send_batch,
+                                                           transport::kDefaultTcpSendBatch)),
+          tx_small_pkt_flush_(transport::EffectivePositiveCount(
+              config.performance.tx_small_pkt_flush, transport::kDefaultTcpSmallPktFlush)),
+          rx_process_batch_(transport::EffectivePositiveCount(
+              config.performance.rx_process_batch, transport::kDefaultTcpRxProcessBatch))
     {
-        logger_->info("Client TCP channel initialized");
+        logger_->info("Client TCP channel initialized (tx_send_batch={} "
+                      "tx_small_pkt_flush={} rx_process_batch={})",
+                      tx_send_batch_,
+                      tx_small_pkt_flush_,
+                      rx_process_batch_);
     }
 
     /** @brief Stop the data path and close the TUN device. */
@@ -291,7 +305,7 @@ class ClientTcpChannel
     void SetBatchSize(std::size_t)
     { /* no-op */
     }
-    /** @brief Always 1 for the single-packet TCP path. */
+    /** @brief Always 1; TCP has no recvmmsg-style batch_size knob. */
     std::size_t GetBatchSize() const
     {
         return 1;
@@ -306,14 +320,40 @@ class ClientTcpChannel
     }
 
   private:
-    asio::awaitable<void> TcpToTunLoop()
+    /** @brief Write queued plaintext spans to TUN; clears the queue. @return false on write failure. */
+    asio::awaitable<bool> FlushPendingTun()
     {
-        while (running_)
+        for (auto plaintext : tun_pending_)
         {
-            std::vector<std::uint8_t> wire;
             try
             {
-                wire = co_await tcp_->Receive();
+                co_await tun_device_->WritePacket(plaintext);
+                tun_writes_.fetch_add(1, std::memory_order_relaxed);
+            }
+            catch (const std::exception &e)
+            {
+                if (running_)
+                    logger_->error("TUN write error: {}", e.what());
+                tun_pending_.clear();
+                co_return false;
+            }
+        }
+        tun_pending_.clear();
+        co_return true;
+    }
+
+    asio::awaitable<void> TcpToTunLoop()
+    {
+        const std::size_t max_tun_burst = rx_process_batch_ > 0 ? rx_process_batch_ : std::numeric_limits<std::size_t>::max();
+        tun_pending_.clear();
+        tun_pending_.reserve(rx_process_batch_ > 0 ? rx_process_batch_ : 32);
+
+        while (running_)
+        {
+            std::span<std::uint8_t> wire;
+            try
+            {
+                wire = co_await tcp_->ReceiveInPlace();
             }
             catch (const std::exception &e)
             {
@@ -325,90 +365,167 @@ class ClientTcpChannel
             if (wire.empty())
                 break;
 
-            bytes_received_.fetch_add(wire.size(), std::memory_order_relaxed);
-            packets_received_.fetch_add(1, std::memory_order_relaxed);
-
-            if (adapter_)
-                adapter_->OnRxActivity();
-
-            const auto opcode = openvpn::GetOpcode(wire[0]);
-            if (openvpn::IsDataPacket(opcode) && keys_installed_ && crypto_context_.HasValidKeys())
+            bool disconnected = false;
+            for (;;)
             {
-                auto plaintext = crypto_context_.DecryptPacketInPlace(wire);
-                if (plaintext.empty())
-                {
-                    decrypt_failures_.fetch_add(1, std::memory_order_relaxed);
-                    continue;
-                }
+                bytes_received_.fetch_add(wire.size(), std::memory_order_relaxed);
+                packets_received_.fetch_add(1, std::memory_order_relaxed);
 
-                packets_decrypted_.fetch_add(1, std::memory_order_relaxed);
+                if (adapter_)
+                    adapter_->OnRxActivity();
 
-                switch (openvpn::ClassifyDecryptedPayload(plaintext))
+                const auto opcode = openvpn::GetOpcode(wire[0]);
+                if (openvpn::IsDataPacket(opcode) && keys_installed_ && crypto_context_.HasValidKeys())
                 {
-                case openvpn::DecryptedPayloadDisposition::Keepalive:
-                    continue;
-                case openvpn::DecryptedPayloadDisposition::Drop:
-                    continue;
-                case openvpn::DecryptedPayloadDisposition::Forward:
+                    auto plaintext = crypto_context_.DecryptPacketInPlace(wire);
+                    if (plaintext.empty())
                     {
-                        tun::IpPacket pkt;
-                        pkt.data.assign(plaintext.begin(), plaintext.end());
+                        decrypt_failures_.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    else
+                    {
+                        packets_decrypted_.fetch_add(1, std::memory_order_relaxed);
 
-                        try
+                        switch (openvpn::ClassifyDecryptedPayload(plaintext))
                         {
-                            co_await tun_device_->WritePacket(pkt);
-                            tun_writes_.fetch_add(1, std::memory_order_relaxed);
-                        }
-                        catch (const std::exception &e)
-                        {
-                            if (running_)
-                                logger_->error("TUN write error: {}", e.what());
+                        case openvpn::DecryptedPayloadDisposition::Keepalive:
+                        case openvpn::DecryptedPayloadDisposition::Drop:
+                            break;
+                        case openvpn::DecryptedPayloadDisposition::Forward:
+                            // Plaintext aliases the link buffer until the next fill.
+                            tun_pending_.push_back(plaintext);
+                            if ((tx_small_pkt_flush_ > 0
+                                 && plaintext.size() < tx_small_pkt_flush_)
+                                || tun_pending_.size() >= max_tun_burst)
+                            {
+                                if (!co_await FlushPendingTun())
+                                    disconnected = true;
+                            }
                             break;
                         }
-                        continue;
                     }
                 }
+                else
+                {
+                    if (!co_await FlushPendingTun())
+                    {
+                        disconnected = true;
+                        break;
+                    }
+                    if (adapter_)
+                    {
+                        adapter_->OnControlPacket(
+                            std::vector<std::uint8_t>(wire.begin(), wire.end()),
+                            transport::PeerEndpoint{});
+                    }
+                }
+
+                if (disconnected)
+                    break;
+
+                if (auto next = tcp_->TryPeelInPlace())
+                {
+                    wire = *next;
+                    if (wire.empty())
+                    {
+                        disconnected = true;
+                        break;
+                    }
+                    continue;
+                }
+                break;
             }
 
-            if (adapter_)
-                adapter_->OnControlPacket(std::move(wire), transport::PeerEndpoint{});
+            if (!co_await FlushPendingTun())
+                disconnected = true;
+
+            if (disconnected)
+                break;
         }
     }
 
     asio::awaitable<void> TunToTcpLoop()
     {
         openvpn::SessionId session_id{};
+        constexpr std::size_t kOff = openvpn::kDataV2Overhead;
+        constexpr std::size_t kIpCap = tun::TunDevice::MAX_PACKET_SIZE;
+        constexpr std::size_t kOvpnCap = kOff + kIpCap;
+        constexpr std::size_t kMaxBatchBytes = 64 * 1024;
+        tx_batch_.clear();
+        tx_batch_.reserve(kMaxBatchBytes);
 
         while (running_)
         {
-            tun::IpPacket pkt;
+            tx_batch_.clear();
+            std::size_t batch_frames = 0;
+            std::size_t batch_wire_bytes = 0;
+
+            auto slot = transport::BeginTcpTxFrame(tx_batch_, kOvpnCap);
+            std::size_t ip_len = 0;
             try
             {
-                pkt = co_await tun_device_->ReadPacket();
+                ip_len = co_await tun_device_->ReadPacketInto(slot.second.subspan(kOff));
                 tun_reads_.fetch_add(1, std::memory_order_relaxed);
             }
             catch (const std::exception &e)
             {
+                transport::AbortTcpTxFrame(tx_batch_, slot.first);
                 if (running_)
                     logger_->error("TUN read error: {}", e.what());
                 break;
             }
 
-            if (pkt.data.empty())
-                continue;
-
-            auto encrypted = crypto_context_.EncryptPacket(pkt.data, session_id);
-            if (encrypted.empty())
+            for (;;)
             {
-                send_errors_.fetch_add(1, std::memory_order_relaxed);
-                continue;
+                if (ip_len == 0)
+                {
+                    transport::AbortTcpTxFrame(tx_batch_, slot.first);
+                    break;
+                }
+
+                const auto wire_len = crypto_context_.EncryptPacketInPlace(
+                    slot.second, ip_len, session_id);
+                if (wire_len == 0)
+                {
+                    transport::AbortTcpTxFrame(tx_batch_, slot.first);
+                    send_errors_.fetch_add(1, std::memory_order_relaxed);
+                }
+                else
+                {
+                    transport::FinishTcpTxFrame(tx_batch_, slot.first, wire_len);
+                    ++batch_frames;
+                    batch_wire_bytes += wire_len;
+                }
+
+                if ((tx_small_pkt_flush_ > 0 && ip_len < tx_small_pkt_flush_)
+                    || batch_frames >= tx_send_batch_ || tx_batch_.size() >= kMaxBatchBytes)
+                    break;
+
+                slot = transport::BeginTcpTxFrame(tx_batch_, kOvpnCap);
+                try
+                {
+                    ip_len = tun_device_->TryReadPacketInto(slot.second.subspan(kOff));
+                    if (ip_len > 0)
+                        tun_reads_.fetch_add(1, std::memory_order_relaxed);
+                }
+                catch (const std::exception &e)
+                {
+                    transport::AbortTcpTxFrame(tx_batch_, slot.first);
+                    if (running_)
+                        logger_->error("TUN read error: {}", e.what());
+                    ip_len = 0;
+                    break;
+                }
             }
+
+            if (tx_batch_.empty())
+                continue;
 
             try
             {
-                co_await tcp_->Send(encrypted);
-                packets_sent_.fetch_add(1, std::memory_order_relaxed);
-                bytes_sent_.fetch_add(encrypted.size(), std::memory_order_relaxed);
+                co_await tcp_->SendRaw(tx_batch_);
+                packets_sent_.fetch_add(batch_frames, std::memory_order_relaxed);
+                bytes_sent_.fetch_add(batch_wire_bytes, std::memory_order_relaxed);
                 last_tx_ns_.store(
                     std::chrono::steady_clock::now().time_since_epoch().count(),
                     std::memory_order_relaxed);
@@ -448,6 +565,11 @@ class ClientTcpChannel
     std::atomic<std::int64_t> last_tx_ns_{0};
     std::atomic<std::uint64_t> tun_writes_{0};
     std::atomic<std::uint64_t> send_errors_{0};
+    std::size_t tx_send_batch_ = transport::kDefaultTcpSendBatch;
+    std::size_t tx_small_pkt_flush_ = transport::kDefaultTcpSmallPktFlush;
+    std::size_t rx_process_batch_ = transport::kDefaultTcpRxProcessBatch;
+    std::vector<std::uint8_t> tx_batch_;
+    std::vector<std::span<const std::uint8_t>> tun_pending_;
 };
 
 } // namespace clv::vpn

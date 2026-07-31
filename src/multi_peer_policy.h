@@ -192,8 +192,9 @@ struct MultiPeerPolicy
     /**
      * @brief Acquire per-batch QSBR snapshots and report quiescent state.
      *
-     * Called by TxLoop after ReadBatchInto, before the encrypt loop.
-     * Returns false only if the QSBR context is not yet set.
+     * Called by TxLoop after the TUN fill pass (`::read` into arena slots),
+     * before the encrypt loop. Returns false only if the QSBR context is not
+     * yet set.
      */
     bool TxReady() noexcept
     {

@@ -1033,6 +1033,12 @@ void ClientControlPlane<ChannelTpl>::InitializeTransport()
                                 config_->performance.socket_send_buffer,
                                 *logger_);
     }
+    else if (auto *tcp = std::get_if<transport::TcpTransport>(&*transport_))
+    {
+        tcp->ApplySocketBuffers(config_->performance.socket_recv_buffer,
+                                config_->performance.socket_send_buffer,
+                                *logger_);
+    }
 }
 
 template <template <typename> class ChannelTpl>

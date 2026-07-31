@@ -4,14 +4,13 @@
 #define CLV_VPN_TUN_TUN_DEVICE_H
 
 #include <asio.hpp>
+#include <array>
 #include <cstdint>
 #include <fcntl.h>
 #include <memory>
 #include <span>
 #include <string>
 #include <vector>
-
-#include <sys/uio.h> // struct iovec for WriteBatchRaw
 
 namespace clv::vpn::tun {
 
@@ -51,11 +50,13 @@ struct IpPacket
 /**
  * @brief TUN/TAP virtual network device
  *
- * Platform-specific virtual network interface for VPN tunneling.
- * Supports:
- * - Linux TUN devices (/dev/net/tun)
- * - Async I/O with ASIO
- * - IPv4 and IPv6 packets
+ * Owns and configures a Linux TUN fd (/dev/net/tun): create, addresses, MTU,
+ * up/down, close. Provides single-packet async I/O (`ReadPacket` /
+ * `WritePacket`) for TCP and other one-frame-at-a-time paths.
+ *
+ * High-PPS engines (e.g. UdpCore) should borrow `NativeHandle()` for
+ * non-blocking `::read` / `::write` and a caller-owned `dup` + Asio wait —
+ * that is the supported contract, not a layering bypass.
  *
  * Usage:
  * @code
@@ -65,9 +66,12 @@ struct IpPacket
  * tun.SetMtu(1500);
  * tun.BringUp();
  *
- * // Async read/write
+ * // Async single-packet I/O
  * auto pkt = co_await tun.ReadPacket();
  * co_await tun.WritePacket(pkt);
+ *
+ * // Or borrow the fd for an engine fill/write loop
+ * int fd = tun.NativeHandle();
  * @endcode
  */
 class TunDevice
@@ -217,39 +221,20 @@ class TunDevice
     asio::awaitable<IpPacket> ReadPacket();
 
     /**
-     * @brief Read a batch of packets from TUN device (async)
-     *
-     * Waits for the TUN fd to become readable, then performs non-blocking
-     * reads in a loop to drain up to @p max_batch packets without
-     * re-entering epoll. This is the TUN equivalent of recvmmsg batching.
-     *
-     * @param max_batch Maximum number of packets to read per wake
-     * @return Vector of 1..max_batch IP packets
+     * @brief Read one TUN packet directly into @p dest (no intermediate copy).
+     * @param dest Destination for IP packet bytes (must be non-empty)
+     * @return Bytes read into @p dest
      * @throws asio::system_error on I/O error
      */
-    asio::awaitable<std::vector<IpPacket>> ReadBatch(std::size_t max_batch);
+    asio::awaitable<std::size_t> ReadPacketInto(std::span<std::uint8_t> dest);
 
     /**
-     * @brief Caller-provided buffer slot for zero-copy TUN reads.
+     * @brief Non-blocking TUN read into @p dest; 0 if would block.
+     * @details Uses poll(0)+read; does not change the descriptor's blocking
+     *          mode. Used to extend a TCP TX batch after an awaited ReadPacketInto.
+     *          Must not race an outstanding async_read on this device.
      */
-    struct SlotBuffer
-    {
-        std::uint8_t *buf;    ///< Writable destination buffer
-        std::size_t capacity; ///< Available bytes in buf
-        std::size_t len = 0;  ///< Output: bytes actually read
-    };
-
-    /**
-     * @brief Read a batch of packets directly into caller-provided buffers (zero-copy).
-     *
-     * Each element in @p slots points to a writable buffer. The first read uses
-     * async_read_some (ASIO/epoll integration); remaining reads are non-blocking drain.
-     *
-     * @param slots Array of SlotBuffer — one per potential packet
-     * @return Number of packets read; for each i in [0, N), slots[i].len is set
-     * @throws asio::system_error on I/O error
-     */
-    asio::awaitable<std::size_t> ReadBatchInto(std::span<SlotBuffer> slots);
+    std::size_t TryReadPacketInto(std::span<std::uint8_t> dest);
 
     /**
      * @brief Write packet to TUN device (async)
@@ -262,26 +247,17 @@ class TunDevice
     asio::awaitable<void> WritePacket(const IpPacket &pkt);
 
     /**
-     * @brief Batch-write multiple IP packets to TUN via writev(2)
-     *
-     * Collects all packet spans into a single writev() syscall for minimal
-     * per-packet overhead. Synchronous (non-coroutine) — suitable for the
-     * zero-copy inbound arena path where we want to avoid coroutine overhead.
-     *
-     * @param iovecs Array of iovec structs pointing at decrypted IP packets.
-     *               Caller retains ownership of the underlying buffers.
-     * @param count  Number of iovecs
-     * @return Number of bytes written, or -1 on error
-     * @note The TUN device accepts one IP packet per write() call. writev()
-     *       with multiple iovecs concatenates them into a single packet, so
-     *       this method calls write() per-iovec for correctness.
+     * @brief Write raw IP bytes to TUN (async), no intermediate IpPacket copy.
+     * @param data Non-empty IPv4/IPv6 packet bytes
      */
-    std::size_t WriteBatchRaw(const struct iovec *iovecs, std::size_t count);
+    asio::awaitable<void> WritePacket(std::span<const std::uint8_t> data);
 
     /**
-     * @brief Get the native file descriptor of the TUN device
+     * @brief Borrow the native TUN file descriptor
      *
-     * Useful for synchronous I/O (e.g., ::write / ::writev) on the arena path.
+     * Supported escape hatch for high-PPS paths (non-blocking `::read` /
+     * `::write`, caller-owned `dup` + Asio wait). TunDevice retains ownership;
+     * do not close this fd.
      *
      * @return Native fd, or -1 if not open
      */
@@ -301,9 +277,8 @@ class TunDevice
     std::uint16_t mtu_ = DEFAULT_MTU;
 
     /**
-     * Read buffer — shared by ReadPacket() and ReadBatch().
-     * Invariant: only one coroutine reads from the TUN fd at a time.
-     * If multi-queue TUN is added later, each queue needs its own buffer.
+     * Read buffer for ReadPacket().
+     * Invariant: only one coroutine reads via the owning stream_ at a time.
      */
     std::array<std::uint8_t, MAX_PACKET_SIZE> read_buffer_;
 };

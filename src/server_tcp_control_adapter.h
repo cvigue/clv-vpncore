@@ -51,7 +51,8 @@ class ServerTcpTransport : public ServerControlBase<ServerTcpTransport>
                                                                             config_->server->keepalive.first,
                                                                             config_->server->keepalive.second,
                                                                             *running_,
-                                                                            data_adapter_)
+                                                                            data_adapter_,
+                                                                            config_->performance)
     {
     }
 

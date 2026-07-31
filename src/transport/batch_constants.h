@@ -19,6 +19,11 @@ inline constexpr std::size_t kMaxBatchSize = 4096;
 /** Default runtime batch size when not specified in config. */
 inline constexpr std::size_t kDefaultBatchSize = 4096;
 
+/** TCP SendRaw coalesce / TUN-pending defaults when config uses 0 (= path default). */
+inline constexpr std::size_t kDefaultTcpSendBatch = 16;
+inline constexpr std::size_t kDefaultTcpSmallPktFlush = 0; // 0 = disabled
+inline constexpr std::size_t kDefaultTcpRxProcessBatch = 0; // 0 = no mid-peel count cap
+
 /** Maximum UDP datagram size (matches OpenVPN practical limit). */
 inline constexpr std::size_t kMaxDatagram = 2048;
 
@@ -32,6 +37,15 @@ inline std::size_t EffectiveBatchSize(int configValue)
     if (configValue <= 0)
         return kDefaultBatchSize;
     return std::min(static_cast<std::size_t>(configValue), kMaxBatchSize);
+}
+
+/**
+ * Map a non-negative config int to a size: @p when_zero if @p config_value <= 0,
+ * otherwise the configured value.
+ */
+inline std::size_t EffectivePositiveCount(int config_value, std::size_t when_zero)
+{
+    return config_value > 0 ? static_cast<std::size_t>(config_value) : when_zero;
 }
 
 } // namespace clv::vpn::transport

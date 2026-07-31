@@ -49,8 +49,8 @@
         "socket_send_buffer": 4194304,
         "batch_size": 4096,
         "tx_drain_depth": 1024,
-        "tx_send_batch": 8,
-        "tx_small_pkt_flush": 128,
+        "tx_send_batch": 64,
+        "tx_small_pkt_flush": 384,
         "max_recv": 4096,
         "rx_process_batch": 64
     },
